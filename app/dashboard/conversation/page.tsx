@@ -5,6 +5,7 @@ import { LuBot } from 'react-icons/lu'
 import { FiUser, FiSend } from 'react-icons/fi'
 import { MdBarChart } from 'react-icons/md'
 import { PiGraphLight } from 'react-icons/pi'
+import AgentList from '@/components/ui/AgentList'
 
 type Bot = {
   id: string
@@ -18,11 +19,7 @@ type Message = {
   nodes?: number
 }
 
-const BOTS: Bot[] = [
-  { id: '1', name: 'test' },
-  { id: '2', name: 'mani' },
-  { id: '3', name: 'test' },
-]
+
 
 const AGENT_RESPONSE = (userInput: string): Message => ({
   role: 'assistant',
@@ -32,7 +29,7 @@ const AGENT_RESPONSE = (userInput: string): Message => ({
 })
 
 export default function ChatPlaygroundPage() {
-  const [selectedBot, setSelectedBot] = useState<string>(BOTS[0].id)
+  
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [confidence] = useState(94)
@@ -46,7 +43,7 @@ export default function ChatPlaygroundPage() {
   // Reset chat when bot changes
   useEffect(() => {
     setMessages([])
-  }, [selectedBot])
+  }, [])
 
   const handleSend = () => {
     const trimmed = input.trim()
@@ -66,7 +63,7 @@ export default function ChatPlaygroundPage() {
     if (e.key === 'Enter') handleSend()
   }
 
-  const selectedBotName = BOTS.find((b) => b.id === selectedBot)?.name ?? ''
+ // const selectedBotName = BOTS.find((b) => b.id === selectedBot)?.name ?? ''
 
   return (
     <Flex gap={4} style={{ height: 'calc(100vh - 120px)' }}>
@@ -88,27 +85,7 @@ export default function ChatPlaygroundPage() {
 
           {/* Bot dropdown */}
           <Box>
-            <NativeSelect.Root size="sm" width="160px">
-              <NativeSelect.Field
-                value={selectedBot}
-                onChange={(e) => setSelectedBot(e.target.value)}
-                style={{
-                  background: 'transparent',
-                  border: '1px solid #2d2d2d',
-                  color: '#fff',
-                  borderRadius: 8,
-                }}
-              >
-                {BOTS.map((bot) => (
-                  <option key={bot.id} value={bot.id}
-                    style={{ background: '#0d0d0d', color: '#fff' }}
-                  >
-                    {bot.name}
-                  </option>
-                ))}
-              </NativeSelect.Field>
-              <NativeSelect.Indicator />
-            </NativeSelect.Root>
+            <AgentList/>
           </Box>
         </Flex>
 
@@ -117,7 +94,7 @@ export default function ChatPlaygroundPage() {
           {messages.length === 0 && (
             <Flex flex={1} align="center" justify="center">
               <p style={{ fontSize: 13, color: '#ffffff' }}>
-                Send a message to start chatting with <span style={{ color: '#22c55e' }}>{selectedBotName}</span>
+                Send a message to start chatting with <span style={{ color: '#22c55e' }}></span>
               </p>
             </Flex>
           )}

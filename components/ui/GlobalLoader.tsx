@@ -26,9 +26,7 @@ export default function GlobalProvider({ children }: { children: ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <Providers>
-        <Suspense fallback={<Loader />}>
-          {children}
-        </Suspense>
+        {children}
       </Providers>
       <Toaster position="top-right" richColors />
       <ReactQueryDevtools initialIsOpen={false} />

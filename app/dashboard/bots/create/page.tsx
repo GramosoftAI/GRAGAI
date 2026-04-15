@@ -1,11 +1,17 @@
 "use client"
+import useAxios from '@/lib/hooks/useAxios';
 import { Flex, Box, Switch, Textarea, Button, Field, Input } from '@chakra-ui/react';
 import { useRouter } from 'next/navigation';
 import React, { useState } from 'react'
 import { IoArrowBackSharp } from "react-icons/io5";
 
 export default function CreateBotPage() {
+    const [createAgent]=useAxios({endpoint:"CREATEAGENT",successCb() {
+        router.back()
+    },})
     const router = useRouter()
+    const [name, setName] = useState('')
+   // const [description, setDescription] = useState('')
     const [activePersonality, setActivePersonality] = useState<string>('Friendly')
     const [memory, setMemory] = useState(true)
     const [reasoning, setReasoning] = useState(true)
@@ -14,6 +20,19 @@ export default function CreateBotPage() {
     )
 
     const buttons: string[] = ["Friendly", "Formal", "Sales", "Technical", "Concise"]
+
+    const handleSave = () => {
+        const payload = {
+            name,
+//description,
+            personality: activePersonality,
+            system_prompt: systemPrompt,
+            memory,
+            reasoning,
+        }
+        createAgent({data:payload})
+        console.log(payload)
+    }
 
     return (
         <Flex direction="column" gap={6} className='mb-10! max-w-[75%]!'>
@@ -39,6 +58,7 @@ export default function CreateBotPage() {
             <Field.Root>
                 <Field.Label className='text-white! font-semibold! mb-2!'>Bot Name</Field.Label>
                 <Input
+                    value={name}
                     placeholder="e.g. Support Agent"
                     style={{
                         background: 'transparent',
@@ -47,8 +67,10 @@ export default function CreateBotPage() {
                         borderRadius: 8,
                         padding: '10px 14px',
                     }}
+                    onChange={(e) => setName(e.target.value)}
                 />
             </Field.Root>
+
 
             {/* Personality */}
             <Field.Root>
@@ -158,7 +180,7 @@ export default function CreateBotPage() {
                     Cancel
                 </Button>
                 <Button
-                    onClick={() => {}}
+                    onClick={handleSave}
                     style={{ background: '#22c55e', color: '#000', fontWeight: 700, borderRadius: 8 }}
                 >
                     Create Bot

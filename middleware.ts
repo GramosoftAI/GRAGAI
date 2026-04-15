@@ -6,18 +6,18 @@ export function middleware(req: NextRequest) {
   if (pathname.startsWith("/_next") || pathname.startsWith("/api") || pathname.startsWith("/favicon")) {
     return NextResponse.next();
   }
-  const publicRoutes = ["/home","/auth/login", "/auth/register"];
-  if (publicRoutes.includes(pathname)) {
+  const publicRoutes = ["/home", "/auth/login", "/auth/register"];
+  if (publicRoutes.some(route => pathname === route || pathname === `${route}/`)) {
     return NextResponse.next();
   }
-  const key = process.env.AUTH_COOKIE_KEY || "AUTH_TOKEN";
-  const token = req.cookies.get(key)?.value;
-//   Commenting out the redirect to allow "login without access" (direct access)
-  if (!token) {
-    const url = req.nextUrl.clone();
-    url.pathname = "/home";
-    return NextResponse.redirect(url);
-  }
+  // const key = process.env.AUTH_COOKIE_KEY || "AUTH_TOKEN";
+  // const token = req.cookies.get(key)?.value;
+  
+  // if (!token) {
+  //   const url = req.nextUrl.clone();
+  //   url.pathname = "/home";
+  //   return NextResponse.redirect(url);
+  // }
   return NextResponse.next();
 }
 
