@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Custom Ant Design Notification Styles */
+.custom-toast-success {
+  background-color: #22c55e !important; /* Tailwind green-500 */
+}
+.custom-toast-success .ant-notification-notice-message,
+.custom-toast-success .ant-notification-notice-description,
+.custom-toast-success .ant-notification-notice-icon {
+  color: white !important;
+}
+.custom-toast-success .ant-notification-notice-close-icon {
+  color: white !important;
+}
+
+.custom-toast-error {
+  background-color: black !important;
+}
+.custom-toast-error .ant-notification-notice-message,
+.custom-toast-error .ant-notification-notice-description,
+.custom-toast-error .ant-notification-notice-icon {
+  color: #22c55e !important; /* Tailwind green-500 */
+}
+.custom-toast-error .ant-notification-notice-close-icon {
+  color: #22c55e !important;
+}
