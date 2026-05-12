@@ -318,29 +318,46 @@ class KnowledgeBaseService:
                 )
             logger.info(f"✅ Generated {len(embeddings)} embeddings")
 
-            # ============= STEP 4: EXTRACT ENTITIES FROM ALL CHUNKS =============
-            logger.info(f"🏷️ Extracting entities from {len(chunks)} chunks in parallel...")
+            # ============= STEP 4: EXTRACT ENTITIES AND TRIPLETS CONCURRENTLY =============
+            logger.info(f"🏷️ Starting concurrent extraction (Entities + Triplets) for {len(chunks)} chunks...")
             
             import asyncio
+            from ...core.triplet_extractor import TripletExtractor
             
-            # Extract entities from all chunks in parallel
-            tasks = [EntityExtractor.extract_entities(chunk_text) for chunk_text in chunks]
-            extraction_results = await asyncio.gather(*tasks)
+            # Feature flag check for triplets
+            use_triplets = settings.use_triplet_extraction
+            
+            # Prepare all extraction tasks
+            entity_tasks = [EntityExtractor.extract_entities(chunk_text) for chunk_text in chunks]
+            
+            triplet_tasks = []
+            if use_triplets:
+                extractor = TripletExtractor()
+                chunk_inputs = [{"chunk_id": f"idx_{i}", "text": chunks[i]} for i in range(len(chunks))]
+                triplet_tasks = [extractor.extract_from_chunk(c["chunk_id"], c["text"]) for c in chunk_inputs]
+            
+            # Run everything in parallel
+            all_results = await asyncio.gather(*entity_tasks, *triplet_tasks)
+            
+            # Split results back
+            entity_results = all_results[:len(chunks)]
+            triplet_results = all_results[len(chunks):] if use_triplets else []
             
             entities_by_chunk = {}
             all_entities = set()
             
-            for i, extracted_entities in enumerate(extraction_results):
+            for i, extracted_entities in enumerate(entity_results):
+                # OPTIMIZATION: Cap entities per chunk to 50 to prevent graph noise
+                capped_entities = extracted_entities[:50]
                 entities_by_chunk[i] = [
                     {"text": e.text, "type": e.entity_type, "confidence": e.confidence}
-                    for e in extracted_entities
+                    for e in capped_entities
                 ]
-                # Track all unique entities
-                for entity in extracted_entities:
+                for entity in capped_entities:
                     all_entities.add(f"{entity.text}|{entity.entity_type}")
 
             unique_entity_count = len(all_entities)
-            logger.info(f"✅ Extracted {unique_entity_count} unique entities in parallel")
+            logger.info(f"✅ Extracted {unique_entity_count} unique entities and {sum(len(r.triplets) for r in triplet_results)} triplets in parallel")
 
             # ============= STEP 5: BATCH CREATE CHUNK NODES IN NEO4J (OPTIMIZED) =============
             logger.info(f"⚡ Batch creating {len(chunks)} chunks in Neo4j...")
@@ -606,47 +623,27 @@ class KnowledgeBaseService:
             else:
                 logger.info(f"✅ Graph integrity validated")
 
-            # ============= STEP 10: TRIPLET EXTRACTION (Phase 4A — Feature-Flagged) =============
-            # POST-INGESTION HOOK: Extract (Subject, Predicate, Object) triplets
-            # SAFETY: Fully independent — if this fails, ingestion still succeeds
-            # ACTIVATION: Only runs when USE_TRIPLET_EXTRACTION=true in .env
+            # ============= STEP 10: TRIPLET PERSISTENCE (Phase 4A) =============
             triplet_stats = {"triplets_extracted": 0, "triplet_entities": 0, "triplet_relationships": 0}
-            if settings.use_triplet_extraction:
+            if use_triplets and triplet_results:
                 try:
-                    logger.info("🧩 Phase 4A: Triplet extraction starting (feature flag ON)...")
-                    from ...core.triplet_extractor import TripletExtractor, TripletGraphWriter
+                    logger.info("🧩 Phase 4A: Triplet persistence starting...")
+                    from ...core.triplet_extractor import TripletGraphWriter
+                    
+                    # Update triplet results with real chunk IDs (since they were extracted with temporary indices)
+                    for i, res in enumerate(triplet_results):
+                        res.chunk_id = chunk_ids[i]
 
-                    extractor = TripletExtractor()
                     writer = TripletGraphWriter(str(self.tenant_id))
-
-                    # Prepare chunk data for extraction
-                    chunk_inputs = [
-                        {"chunk_id": chunk_ids[i], "text": chunks[i]}
-                        for i in range(len(chunks))
-                    ]
-
-                    # Extract triplets from all chunks
-                    extraction_results = await extractor.extract_from_chunks_batch(chunk_inputs)
-
-                    # Persist triplets to graph (additive — new node/edge types only)
-                    persist_result = await writer.persist_triplets(extraction_results)
+                    persist_result = await writer.persist_triplets(triplet_results)
+                    
                     triplet_stats = {
                         "triplets_extracted": persist_result.get("triplets_created", 0),
                         "triplet_entities": persist_result.get("entities_created", 0),
                         "triplet_relationships": persist_result.get("relationships_created", 0),
                     }
-                    logger.info(
-                        f"✅ Phase 4A complete: {triplet_stats['triplets_extracted']} triplets, "
-                        f"{triplet_stats['triplet_entities']} entities, "
-                        f"{triplet_stats['triplet_relationships']} relationships"
-                    )
                 except Exception as triplet_error:
-                    # CRITICAL: Never block ingestion due to triplet failure
-                    logger.warning(
-                        f"⚠️ Triplet extraction failed (non-blocking): {triplet_error}"
-                    )
-            else:
-                logger.debug("🧩 Triplet extraction skipped (feature flag OFF)")
+                    logger.warning(f"⚠️ Triplet persistence failed: {triplet_error}")
 
             # ============= STEP 11: UPDATE KB METADATA =============
             await self.repository.increment_chunks(kb_id, len(chunks))

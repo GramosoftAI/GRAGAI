@@ -37,6 +37,8 @@ from .repository import ChatRepository
 from .models import ChatSession, ChatMessage
 from ..rag.service import RAGService
 from ..knowledge_bases.repository import KnowledgeBaseRepository
+from ...core.memory.consolidation import MemoryConsolidator
+from ...core.memory.personalization import PersonalMemoryService
 
 logger = logging.getLogger(__name__)
 
@@ -311,9 +313,9 @@ class ChatService:
                 augmented_query = message
                 memory_used = False
 
-        # ============= STEP 4: RESOLVE KB (Auto: 1 Agent = 1 KB) =============
-        kb = await self.kb_repo.get_one_by_agent(agent_id)
-        if not kb:
+        # ============= STEP 4: RESOLVE KBs (Agent can own multiple KBs) =============
+        kbs, _ = await self.kb_repo.list_by_agent(agent_id, limit=10)
+        if not kbs:
             # Save error as assistant message
             error_msg = "No knowledge base found for this agent. Please add a knowledge base first."
             await self.chat_repo.add_message(
@@ -334,13 +336,16 @@ class ChatService:
                 "conversation_turns": conversation_turns,
             }
 
+        kb_ids = [str(kb.id) for kb in kbs]
+
         # ============= STEP 5: CALL RAG SERVICE (EXISTING - UNTOUCHED) =============
         logger.debug("Calling RAGService.generate_answer() with augmented query...")
         try:
             rag_response = await self.rag_service.generate_answer(
                 query=augmented_query,
                 agent_id=agent_id,
-                kb_id=str(kb.id),
+                kb_id=kb_ids,
+                user_id=user_id,
                 top_k=top_k,
                 max_depth=max_depth,
             )
@@ -410,6 +415,41 @@ class ChatService:
             f"answer_len={len(answer)}, sources={len(sources)}, "
             f"memory={'ON' if memory_used else 'OFF'}"
         )
+
+        # ============= STEP 9: MEMORY CONSOLIDATION (Pattern #11) =============
+        # Trigger background consolidation to update Knowledge Graph with new facts
+        # Feature-flagged: Only runs if triplet extraction is enabled
+        from ...core.config import get_settings
+        settings = get_settings()
+
+        if settings.use_triplet_extraction:
+            try:
+                import asyncio
+                consolidator = MemoryConsolidator(self.tenant_id)
+                # Run as fire-and-forget background task
+                asyncio.create_task(
+                    consolidator.consolidate_interaction(
+                        user_message=message,
+                        assistant_message=answer,
+                        session_id=session_id
+                    )
+                )
+                logger.debug(f"🧠 Consolidation task triggered for session {session_id}")
+                
+                # --- ADDED: Personal Memory (Mem0 Pattern) ---
+                if settings.use_personal_memory:
+                    personal_memory = PersonalMemoryService(self.tenant_id)
+                    asyncio.create_task(
+                        personal_memory.add_memory(
+                            user_id=user_id,
+                            message=message
+                        )
+                    )
+                    logger.debug(f"👤 Personal memory task triggered for user {user_id[:8]}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to trigger memory consolidation: {e}")
+        else:
+            logger.debug("🧠 Memory consolidation skipped (feature disabled in config)")
 
         return {
             "session_id": session_id,

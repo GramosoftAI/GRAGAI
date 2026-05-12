@@ -159,6 +159,17 @@ class Neo4jSchemaInitializer:
             CREATE CONSTRAINT entity_unique_per_tenant IF NOT EXISTS
             FOR (e:Entity) REQUIRE (e.tenant_id, e.normalized_name) IS UNIQUE
             """,
+            # ========== TRIPLET ENTITY CONSTRAINTS ==========
+            # CRITICAL: Prevents duplicate triplet entities
+            """
+            CREATE CONSTRAINT triplet_entity_unique_per_tenant IF NOT EXISTS
+            FOR (e:TripletEntity) REQUIRE (e.tenant_id, e.text, e.type) IS UNIQUE
+            """,
+            # Triplet: unique ID
+            """
+            CREATE CONSTRAINT triplet_id_unique IF NOT EXISTS
+            FOR (t:Triplet) REQUIRE t.id IS UNIQUE
+            """,
         ]
 
         logger.info("📌 Creating constraints...")
@@ -212,6 +223,20 @@ class Neo4jSchemaInitializer:
             CREATE INDEX entity_tenant_idx IF NOT EXISTS
             FOR (e:Entity) ON (e.tenant_id)
             """,
+            # Composite index for faster Entity lookup/MERGE
+            """
+            CREATE INDEX entity_lookup_idx IF NOT EXISTS
+            FOR (e:Entity) ON (e.tenant_id, e.text, e.type)
+            """,
+            # TripletEntity indexes
+            """
+            CREATE INDEX triplet_entity_tenant_idx IF NOT EXISTS
+            FOR (e:TripletEntity) ON (e.tenant_id)
+            """,
+            """
+            CREATE INDEX triplet_entity_lookup_idx IF NOT EXISTS
+            FOR (e:TripletEntity) ON (e.tenant_id, e.text, e.type)
+            """,
             # ========== COMPOSITE INDEXES: TENANT + HIERARCHY ==========
             # CRITICAL: (tenant_id, agent_id) on Chunk
             # Most common RAG query: find chunks for specific agent in tenant
@@ -257,6 +282,19 @@ class Neo4jSchemaInitializer:
             """
             CREATE INDEX entity_type_idx IF NOT EXISTS
             FOR (e:Entity) ON (e.type)
+            """,
+            # Triplet indexes
+            """
+            CREATE INDEX triplet_tenant_idx IF NOT EXISTS
+            FOR (t:Triplet) ON (t.tenant_id)
+            """,
+            """
+            CREATE INDEX triplet_chunk_idx IF NOT EXISTS
+            FOR (t:Triplet) ON (t.chunk_id)
+            """,
+            """
+            CREATE INDEX triplet_tenant_chunk_idx IF NOT EXISTS
+            FOR (t:Triplet) ON (t.tenant_id, t.chunk_id)
             """,
             # ========== VECTOR INDEX: RAG SEMANTIC SEARCH ==========
             # CRITICAL for Phase 5 (Graph RAG Pipeline)

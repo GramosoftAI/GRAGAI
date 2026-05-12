@@ -54,15 +54,15 @@ class EntityExtractor:
             r"\b(?:Mr|Ms|Dr|Prof|Sir|Lady)\s+[A-Z][a-z]+\b",  # Titles
         ],
         "ORGANIZATION": [
-            r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Inc|LLC|Corp|Ltd|Co|Corporation)\b",  # Company names
-            r"\b[A-Z]{3,}\b",  # Acronyms (3+ letters to reduce noise)
+            r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Inc|LLC|Corp|Ltd|Co|Corporation|GmbH|SA|AG)\b",  # Company names
+            r"\b[A-Z]{4,10}\b",  # Acronyms (4-10 letters, reduced noise from 3rd letter)
         ],
         "LOCATION": [
-            r"\b(?:City|County|State|Province|Country|Mountain|River|Lake|Ocean)\s+[A-Z][a-z]+\b",
+            r"\b(?:City|County|State|Province|Country|Mountain|River|Lake|Ocean|Sea|Bay)\s+[A-Z][a-z]+\b",
             r"\b[A-Z][a-z]+,\s+[A-Z]{2}\b",  # City, State format
         ],
         "CONCEPT": [
-            r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+(?:Model|Algorithm|Framework|Theory|Architecture|System))\b", # Specific concepts
+            r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\s+(?:Model|Algorithm|Framework|Theory|Architecture|System|Protocol|Engine|Service)\b", # Specific concepts
         ],
     }
 

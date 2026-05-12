@@ -130,6 +130,7 @@ class Settings(BaseSettings):
     use_triplet_extraction: bool = False  # Phase 4A: Enable triplet graph construction
     triplet_max_per_chunk: int = 10  # Max triplets to extract per chunk
     triplet_retrieval_top_k: int = 10  # Triplets to retrieve during RAG query
+    use_personal_memory: bool = False  # Phase 5: Enable user-specific personalization (Mem0 Pattern)
 
     # ============= SIMILARITY SEARCH CONFIG =============
     # Hybrid mode: Use O(n²) for small KBs, vector index for large
@@ -223,6 +224,7 @@ class Settings(BaseSettings):
         logger.info(f"  use_real_embeddings: {embedding_mode}")
         logger.info(f"  use_llm_entity_extraction: {entity_extraction_mode}")
         logger.info(f"  use_triplet_extraction: {triplet_mode}")
+        logger.info(f"  use_personal_memory: {self.use_personal_memory}")
         logger.info(
             f"  similarity_brute_force_threshold: {self.similarity_brute_force_threshold} chunks"
         )

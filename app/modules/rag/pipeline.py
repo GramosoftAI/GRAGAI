@@ -4,7 +4,7 @@ Phase 2 Step 4: Transforms Graph Intelligence into Production RAG
 """
 
 import logging
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Tuple, Set, Optional
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -41,6 +41,8 @@ class RAGContext:
     total_tokens: int
     triplet_context: str = ""  # Phase 4A: Formatted triplet relationships (additive)
     triplets: List[Dict] = None  # Raw triplets for metadata
+    search_type: str = "DEFAULT" # The strategy selected by the router
+    personal_memories: List[str] = None # Phase 5: Personal user context (Mem0)
 
 
 class RAGPipeline:
@@ -78,7 +80,8 @@ class RAGPipeline:
         self,
         query: str,
         agent_id: str,
-        kb_id: str,
+        kb_id: str | list[str],
+        user_id: Optional[str] = None,
         top_k: int = 10,
         max_depth: int = 2,
         max_tokens: int = 3000,
@@ -108,8 +111,11 @@ class RAGPipeline:
             f"🧠 RAG Query: agent={agent_id}, kb={kb_id}, query_len={len(query)}"
         )
 
+        # Normalize kb_id to a list for uniform processing
+        kb_ids = [kb_id] if isinstance(kb_id, str) else kb_id
+
         # STEP 0: ROUTE QUERY TO OPTIMAL SEARCH STRATEGY
-        search_type = self.router.route_query(query)
+        search_type = await self.router.route_query(query)
         logger.info(f"🚦 Query Router selected strategy: {search_type.name}")
 
         # Dynamically adjust retrieval parameters based on the chosen strategy
@@ -123,32 +129,80 @@ class RAGPipeline:
         elif search_type == SearchType.CHAIN_OF_THOUGHT:
             max_depth = max(max_depth, 3)  # Deeper traversal for complex reasoning
             logger.info("   -> Optimizing for CHAIN_OF_THOUGHT: Increasing graph expansion depth.")
+        elif search_type == SearchType.MEMORY_ONLY:
+            # For memory-only queries, we prioritize consolidated triplets from chat
+            top_k = 5
+            max_depth = 1
+            logger.info("   -> Optimizing for MEMORY_ONLY: Targeting consolidated chat facts.")
+        elif search_type == SearchType.ENTITY_CONNECTION:
+            max_depth = max(max_depth, 2)
+            top_k = 20 # Broader search to find the bridge
+            logger.info("   -> Optimizing for ENTITY_CONNECTION: Broadening search for relationship paths.")
+        elif search_type == SearchType.SOCIAL:
+            # For social interactions, we don't need many chunks, but we want to allow conversation
+            top_k = 1
+            max_depth = 0
+            logger.info("   -> Optimizing for SOCIAL: Enabling conversational mode.")
 
         # STEP 1: GENERATE QUERY EMBEDDING
         logger.debug("Step 1: Generating query embedding...")
         query_embedding = await EmbeddingGenerator.generate_embedding(query)
         logger.debug(f"✅ Query embedding generated ({len(query_embedding)} dims)")
 
+        # STEP 1.5: PERSONAL MEMORY RETRIEVAL (Phase 5 — Feature-Flagged)
+        personal_memories = []
+        if self.settings.use_personal_memory and user_id:
+            try:
+                from app.core.memory.personalization import PersonalMemoryService
+                pm_service = PersonalMemoryService(self.tenant_id)
+                personal_memories = await pm_service.get_relevant_memories(
+                    user_id=user_id,
+                    query_embedding=query_embedding,
+                    top_k=3
+                )
+                if personal_memories:
+                    logger.info(f"✅ Retrieved {len(personal_memories)} personal memories for user {user_id[:8]}")
+            except Exception as e:
+                logger.warning(f"⚠️ Personal memory retrieval failed (non-blocking): {e}")
+
         # STEP 2: RETRIEVE SEED CHUNKS (SEMANTIC SIMILARITY)
-        logger.info(f"Step 2: Retrieving top-{top_k} seed chunks for KB {kb_id}...")
+        logger.info(f"Step 2: Retrieving top-{top_k} seed chunks for KBs {kb_ids}...")
         seed_chunks = await self._retrieve_seed_chunks(
-            kb_id=kb_id,
+            kb_ids=kb_ids,
             query_embedding=query_embedding,
             top_k=top_k,
         )
         
         if not seed_chunks:
             # DIAGNOSTIC: Check if any chunks exist at all
-            all_chunks_query = "MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})-[:HAS_CHUNK]->(c) RETURN count(c) as count"
+            all_chunks_query = "MATCH (kb:KnowledgeBase)-[:HAS_CHUNK]->(c) WHERE kb.id IN $kb_ids AND kb.tenant_id = $tenant_id RETURN count(c) as count"
             count_res = await self.neo4j_repo.execute_read(
                 all_chunks_query, 
-                {"kb_id": kb_id, "tenant_id": self.tenant_id}
+                {"kb_ids": kb_ids, "tenant_id": self.tenant_id}
             )
             chunk_count = count_res[0]["count"] if count_res else 0
             
             logger.warning(f"⚠️ No seed chunks found! Total chunks in DB for this KB: {chunk_count}")
+            
+            # If it's a SOCIAL query, we don't fail, we just continue to allow conversational response
+            if search_type == SearchType.SOCIAL:
+                logger.info("🚦 Continuing with empty context for SOCIAL query.")
+                return RAGContext(
+                    query=query, 
+                    chunks=[], 
+                    entity_mentions={}, 
+                    total_tokens=0,
+                    personal_memories=personal_memories,
+                    search_type=search_type.name
+                )
+
             return RAGContext(
-                query=query, chunks=[], entity_mentions={}, total_tokens=0
+                query=query, 
+                chunks=[], 
+                entity_mentions={}, 
+                total_tokens=0,
+                personal_memories=personal_memories,
+                search_type=search_type.name
             )
 
         logger.info(f"✅ Retrieved {len(seed_chunks)} seed chunks")
@@ -201,7 +255,7 @@ class RAGPipeline:
                 retriever = TripletRetriever(self.tenant_id)
                 relevant_triplets = await retriever.search_triplets(
                     query_embedding=query_embedding,
-                    kb_id=kb_id,
+                    kb_ids=kb_ids,
                     top_k=self.settings.triplet_retrieval_top_k,
                 )
                 if relevant_triplets:
@@ -224,11 +278,13 @@ class RAGPipeline:
             total_tokens=int(total_tokens),
             triplet_context=triplet_context,
             triplets=relevant_triplets if 'relevant_triplets' in locals() else None,
+            search_type=search_type.name,
+            personal_memories=personal_memories
         )
 
     async def _retrieve_seed_chunks(
         self,
-        kb_id: str,
+        kb_ids: List[str],
         query_embedding: List[float],
         top_k: int,
     ) -> List[Dict]:
@@ -247,7 +303,8 @@ class RAGPipeline:
             List of chunks sorted by similarity (highest first)
         """
         query = """
-        MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+        MATCH (kb:KnowledgeBase)
+        WHERE kb.id IN $kb_ids AND kb.tenant_id = $tenant_id
         MATCH (kb)-[:HAS_CHUNK]->(c:Chunk)
         WHERE c.embedding IS NOT NULL AND size(c.embedding) = $dimension
         RETURN c.id as chunk_id, c.text as text, c.position as position, c.kb_id as kb_id, c.embedding as embedding, coalesce(c.weight, 1.0) as weight
@@ -258,7 +315,7 @@ class RAGPipeline:
             results = await self.neo4j_repo.execute_read(
                 query,
                 {
-                    "kb_id": kb_id, 
+                    "kb_ids": kb_ids, 
                     "tenant_id": self.tenant_id,
                     "dimension": EmbeddingGenerator.get_dimension()
                 },

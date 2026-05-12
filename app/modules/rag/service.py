@@ -92,13 +92,15 @@ class RAGService:
         # Initialize core components
         self.pipeline = RAGPipeline(self.tenant_id)
         self.kb_repo = KnowledgeBaseRepository(db, self.tenant_id)
+        self.agent_repo = AgentRepository(db, self.tenant_id)
         self.llm_client = DeepInfraLLMClient()
 
     async def stream_rag_answer(
         self,
         query: str,
         agent_id: str,
-        kb_id: str,
+        kb_id: str | list[str],
+        user_id: Optional[str] = None,
         top_k: int = 10,
         max_depth: int = 2,
     ):
@@ -109,17 +111,24 @@ class RAGService:
         logger.info(f"🧠 RAG Service: Streaming answer for agent={agent_id}, kb={kb_id}")
 
         # 1. Validate KB ownership
-        kb = await self.kb_repo.get_by_id(kb_id)
+        kb_ids = [kb_id] if isinstance(kb_id, str) else kb_id
+        
+        # We'll just verify the first one exists and belongs to the agent for security
+        # (The pipeline will filter by these IDs anyway)
+        kb = await self.kb_repo.get_by_id(kb_ids[0])
         if not kb:
-            yield json.dumps({"error": "Knowledge Base not found"})
+            yield json.dumps({"error": f"Knowledge Base {kb_ids[0]} not found"})
             return
         if str(kb.agent_id) != str(agent_id):
-            yield json.dumps({"error": "Unauthorized"})
+            yield json.dumps({"error": "Unauthorized: Agent does not own this Knowledge Base"})
             return
+            
+        # Optional: Log if multiple KBs are being used
+        if len(kb_ids) > 1:
+            logger.info(f"📚 Querying across {len(kb_ids)} Knowledge Bases for agent {agent_id}")
 
         # Fetch Agent details for persona branding (system_prompt, description)
-        agent_repo = AgentRepository(self.db, self.tenant_id)
-        agent = await agent_repo.get_by_id(agent_id)
+        agent = await self.agent_repo.get_by_id(agent_id)
         
         base_prompt = agent.system_prompt or ""
         personality_description = agent.personality or "You are a warm, approachable, and supportive assistant." # Fallback
@@ -155,7 +164,8 @@ Base Instruction:
                 self.pipeline.query(
                     query=query,
                     agent_id=agent_id,
-                    kb_id=kb_id,
+                    kb_id=kb_ids,
+                    user_id=user_id,
                     top_k=top_k,
                     max_depth=max_depth,
                 ),
@@ -177,7 +187,7 @@ Base Instruction:
                 {"subject": t["subject"], "predicate": t["predicate"], "object": t["object"]}
                 for t in (context.triplets or [])
             ],
-            "kb_name": kb.name
+            "kb_name": kb.name if len(kb_ids) == 1 else f"Multi-KB ({len(kb_ids)})"
         }
         yield json.dumps(metadata)
 
@@ -200,7 +210,8 @@ Base Instruction:
         self,
         query: str,
         agent_id: str,
-        kb_id: str,
+        kb_id: str | list[str],
+        user_id: Optional[str] = None,
         top_k: int = 10,
         max_depth: int = 2,
         reasoning_enabled: bool = True,
@@ -227,6 +238,7 @@ Base Instruction:
             query: User query string
             agent_id: Agent UUID (ownership verification)
             kb_id: Knowledge Base UUID
+            user_id: User UUID (for personalized memory retrieval)
             top_k: Initial seed chunks
             max_depth: Graph expansion depth
 
@@ -242,18 +254,20 @@ Base Instruction:
         )
 
         # ============= STEP 1: VALIDATION: KB ownership (required for cache key with version) =============
+        kb_ids = [kb_id] if isinstance(kb_id, str) else kb_id
+        
         logger.debug("Validating KB ownership...")
-        kb = await self.kb_repo.get_by_id(kb_id)
+        kb = await self.kb_repo.get_by_id(kb_ids[0])
         if not kb:
-            logger.error(f"❌ KB {kb_id} not found")
+            logger.error(f"❌ KB {kb_ids[0]} not found")
             return {
-                "error": "Knowledge Base not found",
+                "error": f"Knowledge Base {kb_ids[0]} not found",
                 "answer": None,
                 "sources": [],
             }
 
         if str(kb.agent_id) != str(agent_id):
-            logger.error(f"❌ Agent {agent_id} does not own KB {kb_id}")
+            logger.error(f"❌ Agent {agent_id} does not own KB {kb_ids[0]}")
             return {
                 "error": "Unauthorized: Agent does not own this Knowledge Base",
                 "answer": None,
@@ -263,8 +277,7 @@ Base Instruction:
         logger.info(f"✅ KB ownership verified: {kb.name}")
 
         # Fetch Agent details for persona branding (system_prompt, description)
-        agent_repo = AgentRepository(self.db, self.tenant_id)
-        agent = await agent_repo.get_by_id(agent_id)
+        agent = await self.agent_repo.get_by_id(agent_id)
         
         base_prompt = agent.system_prompt or ""
         personality_description = agent.personality or "You are a warm, approachable, and supportive assistant." # Fallback
@@ -297,7 +310,7 @@ Base Instruction:
         # ============= STEP 2: CHECK CACHE (with KB version for auto-invalidation) =============
         logger.debug("Checking result cache...")
         cache_key = self._make_cache_key(
-            query, agent_id, kb_id, kb_version=kb.total_chunks
+            query, agent_id, "|".join(kb_ids), kb_version=kb.total_chunks
         )
         cached_response = self._get_cached_response(cache_key)
         if cached_response:
@@ -323,6 +336,7 @@ Base Instruction:
                     query=query,
                     agent_id=agent_id,
                     kb_id=kb_id,
+                    user_id=user_id,
                     top_k=top_k,
                     max_depth=max_depth,
                 ),
@@ -338,7 +352,7 @@ Base Instruction:
             try:
                 query_embedding = await EmbeddingGenerator.generate_embedding(query)
                 seed_chunks = await self.pipeline._retrieve_seed_chunks(
-                    kb_id=kb_id,
+                    kb_ids=kb_ids,
                     query_embedding=query_embedding,
                     top_k=top_k,
                 )
@@ -397,10 +411,14 @@ Base Instruction:
             }
 
         # ============= STEP 3.5: CHECK IF CONTEXT IS EMPTY =============
-        if not context or not context.chunks:
-            logger.info("Empty context retrieved, returning fallback message.")
+        # EXCEPTION: If the router identified this as a SOCIAL query (greeting),
+        # we proceed to the LLM to provide a human-like response even with no context.
+        is_social = context.search_type == "SOCIAL" if context else False
+        
+        if (not context or not context.chunks) and not is_social:
+            logger.info("Empty context retrieved and not social, returning fallback message.")
             return {
-                "answer": "I’m sorry, but the requested information is not available within my current knowledge base. Please try a related query or provide additional context.",
+                "answer": "I’m sorry, but I don't have that specific information in my current knowledge base.",
                 "sources": [],
                 "context": {
                     "kb_id": kb_id,
@@ -415,11 +433,15 @@ Base Instruction:
                     "entity_count": 0,
                     "llm_tokens": 0,
                     "llm_source": "Fallback",
+                    "search_strategy": context.search_type if context else "DEFAULT",
                 },
                 "confidence": 0.0,
                 "nodes_used": 0,
                 "reasoning_path": "No relevant knowledge found in graph to answer this question.",
             }
+        
+        if is_social and (not context or not context.chunks):
+            logger.info("Social query detected with empty context, proceeding to LLM for conversational response.")
 
         # ============= STEP 4: FORMAT CONTEXT FOR LLM =============
         logger.debug("Formatting context for LLM...")
@@ -473,7 +495,7 @@ Base Instruction:
             "sources": sources,
             "context": {
                 "kb_id": kb_id,
-                "kb_name": kb.name,
+                "kb_name": kb.name if len(kb_ids) == 1 else "Multi-Source Context",
                 "chunks_used": len(context.chunks),
                 "entities_mentioned": list(context.entity_mentions.keys()),
                 "reasoning_path": reasoning_path,
@@ -485,6 +507,7 @@ Base Instruction:
                 "llm_tokens": llm_response.total_tokens,
                 "llm_source": llm_response.source,
                 "llm_prompt_version": llm_response.prompt_version,
+                "search_strategy": context.search_type,
             },
             "confidence": confidence,
             "nodes_used": nodes_used,
@@ -612,37 +635,29 @@ Base Instruction:
         Returns:
             Formatted context string
         """
-        sections = []
-
-        # Add source KB and query
-        sections.append(f"QUERY: {context.query}\n")
-        sections.append("=" * 60)
-        sections.append("CONTEXT (from Knowledge Base):\n")
+        context_text = f"QUERY: {context.query}\n" + "=" * 60 + "\nCONTEXT (from Knowledge Base):\n"
 
         # Add chunks with position
         for i, chunk in enumerate(context.chunks, 1):
-            sections.append(
-                f"\n[Chunk {i}/{len(context.chunks)} - Position {chunk.position}]"
-            )
-            sections.append(
-                f"Score: {chunk.hybrid_score:.3f} (Semantic: {chunk.embedding_similarity:.3f}, Graph: {chunk.graph_score:.3f})"
-            )
-            sections.append("-" * 40)
-            sections.append(chunk.text)
+            context_text += f"\n[Chunk {i}/{len(context.chunks)} - Position {chunk.position}]"
+            context_text += f"\nScore: {chunk.hybrid_score:.3f} (Semantic: {chunk.embedding_similarity:.3f}, Graph: {chunk.graph_score:.3f})"
+            context_text += f"\n{'-' * 40}\n{chunk.text}\n"
 
         # Add entity mentions summary
         if context.entity_mentions:
-            sections.append("\n" + "=" * 60)
-            sections.append("ENTITIES MENTIONED:\n")
+            context_text += "\n" + "=" * 60 + "\nENTITIES MENTIONED:\n"
             for entity, chunk_ids in context.entity_mentions.items():
-                sections.append(f"- {entity} (mentioned in {len(chunk_ids)} chunks)")
+                context_text += f"- {entity} (mentioned in {len(chunk_ids)} chunks)\n"
 
         # Phase 4A: Add triplet-derived knowledge graph relationships
         if context.triplet_context:
-            sections.append("\n" + "=" * 60)
-            sections.append(context.triplet_context)
+            context_text += f"\n[KNOWLEDGE GRAPH RELATIONSHIPS]:\n{context.triplet_context}\n"
 
-        return "\n".join(sections)
+        if context.personal_memories:
+            pm_text = "\n".join([f"- {m}" for m in context.personal_memories])
+            context_text += f"\n[USER PERSONAL PREFERENCES & HABITS]:\n{pm_text}\n"
+
+        return context_text
 
     async def process_feedback(self, chunk_ids: list[str], rating: int) -> None:
         """

@@ -148,17 +148,20 @@ async def rag_query(
     # EXECUTE RAG PIPELINE
     logger.debug("Executing RAG pipeline...")
     try:
-        # AUTO-RESOLVE KB: Since 1 Agent = 1 KB
+        # AUTO-RESOLVE KBs: Fetch all knowledge bases owned by this agent
         from ..knowledge_bases.repository import KnowledgeBaseRepository
         kb_repo = KnowledgeBaseRepository(db, tenant_id)
-        kb = await kb_repo.get_one_by_agent(agent_id)
-        if not kb:
-            raise HTTPException(status_code=404, detail="Primary knowledge base not found for this agent.")
-
+        kbs, _ = await kb_repo.list_by_agent(agent_id, limit=10)
+        
+        if not kbs:
+            raise HTTPException(status_code=404, detail="No knowledge bases found for this agent.")
+ 
+        kb_ids = [str(kb.id) for kb in kbs]
+        
         response = await rag_service.generate_answer(
             query=query_request.query,
             agent_id=agent_id,
-            kb_id=str(kb.id),
+            kb_id=kb_ids,
             top_k=query_request.top_k or 10,
             max_depth=query_request.max_depth or 2,
             reasoning_enabled=(query_request.Reasoning == "True"),

@@ -173,22 +173,22 @@ class EmbeddingGenerator:
     @staticmethod
     async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
         """
-        Generate embeddings for multiple texts (optimized).
-
-        Phase 3: Use batch API endpoint for efficiency.
-
+        Generate embeddings for multiple texts in parallel (Phase 3.5).
+        
         Args:
             texts: List of texts to embed
-
+            
         Returns:
-            List of embeddings
+            List of embeddings (optimized via asyncio.gather in client)
         """
-        embeddings = []
-        for text in texts:
-            embedding = await EmbeddingGenerator.generate_embedding(text)
-            embeddings.append(embedding)
-
-        return embeddings
+        if not texts:
+            return []
+            
+        # Get DeepInfra client (singleton)
+        client = _get_deepinfra_client()
+        
+        # Call optimized parallel batch method
+        return await client.generate_embeddings_batch(texts)
 
     @staticmethod
     def cosine_similarity(embedding1: List[float], embedding2: List[float]) -> float:

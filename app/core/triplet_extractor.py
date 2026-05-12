@@ -565,7 +565,7 @@ class TripletRetriever:
     async def search_triplets(
         self,
         query_embedding: List[float],
-        kb_id: str,
+        kb_ids: List[str],
         top_k: int = 10,
     ) -> List[Dict]:
         """
@@ -579,14 +579,27 @@ class TripletRetriever:
         Returns:
             List of triplet dicts with text, subject, predicate, object, score
         """
-        # Get triplets linked to chunks in this KB
+        # Get triplets linked to chunks in this KB OR memory-based triplets (not linked to KB)
         query = """
-        MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+        // Part 1: KB-linked triplets
+        MATCH (kb:KnowledgeBase)
+        WHERE kb.id IN $kb_ids AND kb.tenant_id = $tenant_id
         MATCH (kb)-[:HAS_CHUNK]->(c:Chunk)-[:HAS_TRIPLET]->(t:Triplet {tenant_id: $tenant_id})
         WHERE t.embedding IS NOT NULL AND size(t.embedding) = $dimension
         RETURN t.id as id, t.text as text, t.subject as subject,
                t.predicate as predicate, t.object as object,
                t.embedding as embedding, t.chunk_id as chunk_id
+        
+        UNION
+        
+        // Part 2: Floating memory-based triplets (e.g., from chat consolidation)
+        MATCH (t:Triplet {tenant_id: $tenant_id})
+        WHERE t.embedding IS NOT NULL AND size(t.embedding) = $dimension
+        AND NOT (t)<-[:HAS_TRIPLET]-(:Chunk)-[:HAS_CHUNK]-(:KnowledgeBase)
+        RETURN t.id as id, t.text as text, t.subject as subject,
+               t.predicate as predicate, t.object as object,
+               t.embedding as embedding, t.chunk_id as chunk_id
+        
         LIMIT 500
         """
 
@@ -594,7 +607,7 @@ class TripletRetriever:
             results = await self.neo4j_repo.execute_read(
                 query,
                 {
-                    "kb_id": kb_id,
+                    "kb_ids": kb_ids,
                     "tenant_id": self.tenant_id,
                     "dimension": EmbeddingGenerator.get_dimension(),
                 },

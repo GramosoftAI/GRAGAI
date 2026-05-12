@@ -72,20 +72,22 @@ async def rag_websocket(
             async with get_db_with_tenant(tenant_id) as db:
                 rag_service = RAGService(db=db, tenant_id=tenant_id)
                 
-                # AUTO-RESOLVE KB (Agent owns 1 KB by default in this architecture)
+                # AUTO-RESOLVE KBs (Agent can own multiple KBs)
                 from ..knowledge_bases.repository import KnowledgeBaseRepository
                 kb_repo = KnowledgeBaseRepository(db, tenant_id)
-                kb = await kb_repo.get_one_by_agent(agent_id)
+                kbs, _ = await kb_repo.list_by_agent(agent_id, limit=10) # Get up to 10 KBs
                 
-                if not kb:
+                if not kbs:
                     await websocket.send_text(json.dumps({"error": "Knowledge Base not found"}))
                     continue
+
+                kb_ids = [str(kb.id) for kb in kbs]
 
                 # 4. STREAM RESPONSE
                 async for chunk in rag_service.stream_rag_answer(
                     query=query,
                     agent_id=agent_id,
-                    kb_id=str(kb.id)
+                    kb_id=kb_ids
                 ):
                     # Check if chunk is JSON metadata or raw text
                     await websocket.send_text(chunk)

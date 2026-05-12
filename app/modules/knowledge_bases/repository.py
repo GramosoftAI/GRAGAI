@@ -190,24 +190,6 @@ class KnowledgeBaseRepository(BaseRepository):
         logger.info(f"Listed {len(kbs)} KBs for agent {agent_id} (total: {total})")
         return kbs, total
 
-    async def get_one_by_agent(self, agent_id: str) -> Optional[KnowledgeBase]:
-        """
-        Get the single active KB for an agent.
-        Used for simplified 1:1 agent/KB mapping.
-        """
-        result = await self.db.execute(
-            select(KnowledgeBase)
-            .where(
-                and_(
-                    KnowledgeBase.tenant_id == self.tenant_id,
-                    KnowledgeBase.agent_id == uuid.UUID(agent_id),
-                    KnowledgeBase.is_active == True,
-                )
-            )
-            .order_by(KnowledgeBase.created_at.desc())
-            .limit(1)
-        )
-        return result.scalar_one_or_none()
 
     async def update(self, kb_id: str, **kwargs) -> Optional[KnowledgeBase]:
         """
