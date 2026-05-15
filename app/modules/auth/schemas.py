@@ -49,6 +49,30 @@ class CreateAPIKeyRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=255)
 
 
+class ForgotPasswordRequest(BaseModel):
+    """Forgot password request"""
+
+    email: EmailStr = Field(..., description="User email to send reset link to")
+
+
+class ResetPasswordRequest(BaseModel):
+    """Reset password request"""
+
+    token: str = Field(..., description="The reset token received via email")
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+    @validator("new_password")
+    def validate_password_strength(cls, v):
+        """Reuse the registration password strength check"""
+        if not any(c.isupper() for c in v):
+            raise ValueError("Password must contain uppercase letter")
+        if not any(c.islower() for c in v):
+            raise ValueError("Password must contain lowercase letter")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("Password must contain digit")
+        return v
+
+
 # ============= RESPONSE SCHEMAS =============
 class TokenResponse(BaseModel):
     """Token response (access + refresh)"""

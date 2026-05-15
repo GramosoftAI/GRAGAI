@@ -55,53 +55,50 @@ async def rag_websocket(
     
     logger.info(f"✅ WebSocket connected: Agent={agent_id}, Tenant={tenant_id}")
 
-    try:
-        while True:
-            # 2. WAIT FOR MESSAGE
-            data = await websocket.receive_text()
-            try:
-                msg = json.loads(data)
-                query = msg.get("query")
-            except:
-                await websocket.send_text(json.dumps({"error": "Invalid JSON format"}))
-                continue
+    # 3. INITIALIZE SERVICE (Once per session for max speed)
+    async with get_db_with_tenant(tenant_id) as db:
+        rag_service = RAGService(db=db, tenant_id=tenant_id)
+        kb_repo = KnowledgeBaseRepository(db, tenant_id)
+        
+        # AUTO-RESOLVE KBs (Cached for session duration)
+        kbs, _ = await kb_repo.list_by_agent(agent_id, limit=10)
+        if not kbs:
+            await websocket.send_text(json.dumps({"error": "Knowledge Base not found"}))
+            await websocket.close()
+            return
+        
+        kb_ids = [str(kb.id) for kb in kbs]
+        logger.info(f"🚀 Session ready: Agent={agent_id}, KBs={len(kb_ids)}")
 
-            if not query:
-                continue
-
-            logger.info(f"💬 WS Query: {query[:50]}...")
-
-            # 3. INITIALIZE SERVICE
-            async with get_db_with_tenant(tenant_id) as db:
-                rag_service = RAGService(db=db, tenant_id=tenant_id)
-                kb_repo = KnowledgeBaseRepository(db, tenant_id)
-                
-                # AUTO-RESOLVE KBs (Agent can own multiple KBs)
-                kbs, _ = await kb_repo.list_by_agent(agent_id, limit=10)
-                
-                if not kbs:
-                    await websocket.send_text(json.dumps({"error": "Knowledge Base not found"}))
+        try:
+            while True:
+                # 4. WAIT FOR MESSAGE
+                data = await websocket.receive_text()
+                try:
+                    msg = json.loads(data)
+                    query = msg.get("query")
+                except:
+                    await websocket.send_text(json.dumps({"error": "Invalid JSON format"}))
                     continue
 
-                kb_ids = [str(kb.id) for kb in kbs]
+                if not query:
+                    continue
 
-                # 4. STREAM RESPONSE
+                # 5. STREAM RESPONSE (Optimized path)
                 async for chunk in rag_service.stream_rag_answer(
                     query=query,
                     agent_id=agent_id,
                     kb_id=kb_ids
                 ):
-                    # Check if chunk is JSON metadata or raw text
                     await websocket.send_text(chunk)
 
-                # 5. SIGNAL COMPLETION
+                # 6. SIGNAL COMPLETION
                 await websocket.send_text(json.dumps({"type": "done"}))
-
-    except WebSocketDisconnect:
-        logger.info(f"❌ WebSocket disconnected: Agent={agent_id}")
-    except Exception as e:
-        logger.error(f"❌ WebSocket error: {e}", exc_info=True)
-        try:
-            await websocket.send_text(json.dumps({"error": str(e)}))
-        except:
-            pass
+        except WebSocketDisconnect:
+            logger.info(f"❌ WebSocket disconnected: Agent={agent_id}")
+        except Exception as e:
+            logger.error(f"❌ WebSocket session error: {e}")
+            try:
+                await websocket.send_text(json.dumps({"error": "Session interrupted"}))
+            except:
+                pass

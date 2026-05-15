@@ -2,11 +2,12 @@
 
 from fastapi import APIRouter, Request, HTTPException, status, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Optional, List, Dict, Any
 import io
 try:
     import pdfplumber
 except ImportError:
-    pass  # Handled at route level
+    pass
 import logging
 import uuid
 import asyncio
@@ -413,6 +414,44 @@ async def delete_agent(
 # ============================================================================
 # INSTANT INGESTION OVERRIDES (For Dashboard UI)
 # ============================================================================
+
+@router.post(
+    "/{agent_id}/sources",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generic Source Ingestion",
+    description="Automatically detect and ingest a source (File, URL, or Text) for the given agent.",
+)
+async def generic_ingest_source(
+    request: Request,
+    agent_id: str,
+    file: Optional[UploadFile] = File(None),
+) -> dict:
+    """
+    INTELLIGENT DISPATCHER:
+    1. If a file is provided → Route to PDF ingestion
+    2. If JSON body has 'url' → Route to URL ingestion
+    3. If JSON body has 'text' → Route to Text ingestion
+    """
+    # 1. Handle File Upload (PDF)
+    if file and file.filename:
+        return await instant_ingest_pdf(request, agent_id, file)
+
+    # 2. Handle JSON Body (URL or Text)
+    try:
+        body = await request.json()
+        if "url" in body:
+            from ..knowledge_bases.schemas import KBURLIngest
+            url_data = KBURLIngest(**body)
+            return await instant_ingest_url(request, agent_id, url_data)
+        elif "text" in body:
+            return await instant_ingest_text(request, agent_id, body)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid source format. Expected 'file', 'url', or 'text'.")
+    except Exception as e:
+        if isinstance(e, HTTPException): raise
+        raise HTTPException(status_code=400, detail=f"Request body parsing failed: {str(e)}")
+
 
 @router.post(
     "/{agent_id}/sources/pdf",

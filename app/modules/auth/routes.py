@@ -91,3 +91,33 @@ async def refresh_token(
         data=schemas.TokenResponse(**result["tokens"]),
         meta={"action": "token_refreshed"},
     )
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    request: schemas.ForgotPasswordRequest, db: AsyncSession = Depends(get_db_public)
+):
+    """
+    Request a password reset link.
+    
+    Generates a secure token, hashes it for storage, and sends it via email.
+    """
+    result = await services.request_password_reset(request.email, db)
+    return format_success(meta={"message": result.get("message")})
+
+
+@router.post("/reset-password")
+async def reset_password(
+    request: schemas.ResetPasswordRequest, db: AsyncSession = Depends(get_db_public)
+):
+    """
+    Reset password using a valid token.
+    
+    Validates the hashed token, updates the password, and invalidates sessions.
+    """
+    result = await services.reset_password(request, db)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error")
+        )
+    return format_success(meta={"message": result.get("message")})

@@ -234,5 +234,53 @@ class TokenBlacklist(Base):
         Index("ix_token_blacklist_expires", "expires_at"),  # For cleanup
     )
 
+class PasswordResetToken(Base):
+    """
+    Password Reset Token model.
+    Stores hashed tokens for secure password recovery.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    # ============= PRIMARY KEY =============
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True,
+        nullable=False,
+    )
+
+    # ============= OWNER =============
+    tenant_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # ============= TOKEN DATA =============
+    token_hash = Column(String(255), unique=True, nullable=False, index=True)
+    is_used = Column(Boolean, default=False, nullable=False)
+
+    # ============= STATUS =============
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_password_reset_tokens_tenant_user", "tenant_id", "user_id"),
+        Index("ix_password_reset_tokens_expires", "expires_at"),  # For cleanup
+    )
+
     def __repr__(self) -> str:
-        return f"<TokenBlacklist jti={self.jti[:10]}... user={self.user_id} reason={self.reason}>"
+        return f"<PasswordResetToken user={self.user_id} used={self.is_used}>"

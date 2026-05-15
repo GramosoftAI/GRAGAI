@@ -21,6 +21,7 @@ import httpx
 import logging
 import asyncio
 import base64
+import json
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
@@ -86,22 +87,20 @@ class LLMResponse:
 class DeepInfraLLMClient:
     """
     Async HTTP client for DeepInfra chat/completions API.
-
-    FLOW:
-    1. Format prompt (query + context + few-shot examples)
-    2. Send to DeepInfra API
-    3. Receive generated answer
-    4. Validate response
-    5. Fallback on failure
-
-    PRODUCTION FEATURES:
-    - Automatic retries (exponential backoff)
-    - Timeout protection (15s max)
-    - Token limits (prevent runaway)
-    - Structured prompting (improve quality)
-    - Fallback template (graceful degradation)
-    - Async throughout (non-blocking)
     """
+    # Shared client to reuse connections (Persistent Pool)
+    _shared_client: Optional[httpx.AsyncClient] = None
+
+    @classmethod
+    async def get_client(cls) -> httpx.AsyncClient:
+        """Get or create the shared persistent HTTP client."""
+        if cls._shared_client is None or cls._shared_client.is_closed:
+            cls._shared_client = httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+                headers={"Authorization": f"Bearer {settings.deepinfra_api_key}"}
+            )
+        return cls._shared_client
 
     def __init__(self):
         """
@@ -167,18 +166,18 @@ class DeepInfraLLMClient:
         }
 
         async with _llm_semaphore:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(self.base_url, headers=headers, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                
-                text = data["choices"][0]["message"]["content"].strip()
-                
-                # Track usage (estimated)
-                cost = (1000 / 1_000_000) * PRICE_PER_1M_INPUT_TOKENS # Rough estimation
-                self._track_billing(tenant_id, agent_id, cost, 1000)
-                
-                return text
+            client = await self.get_client()
+            response = await client.post(self.base_url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            
+            text = data["choices"][0]["message"]["content"].strip()
+            
+            # Track usage (estimated)
+            cost = (1000 / 1_000_000) * PRICE_PER_1M_INPUT_TOKENS # Rough estimation
+            self._track_billing(tenant_id, agent_id, cost, 1000)
+            
+            return text
 
     async def generate(
         self,
@@ -210,12 +209,12 @@ class DeepInfraLLMClient:
         last_error = None
         for attempt in range(3):
             try:
+                client = await self.get_client()
                 async with _llm_semaphore:
-                    async with httpx.AsyncClient(timeout=self.timeout) as client:
-                        response = await client.post(self.base_url, headers=headers, json=payload)
-                        response.raise_for_status()
-                        data = response.json()
-                        return data["choices"][0]["message"]["content"].strip()
+                    response = await client.post(self.base_url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]["content"].strip()
             except Exception as e:
                 last_error = e
                 logger.warning(f"generate() attempt {attempt+1}/3 failed: {e}")
@@ -286,14 +285,13 @@ class DeepInfraLLMClient:
         }
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                async with client.stream("POST", self.base_url, headers=headers, json=payload) as response:
-                    if response.status_code != 200:
-                        yield f"Error: LLM API returned {response.status_code}"
-                        return
-                        
-                    import json
-                    async for line in response.aiter_lines():
+            client = await self.get_client()
+            async with client.stream("POST", self.base_url, headers=headers, json=payload) as response:
+                if response.status_code != 200:
+                    yield f"Error: LLM API returned {response.status_code}"
+                    return
+                    
+                async for line in response.aiter_lines():
                         if not line or line.strip() == "":
                             continue
                             

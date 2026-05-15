@@ -61,53 +61,48 @@ async def lifespan(app: FastAPI):
     """
     # ============= STARTUP =============
     logger.info("=" * 80)
-    logger.info(f"🚀 Starting {settings.app_name} v{settings.app_version}")
-    logger.info(f"📍 Environment: {settings.app_env.upper()}")
-    logger.info(f"🐛 Debug mode: {settings.debug}")
-    logger.info(f"📝 Log level: {settings.log_level}")
+    logger.info("=" * 80)
+    logger.info(f"[STARTUP] Starting {settings.app_name} v{settings.app_version}")
+    logger.info(f"[STARTUP] Environment: {settings.app_env.upper()}")
+    logger.info(f"[STARTUP] Debug mode: {settings.debug}")
+    logger.info(f"[STARTUP] Log level: {settings.log_level}")
     logger.info(
-        f"🔧 Database: {settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"
+        f"[STARTUP] Database: {settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"
     )
-    logger.info(f"🔐 Multi-tenancy: ENABLED (RLS ENFORCED)")
+    logger.info(f"[STARTUP] Multi-tenancy: ENABLED (RLS ENFORCED)")
     logger.info("=" * 80)
 
     try:
         # Initialize PostgreSQL
-        # This AUTOMATICALLY:
-        #   1. Creates database tables
-        #   2. Enables RLS on all tables (NO MANUAL STEPS)
-        #   3. Verifies RLS is properly configured
-        # If ANY step fails, the app will NOT START
-        logger.info("📦 Initializing PostgreSQL...")
+        logger.info("[STARTUP] Initializing PostgreSQL...")
         await init_db()
-        logger.info("✅ PostgreSQL initialized successfully (RLS ENFORCED)")
+        logger.info("[STARTUP] PostgreSQL initialized successfully (RLS ENFORCED)")
 
         # Initialize Neo4j graph database
-        logger.info("📊 Checking Neo4j availability...")
+        logger.info("[STARTUP] Checking Neo4j availability...")
         try:
             await asyncio.wait_for(init_neo4j(), timeout=10.0)
-            logger.info("✅ Neo4j initialized")
+            logger.info("[STARTUP] Neo4j initialized")
         except asyncio.TimeoutError:
             logger.warning(
-                f"⏱️  Neo4j initialization timed out (>10s). Continuing without graph DB."
+                f"[STARTUP] Neo4j initialization timed out (>10s). Continuing without graph DB."
             )
         except Exception as e:
             logger.warning(
-                f"⚠️  Neo4j initialization failed: {e}. Continuing without graph DB."
+                f"[STARTUP] Neo4j initialization failed: {e}. Continuing without graph DB."
             )
-            # Don't fail startup - Neo4j might not be available in dev
 
         logger.info("=" * 80)
-        logger.info("✅ Application startup COMPLETE")
-        logger.info(f"🌐 API available at: http://{settings.host}:{settings.port}")
-        logger.info(f"📚 Swagger docs at: http://{settings.host}:{settings.port}/docs")
-        logger.info("🔒 MULTI-TENANCY ENFORCED - RLS POLICIES ACTIVE")
+        logger.info("[STARTUP] Application startup COMPLETE")
+        logger.info(f"[STARTUP] API available at: http://{settings.host}:{settings.port}")
+        logger.info(f"[STARTUP] Swagger docs at: http://{settings.host}:{settings.port}/docs")
+        logger.info("[STARTUP] MULTI-TENANCY ENFORCED - RLS POLICIES ACTIVE")
         logger.info("=" * 80)
 
     except Exception as e:
         logger.error("=" * 80)
-        logger.error(f"❌ STARTUP FAILED: {e}")
-        logger.error(f"❌ APPLICATION CANNOT START - RLS enforcement is CRITICAL")
+        logger.error(f"[STARTUP] STARTUP FAILED: {e}")
+        logger.error(f"[STARTUP] APPLICATION CANNOT START - RLS enforcement is CRITICAL")
         logger.error("=" * 80)
         raise
 
@@ -245,7 +240,6 @@ def load_routers():
                 try:
                     # Import routes.py from module
                     router_module_name = f"{module_name}.routes"
-                    logger.info(f"DEBUG: Checking for router in {router_module_name}")
                     router_module = importlib.import_module(router_module_name)
 
                     # Check if router exists
@@ -253,23 +247,23 @@ def load_routers():
                         router = router_module.router
                         app.include_router(router)
 
-                        logger.info(f"✅ Loaded router from: {module_name}")
+                        logger.info(f"[OK] Loaded router from: {module_name}")
                         loaded_count += 1
                     else:
-                        logger.warning(f"⚠️  No 'router' found in {router_module_name}")
+                        logger.warning(f"[WARN] No 'router' found in {router_module_name}")
                         failed_count += 1
 
                 except ImportError as e:
-                    logger.error(f"❌ Failed to import {router_module_name}: {e}")
+                    logger.error(f"[ERROR] Failed to import {router_module_name}: {e}")
                     failed_count += 1
                 except Exception as e:
                     logger.error(
-                        f"❌ Error loading module {module_name}: {e}", exc_info=True
+                        f"[ERROR] Error loading module {module_name}: {e}", exc_info=True
                     )
                     failed_count += 1
 
     except ImportError as e:
-        logger.error(f"❌ Failed to import modules package: {e}")
+        logger.error(f"[ERROR] Failed to import modules package: {e}")
         raise
 
     logger.info(
@@ -283,9 +277,9 @@ def load_routers():
 try:
     loaded_count, failed_count = load_routers()
     if failed_count > 0:
-        logger.warning(f"⚠️  {failed_count} modules failed to load")
+        logger.warning(f"[WARN] {failed_count} modules failed to load")
 except Exception as e:
-    logger.error(f"❌ Critical error loading routers: {e}")
+    logger.error(f"[ERROR] Critical error loading routers: {e}")
     raise
 
 

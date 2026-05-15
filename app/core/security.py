@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from jose import JWTError, jwt
+import hashlib
 import bcrypt
 from pydantic import BaseModel
 import logging
@@ -11,6 +12,20 @@ import secrets
 from .config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# ... (Previous imports)
+
+def hash_reset_token(token: str) -> str:
+    """
+    Hash a plaintext reset token (SHA-256) for secure DB storage.
+    
+    Args:
+        token: Plaintext token generated via secrets.token_urlsafe()
+        
+    Returns:
+        Hexadecimal hash of the token
+    """
+    return hashlib.sha256(token.encode()).hexdigest()
 
 # ============= STARTUP VALIDATION =============
 # This runs when module is imported
