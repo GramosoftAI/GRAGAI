@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #111827;
+  --app-surface: #ffffff;
+  --app-surface-muted: #fffff;
+  --app-border: #e2e8f0;
+  --app-text: #111827;
+  --app-text-muted: #64748b;
+  --app-text-soft: #94a3b8;
+  --app-primary: #10b981;
+  --app-on-primary: #ffffff;
+  --app-active-bg: #ecfdf5;
+  --app-hover: #f1f5f9;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root[data-theme="dark"] {
+  --background: #020617;
+  --foreground: #e2e8f0;
+  --app-surface: #0f172a;
+  --app-surface-muted: #020617;
+  --app-border: #1e293b;
+  --app-text: #e2e8f0;
+  --app-text-muted: #94a3b8;
+  --app-text-soft: #64748b;
+  --app-primary: #34d399;
+  --app-on-primary: #052e2b;
+  --app-active-bg: #12352f;
+  --app-hover: #1e293b;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Custom Ant Design Notification Styles */
+.custom-toast-success {
+  background-color: #22c55e !important; /* Tailwind green-500 */
+}
+.custom-toast-success .ant-notification-notice-message,
+.custom-toast-success .ant-notification-notice-description,
+.custom-toast-success .ant-notification-notice-icon {
+  color: white !important;
+}
+.custom-toast-success .ant-notification-notice-close-icon {
+  color: white !important;
+}
+
+.custom-toast-error {
+  background-color: black !important;
+}
+.custom-toast-error .ant-notification-notice-message,
+.custom-toast-error .ant-notification-notice-description,
+.custom-toast-error .ant-notification-notice-icon {
+  color: #22c55e !important; /* Tailwind green-500 */
+}
+.custom-toast-error .ant-notification-notice-close-icon {
+  color: #22c55e !important;
+}

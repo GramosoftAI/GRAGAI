@@ -1,0 +1,534 @@
+"use client";
+
+import { 
+  Flex, Typography, Button, Badge, Space, Card, Row, Col, 
+  Tooltip, Modal, Form, Input, notification, Select, Popconfirm, Descriptions, Divider
+} from "antd";
+import { 
+  PlusOutlined, RobotOutlined, MessageOutlined, 
+  EllipsisOutlined, ThunderboltOutlined, GlobalOutlined,
+  EditOutlined, DeleteOutlined, SettingOutlined, CalendarOutlined,
+  CheckCircleOutlined, ClockCircleOutlined, InfoCircleOutlined
+} from "@ant-design/icons";
+import { useEffect, useState } from "react";
+import useAxios from "../../hooks/useAxios";
+
+const { Title, Text } = Typography;
+const { TextArea } = Input;
+const { Option } = Select;
+
+// ─── Agent Card Component ─────────────────────────────────────────────────────
+
+function AgentCard({ agent, onManage, onSettings }: { 
+  agent: any; 
+  onManage: (agent: any) => void;
+  onSettings: (agent: any) => void;
+}) {
+  return (
+    <Card 
+      hoverable
+      className="group relative overflow-hidden bg-[var(--app-surface)] border border-[var(--app-border)] rounded-[32px] transition-all duration-500 hover:shadow-[0_20px_50px_rgba(40,93,145,0.08)] hover:-translate-y-1"
+      styles={{ body: { padding: 32 } }}
+    >
+      {/* Visual Accent */}
+      <div className="absolute top-0 right-0 w-32 h-32 bg-[#285d91]/5 rounded-bl-[100px] -mr-10 -mt-10 transition-all duration-500 group-hover:scale-150 group-hover:bg-[#285d91]/10" />
+      
+      <Flex vertical gap={24}>
+        <Row justify="space-between" align="middle">
+          <div className="w-16 h-16 rounded-2xl bg-[#285d91]/5 text-[#285d91] flex items-center justify-center text-3xl shadow-inner group-hover:bg-[#285d91] group-hover:text-white transition-all duration-500">
+            <RobotOutlined />
+          </div>
+          <Space>
+            <Badge status="processing" color="#10b981" />
+            <Text className="text-[10px] font-black uppercase tracking-[0.2em] text-[#10b981]">Active</Text>
+            <Tooltip title="View Intelligence Details">
+              <Button 
+                type="text" 
+                shape="circle" 
+                icon={<InfoCircleOutlined className="text-xl text-[var(--app-text-soft)]" />} 
+                onClick={(e) => { e.stopPropagation(); onSettings(agent); }}
+              />
+            </Tooltip>
+          </Space>
+        </Row>
+
+        <div>
+          <Title level={3} className="!m-0 !text-[var(--app-text)] !font-black !text-2xl tracking-tighter">
+            {agent.name}
+          </Title>
+          <Text className="text-[var(--app-text-muted)] font-bold text-sm mt-2 block leading-relaxed line-clamp-2">
+            {agent.description || "Empower your workflows with this specialized intelligent agent designed for high-performance automation."}
+          </Text>
+          <div className="mt-3 flex items-center gap-2">
+            <Badge color="#285d91" text={<Text className="text-[10px] font-black uppercase tracking-widest opacity-50">{agent.personality || "Professional"}</Text>} />
+          </div>
+        </div>
+
+        <Row justify="space-between" align="middle" className="pt-6 border-t border-[var(--app-border)]">
+          <Space size={16}>
+            <Tooltip title="Total Conversations">
+              <Space className="text-[var(--app-text-soft)] font-bold text-xs">
+                <MessageOutlined /> {agent.total_conversations || 0}
+              </Space>
+            </Tooltip>
+            <Tooltip title="Confidence Level">
+              <Space className="text-[var(--app-text-soft)] font-bold text-xs">
+                <ThunderboltOutlined /> {Math.round((agent.avg_confidence || 0) * 100)}%
+              </Space>
+            </Tooltip>
+          </Space>
+          <Button 
+            type="link" 
+            onClick={(e) => { e.stopPropagation(); onManage(agent); }}
+            className="!text-[#285d91] !font-black !text-xs !uppercase !tracking-widest hover:!scale-105 transition-transform"
+          >
+            Manage +
+          </Button>
+        </Row>
+      </Flex>
+    </Card>
+  );
+}
+
+// ─── Empty State Component ────────────────────────────────────────────────────
+
+function EmptyState({ onDeploy }: { onDeploy: () => void }) {
+  return (
+    <Flex vertical align="center" justify="center" className="min-h-[60vh] py-20 animate-in fade-in duration-1000">
+      <div className="relative mb-12">
+        <div className="absolute inset-0 bg-[#285d91] rounded-full blur-[80px] opacity-10 animate-pulse" />
+        <div className="w-32 h-32 rounded-[40px] bg-[var(--app-surface)] shadow-2xl flex items-center justify-center relative z-10 border border-[var(--app-border)]">
+          <RobotOutlined className="text-6xl text-[#285d91]" />
+        </div>
+        <div className="absolute -bottom-2 -right-2 w-10 h-10 bg-emerald-500 rounded-2xl flex items-center justify-center text-white shadow-lg border-4 border-[var(--app-surface)] animate-bounce">
+          <PlusOutlined />
+        </div>
+      </div>
+      
+      <div className="text-center max-w-md px-6">
+        <Title level={1} className="!m-0 !text-[var(--app-text)] !font-black !text-4xl md:!text-5xl tracking-tighter">
+          Your AI Squad
+        </Title>
+        <Text className="text-[var(--app-text-muted)] font-semibold text-lg mt-4 block leading-relaxed">
+          Architect, deploy, and scale your specialized AI agents with a single click.
+        </Text>
+      </div>
+
+      <Button 
+        type="primary" 
+        size="large" 
+        icon={<PlusOutlined />}
+        onClick={onDeploy}
+        className="mt-12 !h-16 !px-10 !rounded-2xl !bg-[#285d91] !border-none !font-black !text-lg !uppercase !tracking-widest !shadow-2xl !shadow-blue-900/30 hover:!scale-[1.02] transition-all"
+      >
+        Deploy New Bot
+      </Button>
+    </Flex>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
+
+export default function BotsPage() {
+  const [getAgents, response, loading] = useAxios<any[]>({ endpoint: "GETAGENTLIST", initialLoading: true });
+  const [createAgent, , creating] = useAxios({ endpoint: "CREATEAGENT" });
+  const [updateAgent, , updating] = useAxios({ endpoint: "UPDATEAGENT", showSuccessMsg: true });
+  const [deleteAgent, , deleting] = useAxios({ endpoint: "DELETEAGENT", showSuccessMsg: true });
+  
+  const [agents, setAgents] = useState<any[]>([]);
+  const [userName, setUserName] = useState("");
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isManageModalOpen, setIsManageModalOpen] = useState(false);
+  const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
+  const [selectedAgent, setSelectedAgent] = useState<any>(null);
+  
+  const [form] = Form.useForm();
+  const [manageForm] = Form.useForm();
+
+  useEffect(() => {
+    refreshAgents();
+    const storedName = localStorage.getItem("userName");
+    if (storedName) {
+      setUserName(storedName.split(' ')[0]);
+    }
+  }, []);
+
+  const refreshAgents = () => {
+    getAgents({}, (res: any) => {
+      const findArray = (obj: any): any[] | null => {
+        if (Array.isArray(obj)) return obj;
+        if (!obj || typeof obj !== 'object') return null;
+        const potentialKeys = ['agents', 'data', 'items', 'list', 'results'];
+        for (const key of potentialKeys) {
+          if (Array.isArray(obj[key])) return obj[key];
+        }
+        for (const key in obj) {
+          const res = findArray(obj[key]);
+          if (res) return res;
+        }
+        return null;
+      };
+      const list = findArray(res);
+      if (list) setAgents(list);
+    });
+  };
+
+  const handleCreate = async (values: any) => {
+    await createAgent({ data: values });
+    setIsModalOpen(false);
+    form.resetFields();
+    refreshAgents();
+  };
+
+  const handleUpdate = async (values: any) => {
+    if (!selectedAgent?.id) return;
+    await updateAgent({ 
+      path: `/${selectedAgent.id}`,
+      data: values 
+    });
+    setIsManageModalOpen(false);
+    refreshAgents();
+  };
+
+  const handleDelete = async () => {
+    if (!selectedAgent?.id) return;
+    await deleteAgent({ 
+      path: `/${selectedAgent.id}` 
+    });
+    setIsManageModalOpen(false);
+    refreshAgents();
+  };
+
+  const openManageModal = (agent: any) => {
+    setSelectedAgent(agent);
+    manageForm.setFieldsValue({
+      personality: agent.personality || "Concise",
+      system_prompt: agent.system_prompt || ""
+    });
+    setIsManageModalOpen(true);
+  };
+
+  const openDetailsModal = (agent: any) => {
+    setSelectedAgent(agent);
+    setIsDetailsModalOpen(true);
+  };
+
+  const formatDate = (dateStr: string) => {
+    if (!dateStr) return "N/A";
+    return new Date(dateStr).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  return (
+    <div className="w-full pb-20 relative">
+      {/* Creation Modal */}
+      <Modal
+        title={
+          <Title level={4} className="!m-0 !text-[var(--app-text)] !font-black tracking-tight">
+            Deploy New Intelligence
+          </Title>
+        }
+        open={isModalOpen}
+        onCancel={() => setIsModalOpen(false)}
+        footer={null}
+        centered
+        styles={{ content: { borderRadius: 32, padding: 32, background: 'var(--app-surface)' } }}
+      >
+        <Form form={form} layout="vertical" onFinish={handleCreate} className="mt-6" initialValues={{ personality: "Concise" }}>
+          <Form.Item
+            name="name"
+            label={<Text className="font-black text-[10px] uppercase tracking-widest text-[var(--app-text-soft)]">Agent Name</Text>}
+            rules={[{ required: true, message: 'Please enter agent name' }]}
+          >
+            <Input 
+              placeholder="e.g. Resume Analyzer" 
+              className="h-14 !rounded-2xl !bg-[var(--app-surface-muted)] !border-none font-bold text-[var(--app-text)]" 
+            />
+          </Form.Item>
+
+          <Form.Item
+            name="personality"
+            label={<Text className="font-black text-[10px] uppercase tracking-widest text-[var(--app-text-soft)]">Personality Type</Text>}
+          >
+            <Select className="h-14 custom-select" placeholder="Select personality">
+              <Option value="Concise">Concise & Professional</Option>
+              <Option value="Creative">Creative & Explanatory</Option>
+              <Option value="Friendly">Friendly & Approachable</Option>
+              <Option value="Strict">Strict & Deterministic</Option>
+            </Select>
+          </Form.Item>
+          
+          <Form.Item
+            name="description"
+            label={<Text className="font-black text-[10px] uppercase tracking-widest text-[var(--app-text-soft)]">Mission Description</Text>}
+          >
+            <TextArea 
+              rows={4} 
+              placeholder="Describe the specialized tasks and knowledge areas for this agent..." 
+              className="!rounded-2xl !bg-[var(--app-surface-muted)] !border-none font-bold text-[var(--app-text)]" 
+            />
+          </Form.Item>
+
+          <Button 
+            type="primary" 
+            htmlType="submit" 
+            loading={creating}
+            className="w-full h-16 !rounded-2xl !bg-[#285d91] !border-none !font-black !text-lg !uppercase !tracking-widest !shadow-xl !shadow-blue-900/20 mt-4 hover:!scale-[1.02] transition-all"
+          >
+            Initiate Deployment
+          </Button>
+        </Form>
+      </Modal>
+
+      {/* Details Modal */}
+      <Modal
+        title={
+          <Flex align="center" gap={12}>
+            <div className="w-10 h-10 rounded-xl bg-[#285d91]/10 text-[#285d91] flex items-center justify-center text-xl">
+              <RobotOutlined />
+            </div>
+            <Title level={4} className="!m-0 !text-[var(--app-text)] !font-black tracking-tight">
+              {selectedAgent?.name} Details
+            </Title>
+          </Flex>
+        }
+        open={isDetailsModalOpen}
+        onCancel={() => setIsDetailsModalOpen(false)}
+        footer={null}
+        centered
+        styles={{ content: { borderRadius: 32, padding: 32, background: 'var(--app-surface)' } }}
+      >
+        <div className="mt-6 space-y-8">
+          <div className="flex items-center justify-between p-6 bg-[var(--app-surface-muted)] rounded-2xl border border-[var(--app-border)]">
+             <div className="flex items-center gap-4">
+                <div className="w-10 h-10 rounded-full bg-emerald-500/10 text-emerald-500 flex items-center justify-center">
+                  <CheckCircleOutlined />
+                </div>
+                <Text className="font-black uppercase tracking-widest text-[10px] text-[var(--app-text-soft)]">Deployment Status</Text>
+             </div>
+             <Badge status="processing" color="#10b981" text={<Text className="font-black text-[#10b981] uppercase tracking-widest text-[10px] ml-2">Active & Ready</Text>} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-6">
+            <div className="p-6 bg-[var(--app-surface-muted)] rounded-2xl border border-[var(--app-border)]">
+              <Flex vertical gap={8}>
+                <Flex align="center" gap={8} className="text-[#285d91]">
+                  <CalendarOutlined />
+                  <Text className="font-black uppercase tracking-widest text-[10px] text-[var(--app-text-soft)]">Genesis Date</Text>
+                </Flex>
+                <Text className="font-bold text-sm text-[var(--app-text)]">{formatDate(selectedAgent?.created_at)}</Text>
+              </Flex>
+            </div>
+            <div className="p-6 bg-[var(--app-surface-muted)] rounded-2xl border border-[var(--app-border)]">
+              <Flex vertical gap={8}>
+                <Flex align="center" gap={8} className="text-[#285d91]">
+                  <ClockCircleOutlined />
+                  <Text className="font-black uppercase tracking-widest text-[10px] text-[var(--app-text-soft)]">Last Synced</Text>
+                </Flex>
+                <Text className="font-bold text-sm text-[var(--app-text)]">{formatDate(selectedAgent?.updated_at)}</Text>
+              </Flex>
+            </div>
+          </div>
+
+          <div className="p-6 bg-[var(--app-surface-muted)] rounded-2xl border border-[var(--app-border)]">
+            <Flex vertical gap={12}>
+              <Text className="font-black uppercase tracking-widest text-[10px] text-[var(--app-text-soft)]">Internal Identifiers</Text>
+              <div className="flex items-center justify-between">
+                <Text className="text-[10px] font-bold text-[var(--app-text-soft)] uppercase tracking-widest">ID</Text>
+                <Text className="text-[10px] font-bold text-[var(--app-text)] font-mono">{selectedAgent?.id}</Text>
+              </div>
+              <div className="flex items-center justify-between">
+                <Text className="text-[10px] font-bold text-[var(--app-text-soft)] uppercase tracking-widest">Tenant ID</Text>
+                <Text className="text-[10px] font-bold text-[var(--app-text)] font-mono">{selectedAgent?.tenant_id}</Text>
+              </div>
+            </Flex>
+          </div>
+          
+          <Button 
+            type="primary" 
+            block 
+            onClick={() => setIsDetailsModalOpen(false)}
+            className="h-14 !rounded-2xl !bg-[#285d91] !border-none !font-black !uppercase !tracking-widest"
+          >
+            Acknowledged
+          </Button>
+        </div>
+      </Modal>
+
+      {/* Manage/Edit Modal */}
+      <Modal
+        title={
+          <Flex align="center" gap={12}>
+            <div className="w-10 h-10 rounded-xl bg-[#285d91]/10 text-[#285d91] flex items-center justify-center">
+              <SettingOutlined />
+            </div>
+            <Title level={4} className="!m-0 !text-[var(--app-text)] !font-black tracking-tight">
+              Manage {selectedAgent?.name}
+            </Title>
+          </Flex>
+        }
+        open={isManageModalOpen}
+        onCancel={() => setIsManageModalOpen(false)}
+        footer={null}
+        centered
+        width={600}
+        styles={{ content: { borderRadius: 32, padding: 32, background: 'var(--app-surface)' } }}
+      >
+        <Form form={manageForm} layout="vertical" onFinish={handleUpdate} className="mt-6">
+          <Form.Item
+            name="personality"
+            label={<Text className="font-black text-[10px] uppercase tracking-widest text-[var(--app-text-soft)]">Agent Personality</Text>}
+          >
+            <Select className="h-14 custom-select">
+              <Option value="Concise">Concise</Option>
+              <Option value="Professional">Professional</Option>
+              <Option value="Creative">Creative</Option>
+              <Option value="Expert">Expert</Option>
+            </Select>
+          </Form.Item>
+          
+          <Form.Item
+            name="system_prompt"
+            label={<Text className="font-black text-[10px] uppercase tracking-widest text-[var(--app-text-soft)]">System Instruction Prompt</Text>}
+          >
+            <TextArea 
+              rows={6} 
+              placeholder="Always be very brief..." 
+              className="!rounded-2xl !bg-[var(--app-surface-muted)] !border-none font-bold text-[var(--app-text)]" 
+            />
+          </Form.Item>
+
+          <Flex gap={16} className="mt-8">
+            <Popconfirm
+              title="Delete AI Agent?"
+              description="This will permanently delete the agent and all associated knowledge base data. This action cannot be undone."
+              onConfirm={handleDelete}
+              okText="Yes, Delete"
+              cancelText="No"
+              okButtonProps={{ danger: true, className: "!rounded-xl !font-bold" }}
+              cancelButtonProps={{ className: "!rounded-xl !font-bold" }}
+            >
+              <Button 
+                danger
+                icon={<DeleteOutlined />}
+                loading={deleting}
+                className="h-16 flex-1 !rounded-2xl !font-black !text-sm !uppercase !tracking-widest transition-all"
+              >
+                Purge Agent
+              </Button>
+            </Popconfirm>
+
+            <Button 
+              type="primary" 
+              htmlType="submit" 
+              loading={updating}
+              icon={<EditOutlined />}
+              className="h-16 flex-[2] !rounded-2xl !bg-[#285d91] !border-none !font-black !text-sm !uppercase !tracking-widest !shadow-xl !shadow-blue-900/20 hover:!scale-[1.02] transition-all"
+            >
+              Update Intelligence
+            </Button>
+          </Flex>
+        </Form>
+      </Modal>
+
+      {/* Main Content Area */}
+      {agents.length > 0 ? (
+        <Flex vertical gap={48}>
+          <Row justify="space-between" align="bottom">
+            <Col>
+              <Title level={1} className="!m-0 !text-[var(--app-text)] !font-black !text-4xl md:!text-5xl tracking-tighter">
+                {userName ? `${userName}'s` : "Your"} AI Squad
+              </Title>
+              <Text className="text-[var(--app-text-muted)] font-semibold text-lg mt-2 block">
+                Architect, deploy, and scale your specialized AI agents.
+              </Text>
+            </Col>
+            <Col>
+              <Button 
+                type="primary" 
+                size="large" 
+                icon={<PlusOutlined />}
+                onClick={() => setIsModalOpen(true)}
+                className="!h-14 !px-8 !rounded-2xl !bg-[#285d91] !border-none !font-black !uppercase !tracking-widest shadow-xl shadow-blue-900/10 hover:!scale-105 transition-all"
+              >
+                Deploy New Bot
+              </Button>
+            </Col>
+          </Row>
+
+          <Row gutter={[32, 32]}>
+            {agents.map((agent, i) => (
+              <Col key={i} xs={24} sm={12} xl={8}>
+                <AgentCard 
+                  agent={agent} 
+                  onManage={openManageModal} 
+                  onSettings={openDetailsModal} 
+                />
+              </Col>
+            ))}
+            
+            {/* New Agent Skeleton Card */}
+            <Col xs={24} sm={12} xl={8}>
+              <div 
+                onClick={() => setIsModalOpen(true)}
+                className="group h-full min-h-[300px] border-2 border-dashed border-[var(--app-border)] rounded-[32px] flex flex-col items-center justify-center gap-4 cursor-pointer hover:border-[#285d91]/30 hover:bg-[#285d91]/5 transition-all duration-500"
+              >
+                <div className="w-16 h-16 rounded-full bg-[var(--app-surface-muted)] flex items-center justify-center text-[var(--app-text-soft)] group-hover:bg-[var(--app-surface)] group-hover:text-[#285d91] group-hover:scale-110 shadow-sm transition-all">
+                  <PlusOutlined className="text-2xl" />
+                </div>
+                <Text className="text-[var(--app-text-soft)] font-black uppercase tracking-[0.2em] group-hover:text-[#285d91]">New Agent</Text>
+              </div>
+            </Col>
+          </Row>
+        </Flex>
+      ) : (
+        <EmptyState onDeploy={() => setIsModalOpen(true)} />
+      )}
+
+      {/* Loading Overlay */}
+      {(loading || deleting || updating) && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-transparent backdrop-blur-md transition-all duration-500">
+           <div className="relative flex flex-col items-center gap-4 animate-in zoom-in-95 duration-500">
+              <div className="relative">
+                <div className="absolute inset-0 bg-[#285d91] rounded-full blur-[40px] opacity-20 animate-pulse" />
+                <RobotOutlined className="text-5xl text-[#285d91] relative z-10 animate-bounce" />
+              </div>
+              <p className="text-[10px] font-black uppercase tracking-[0.3em] text-[#285d91] text-center opacity-80">
+                {deleting ? "Purging Entity..." : updating ? "Upgrading Neural Link..." : "Syncing Squad"}
+              </p>
+           </div>
+        </div>
+      )}
+
+      <style jsx global>{`
+        .custom-select .ant-select-selector {
+          height: 56px !important;
+          border-radius: 16px !important;
+          background: var(--app-surface-muted) !important;
+          border: none !important;
+          padding: 0 20px !important;
+          display: flex;
+          align-items: center;
+          font-weight: bold;
+          color: var(--app-text) !important;
+        }
+        .ant-select-dropdown {
+          background: var(--app-surface) !important;
+          border-radius: 16px !important;
+          padding: 8px !important;
+          border: 1px solid var(--app-border) !important;
+        }
+        .ant-select-item-option-selected {
+          background: #285d91 !important;
+          color: white !important;
+          border-radius: 10px !important;
+        }
+      `}</style>
+    </div>
+  );
+}
