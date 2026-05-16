@@ -140,10 +140,11 @@ class TripletExtractor:
     # Track initialization logging
     _init_logged = False
 
-    def __init__(self):
+    def __init__(self, tenant_id: Optional[str] = None):
         """Initialize with LLM client (lazy import to avoid circular deps)."""
         from .llm.deepinfra_llm import DeepInfraLLMClient
         self.llm_client = DeepInfraLLMClient()
+        self.tenant_id = tenant_id
 
     async def extract_from_chunk(
         self,
@@ -170,7 +171,19 @@ class TripletExtractor:
             TripletExtractor._init_logged = True
 
         try:
-            prompt = TRIPLET_EXTRACTION_PROMPT.format(text=chunk_text[:2000])
+            # --- ONTOLOGY GROUNDING INJECTION ---
+            valid_types = "PERSON, ORGANIZATION, LOCATION, CONCEPT, EVENT, PRODUCT, TECHNOLOGY, NUMERIC"
+            if self.tenant_id:
+                from ..modules.ontology.service import OntologyService
+                ont_svc = OntologyService(self.tenant_id)
+                ont_data = await ont_svc.get_ontology()
+                if ont_data.get("classes"):
+                    valid_types = ", ".join([c["name"] for c in ont_data["classes"]])
+            
+            prompt = TRIPLET_EXTRACTION_PROMPT.replace(
+                "Valid entity types: PERSON, ORGANIZATION, LOCATION, CONCEPT, EVENT, PRODUCT, TECHNOLOGY, NUMERIC",
+                f"Valid entity types: {valid_types}"
+            ).format(text=chunk_text[:2000])
 
             logger.info(f"Calling LLM for triplet extraction (chunk {chunk_id[:8]}, text length: {len(chunk_text)})")
 

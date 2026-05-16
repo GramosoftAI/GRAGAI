@@ -264,7 +264,7 @@ class KnowledgeBaseService:
             entity_tasks = [safe_extract_entities(chunks[i], i) for i in range(len(chunks))]
             triplet_tasks = []
             if use_triplets:
-                extractor = TripletExtractor()
+                extractor = TripletExtractor(tenant_id=str(self.tenant_id))
                 triplet_tasks = [safe_extract_triplets(extractor, f"idx_{i}", chunks[i], i) for i in range(len(chunks))]
             
             logger.info(f"🚀 Processing extractions for {len(chunks)} chunks (Concurrency: {settings.ingestion_llm_concurrency})...")
