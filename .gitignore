@@ -45,6 +45,9 @@ tmp/
 .vscode/
 .idea/
 .streamlit/
+graphmind_deploy_key*
+*deploy_key*
+deploy.sh
 
 # Analysis docs
 cognee_full_analysis_part*.md
