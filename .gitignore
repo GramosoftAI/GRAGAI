@@ -38,6 +38,7 @@ logs/
 
 # Project specific
 tester_zone/
+docs/
 tests/
 scratch/
 tmp/
