@@ -20,7 +20,7 @@ source venv/bin/activate
 
 echo "Installing requirements..."
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install --default-timeout=1000 --retries 10 -r requirements.txt
 
 echo "Restarting application under PM2..."
 pm2 restart all || pm2 start "uvicorn app.main:app --host 0.0.0.0 --port 4915" --name "graphmind-backend"
