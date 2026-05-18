@@ -511,3 +511,89 @@ async def delete_kb(request: Request, kb_id: str) -> dict:
     except Exception as e:
         logger.error(f"Delete KB endpoint error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============================================================================
+# NATIVE DATABASE CONNECTOR ENDPOINTS
+# ============================================================================
+
+@router.post(
+    "/{kb_id}/database-connection",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Register Database Connection",
+    description="Register and validate an external/local database connection config for this KB"
+)
+async def register_db_connection(
+    request: Request,
+    kb_id: str,
+    db_request: schemas.DatabaseConnectionRegister
+) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+
+        async with AsyncSessionLocal() as db:
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.register_database_connection(kb_id, db_request)
+
+            if not result.get("success"):
+                raise HTTPException(status_code=400, detail=result.get("error"))
+
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in register_db_connection: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.get(
+    "/{kb_id}/database-schema",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Discover Database Schema",
+    description="Introspect the registered database tables for this KB"
+)
+async def discover_db_schema(request: Request, kb_id: str) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+
+        async with AsyncSessionLocal() as db:
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.discover_database_schema(kb_id)
+
+            if not result.get("success"):
+                raise HTTPException(status_code=400, detail=result.get("error"))
+
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in discover_db_schema: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post(
+    "/{kb_id}/sync-database",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Synchronize Database to Graph",
+    description="Introspect tables, transform rows into Chunk nodes, generate embeddings, and load them into Neo4j"
+)
+async def sync_db_to_graph(request: Request, kb_id: str) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+
+        async with AsyncSessionLocal() as db:
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.sync_database_source(kb_id)
+
+            if not result.get("success"):
+                raise HTTPException(status_code=400, detail=result.get("error"))
+
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in sync_db_to_graph: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")

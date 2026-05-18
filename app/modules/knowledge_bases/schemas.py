@@ -172,3 +172,47 @@ class KBURLIngest(BaseModel):
                 "proxy_mode": "basic"
             }
         }
+
+
+class DatabaseConnectionRegister(BaseModel):
+    """
+    Schema to register/associate a database connection with an Agent KB.
+    """
+    db_type: str = Field(..., description="Database type: 'sqlite' or 'postgresql'")
+    connection_params: dict = Field(..., description="JSON credentials/paths for the database connection")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "db_type": "sqlite",
+                "connection_params": {
+                    "filepath": "tester_zone/company.db"
+                }
+            }
+        }
+
+
+class DatabaseConnectionResponse(BaseModel):
+    """
+    Response schema for registered database connection details.
+    """
+    id: UUID
+    tenant_id: UUID
+    kb_id: UUID
+    db_type: str
+    connection_params: dict
+    last_synced_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DatabaseValidationResponse(BaseModel):
+    """
+    Schema returning the result of connection validation or schema discovery.
+    """
+    success: bool
+    message: str
+    tables: Optional[list[str]] = None
+    schema_details: Optional[dict] = None
