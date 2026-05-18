@@ -3,7 +3,7 @@ name: Secure GraphMind Deployment
 on:
   push:
     branches:
-      - backdev
+      - backdev 
 
 jobs:
   deploy:
