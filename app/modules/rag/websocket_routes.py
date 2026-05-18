@@ -70,6 +70,10 @@ async def rag_websocket(
         kb_ids = [str(kb.id) for kb in kbs]
         logger.info(f"🚀 Session ready: Agent={agent_id}, KBs={len(kb_ids)}")
 
+        # Initialize ChatService for history persistence
+        from ..chats.service import ChatService
+        chat_service = ChatService(db=db, tenant_id=tenant_id)
+
         try:
             while True:
                 # 4. WAIT FOR MESSAGE
@@ -77,6 +81,7 @@ async def rag_websocket(
                 try:
                     msg = json.loads(data)
                     query = msg.get("query")
+                    session_id = msg.get("session_id")
                 except:
                     await websocket.send_text(json.dumps({"error": "Invalid JSON format"}))
                     continue
@@ -84,20 +89,99 @@ async def rag_websocket(
                 if not query:
                     continue
 
-                # 5. STREAM RESPONSE (Optimized path)
-                async for chunk in rag_service.stream_rag_answer(
-                    query=query,
-                    agent_id=agent_id,
-                    kb_id=kb_ids
-                ):
-                    await websocket.send_text(chunk)
+                # 5. RESOLVE OR CREATE CHAT SESSION
+                if session_id:
+                    session = await chat_service.chat_repo.get_session_by_id(session_id)
+                    if not session:
+                        logger.warning(f"Session {session_id} not found in WS, creating new")
+                        session = await chat_service.chat_repo.create_session(
+                            agent_id=agent_id,
+                            user_id=user_id
+                        )
+                else:
+                    session = await chat_service.chat_repo.create_session(
+                        agent_id=agent_id,
+                        user_id=user_id
+                    )
 
-                # 6. SIGNAL COMPLETION
+                active_session_id = str(session.id)
+
+                # 6. SAVE USER MESSAGE
+                user_msg = await chat_service.chat_repo.add_message(
+                    session_id=active_session_id,
+                    role="user",
+                    content=query
+                )
+                await db.commit()
+
+                # 7. LOAD RECENT MEMORY (CONVERSATION HISTORY)
+                augmented_query = query
+                memory_used = False
+                conversation_turns = 0
+
+                if session.message_count > 1:
+                    try:
+                        memory_messages = await chat_service.chat_repo.get_recent_messages(
+                            session_id=active_session_id,
+                            count=10
+                        )
+                        history_messages = [m for m in memory_messages if str(m.id) != str(user_msg.id)]
+                        if history_messages:
+                            augmented_query = chat_service._format_memory_context(
+                                history=history_messages,
+                                current_query=query
+                            )
+                            memory_used = True
+                            conversation_turns = sum(1 for m in history_messages if m.role == "user")
+                    except Exception as me:
+                        logger.warning(f"⚠️ WebSocket Memory injection failed: {me}")
+
+                # 8. STREAM RESPONSE & COLLECT CHUNKS FOR PERSISTENCE
+                full_response_text = ""
+                sources = []
+
+                async for chunk in rag_service.stream_rag_answer(
+                    query=augmented_query,
+                    agent_id=agent_id,
+                    kb_id=kb_ids,
+                    user_id=user_id
+                ):
+                    try:
+                        # Extract metadata if it's the first JSON payload
+                        parsed = json.loads(chunk)
+                        if isinstance(parsed, dict) and parsed.get("type") == "metadata":
+                            parsed["session_id"] = active_session_id
+                            sources = parsed.get("sources", [])
+                            await websocket.send_text(json.dumps(parsed))
+                            continue
+                    except:
+                        pass
+
+                    # Forward stream chunk to client
+                    await websocket.send_text(chunk)
+                    full_response_text += chunk
+
+                # 9. SAVE ASSISTANT MESSAGE TO DB
+                assistant_metadata = {
+                    "sources": sources,
+                    "memory_used": memory_used,
+                    "conversation_turns": conversation_turns
+                }
+                await chat_service.chat_repo.add_message(
+                    session_id=active_session_id,
+                    role="assistant",
+                    content=full_response_text,
+                    metadata=assistant_metadata
+                )
+                await db.commit()
+
+                # 10. SIGNAL COMPLETION
                 await websocket.send_text(json.dumps({"type": "done"}))
+
         except WebSocketDisconnect:
             logger.info(f"❌ WebSocket disconnected: Agent={agent_id}")
         except Exception as e:
-            logger.error(f"❌ WebSocket session error: {e}")
+            logger.error(f"❌ WebSocket session error: {e}", exc_info=True)
             try:
                 await websocket.send_text(json.dumps({"error": "Session interrupted"}))
             except:
