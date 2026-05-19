@@ -8,6 +8,7 @@ from typing import List, Dict, Tuple, Set, Optional
 from dataclasses import dataclass
 from uuid import UUID
 
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.neo4j_repository import Neo4jRepository
 from app.core.embeddings import EmbeddingGenerator
 from app.core.config import get_settings
@@ -64,14 +65,16 @@ class RAGPipeline:
     - Safe: RLS enforced on every query, tenant_id validated everywhere
     """
 
-    def __init__(self, tenant_id: str):
+    def __init__(self, tenant_id: str, db: Optional[AsyncSession] = None):
         """
         Initialize RAG pipeline for tenant.
 
         Args:
             tenant_id: Tenant UUID (for multi-tenancy enforcement)
+            db: Optional PostgreSQL AsyncSession for pgvector search
         """
         self.tenant_id = tenant_id
+        self.db = db
         self.neo4j_repo = Neo4jRepository(tenant_id)
         self.settings = get_settings()
         self.router = QueryRouter()
@@ -290,18 +293,68 @@ class RAGPipeline:
     ) -> List[Dict]:
         """
         Retrieve top-k chunks by embedding similarity.
-
-        For Phase 2: Brute-force similarity over all chunks.
-        For Phase 3: Use vector index (ANN) for fast approximate search.
+        Uses PostgreSQL pgvector if available, with a resilient fallback to Neo4j.
 
         Args:
-            kb_id: Knowledge Base UUID
+            kb_ids: List of Knowledge Base UUIDs
             query_embedding: Query embedding vector
             top_k: Number of chunks to retrieve
 
         Returns:
             List of chunks sorted by similarity (highest first)
         """
+        # ============= STRATEGY 1: POSTGRESQL PGVECTOR =============
+        if self.db:
+            try:
+                from sqlalchemy import select, and_
+                from app.modules.knowledge_bases.models import DocumentChunk
+                
+                # Query using pgvector cosine_distance operator
+                # similarity = 1.0 - cosine_distance
+                stmt = (
+                    select(
+                        DocumentChunk.id,
+                        DocumentChunk.text,
+                        DocumentChunk.chunk_index,
+                        DocumentChunk.kb_id,
+                        (1.0 - DocumentChunk.embedding.cosine_distance(query_embedding)).label("similarity")
+                    )
+                    .where(
+                        and_(
+                            DocumentChunk.tenant_id == UUID(self.tenant_id),
+                            DocumentChunk.kb_id.in_([UUID(kb_id) for kb_id in kb_ids])
+                        )
+                    )
+                    .order_by(DocumentChunk.embedding.cosine_distance(query_embedding).asc())
+                    .limit(top_k)
+                )
+                
+                result = await self.db.execute(stmt)
+                rows = result.fetchall()
+                
+                pg_chunks = []
+                for row in rows:
+                    similarity = float(row.similarity)
+                    if similarity >= self.settings.similarity_min_threshold:
+                        pg_chunks.append({
+                            "chunk_id": str(row.id),
+                            "text": row.text,
+                            "position": row.chunk_index,
+                            "kb_id": str(row.kb_id),
+                            "embedding": None,  # embedding vector itself not needed downstream
+                            "similarity": similarity,
+                            "weight": 1.0
+                        })
+                
+                logger.info(f"🎯 PostgreSQL pgvector retrieved {len(pg_chunks)} seed chunks")
+                if pg_chunks:
+                    return pg_chunks
+                
+                logger.warning("📉 No chunks met similarity threshold in PostgreSQL. Falling back to Neo4j...")
+            except Exception as pg_err:
+                logger.error(f"⚠️ PostgreSQL pgvector search failed: {pg_err}. Falling back to Neo4j...", exc_info=True)
+
+        # ============= STRATEGY 2: NEO4J VECTOR FALLBACK =============
         query = """
         MATCH (kb:KnowledgeBase)
         WHERE kb.id IN $kb_ids AND kb.tenant_id = $tenant_id
@@ -322,12 +375,12 @@ class RAGPipeline:
             )
 
             if not results:
-                logger.warning(f"📉 No chunks found for KB {kb_id} in Neo4j.")
+                logger.warning(f"📉 No chunks found for KBs {kb_ids} in Neo4j.")
                 return []
 
             # LOG CHUNK TEXT (Verification)
             for res in results[:3]:
-                logger.info(f"📄 Found chunk in DB: {res['text'][:50]}... (Dim: {len(res['embedding'])})")
+                logger.info(f"📄 Found chunk in Neo4j: {res['text'][:50]}... (Dim: {len(res['embedding'])})")
 
             # Compute similarities (Phase 2: brute force)
             chunks_with_similarity = []
@@ -357,14 +410,14 @@ class RAGPipeline:
             
             if chunks_with_similarity:
                 max_score = max(c["similarity"] for c in chunks_with_similarity)
-                logger.info(f"🎯 Max similarity score found: {max_score:.4f} (Threshold: 0.1)")
+                logger.info(f"🎯 Max similarity score found in Neo4j: {max_score:.4f} (Threshold: {self.settings.similarity_min_threshold})")
             else:
-                logger.warning("📉 No chunks found in DB (with embeddings) for this Knowledge Base.")
+                logger.warning("📉 No chunks found in Neo4j (with embeddings) for this Knowledge Base.")
 
             return sorted_chunks[:top_k]
 
         except Exception as e:
-            logger.error(f"❌ Failed to retrieve seed chunks: {e}")
+            logger.error(f"❌ Failed to retrieve seed chunks via Neo4j: {e}")
             return []
 
     async def _expand_via_graph(

@@ -95,7 +95,7 @@ class RAGService:
         self.tenant_id = str(tenant_id)
 
         # Initialize core components
-        self.pipeline = RAGPipeline(self.tenant_id)
+        self.pipeline = RAGPipeline(self.tenant_id, db=self.db)
         self.kb_repo = KnowledgeBaseRepository(db, self.tenant_id)
         self.agent_repo = AgentRepository(db, self.tenant_id)
         self.llm_client = DeepInfraLLMClient()

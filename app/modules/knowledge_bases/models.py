@@ -191,3 +191,53 @@ class DatabaseConnection(Base):
     def __repr__(self) -> str:
         return f"<DatabaseConnection id={self.id} type={self.db_type} kb_id={self.kb_id}>"
 
+
+class DocumentChunk(Base):
+    """
+    Document Chunk model - stores text chunks and their embeddings in PostgreSQL using pgvector.
+    Provides hybrid search capabilities (dense vector search in PG + relationship search in Neo4j).
+    """
+
+    __tablename__ = "document_chunks"
+
+    id = Column(
+        SQLAlchemyUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True,
+        nullable=False,
+    )
+    
+    tenant_id = Column(
+        SQLAlchemyUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    
+    kb_id = Column(
+        SQLAlchemyUUID(as_uuid=True),
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    text = Column(Text, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    
+    # Store the vector. Dimension is 1024 as per EMBEDDING_DIMENSION in .env
+    from pgvector.sqlalchemy import Vector
+    embedding = Column(Vector(1024), nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_chunks_tenant_id", "tenant_id"),
+        Index("ix_chunks_kb_id", "kb_id"),
+        # We can add an hnsw or ivfflat index later for performance
+    )
+    
+    def __repr__(self) -> str:
+        return f"<DocumentChunk id={self.id} kb_id={self.kb_id} index={self.chunk_index}>"
+
+

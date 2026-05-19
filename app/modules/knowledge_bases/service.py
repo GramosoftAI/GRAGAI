@@ -11,7 +11,7 @@ import asyncio
 import sqlite3
 import os
 
-from .models import KnowledgeBase, DatabaseConnection
+from .models import KnowledgeBase, DatabaseConnection, DocumentChunk
 from .repository import KnowledgeBaseRepository
 from .audit import KBauditLog, KBauditEventType
 from . import schemas
@@ -289,6 +289,19 @@ class KnowledgeBaseService:
                 "text": chunks[i][:1000], "position": i, "token_count": TextChunker.estimate_tokens(chunks[i]),
                 "embedding": embeddings[i], "created_at": datetime.utcnow().isoformat()
             } for i in range(len(chunks))]
+
+            # Save chunks to PostgreSQL pgvector table
+            for i in range(len(chunks)):
+                pg_chunk = DocumentChunk(
+                    id=uuid.UUID(chunk_ids[i]),
+                    tenant_id=self.tenant_id,
+                    kb_id=uuid.UUID(kb_id),
+                    text=chunks[i],
+                    chunk_index=i,
+                    embedding=embeddings[i],
+                )
+                self.db.add(pg_chunk)
+            logger.info(f"✅ Staged {len(chunks)} chunks in PostgreSQL")
 
             batch_create_query = """
             WITH $chunks AS chunk_list
@@ -631,6 +644,15 @@ class KnowledgeBaseService:
             """
             await self.neo4j_repo.execute_write(purge_query, {"kb_id": kb_id, "tenant_id": str(self.tenant_id)})
 
+            # Delete any previous database chunks from Postgres
+            from sqlalchemy import delete
+            await self.db.execute(
+                delete(DocumentChunk).where(
+                    DocumentChunk.kb_id == uuid.UUID(kb_id),
+                    DocumentChunk.tenant_id == self.tenant_id
+                )
+            )
+
             # Load new chunks in a single query transaction
             load_query = """
             MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
@@ -667,6 +689,19 @@ class KnowledgeBaseService:
                 "batch": batch_data
             })
             logger.info(f"✅ Loaded {len(batch_data)} database rows as Chunk nodes in Neo4j linked to KB {kb_id}")
+
+            # Load new chunks into Postgres pgvector table
+            for i, item in enumerate(batch_data):
+                pg_chunk = DocumentChunk(
+                    id=uuid.UUID(item["id"]),
+                    tenant_id=self.tenant_id,
+                    kb_id=uuid.UUID(kb_id),
+                    text=item["text"],
+                    chunk_index=i,
+                    embedding=item["embedding"],
+                )
+                self.db.add(pg_chunk)
+            logger.info(f"✅ Loaded {len(batch_data)} database rows as DocumentChunks in PostgreSQL pgvector")
 
             # 5. POSTGRES STATUS UPDATE
             db_conn.last_synced_at = datetime.now()

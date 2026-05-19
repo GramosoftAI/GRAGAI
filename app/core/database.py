@@ -166,6 +166,7 @@ async def init_rls_policies():
         "chat_sessions",
         "chat_messages",
         "personalities",
+        "document_chunks",
     ]
 
     async with engine.begin() as conn:
@@ -289,7 +290,8 @@ async def verify_rls_enabled():
         "chat_sessions",
         "chat_messages",
         "personalities",
-    ]
+        "document_chunks",
+     ]
 
     async with engine.begin() as conn:
         try:
@@ -352,7 +354,7 @@ async def init_db():
         from ..models.base import Base
         from ..modules.auth.models import User, Tenant, APIKey, TokenBlacklist
         from ..modules.agents.models import Agent
-        from ..modules.knowledge_bases.models import KnowledgeBase
+        from ..modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
         from ..modules.chats.models import ChatSession, ChatMessage
         from ..modules.personalities.models import Personality
 
@@ -391,6 +393,7 @@ async def init_db():
         logger.info("📝 Creating database tables...")
         logger.debug(f"Registered models: {list(Base.metadata.tables.keys())}")
         async with engine.begin() as conn:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.run_sync(Base.metadata.create_all)
         logger.info(
             f"✅ Database tables created/verified ({len(Base.metadata.tables)} tables)"
