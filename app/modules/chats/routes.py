@@ -69,9 +69,37 @@ def get_tenant_and_user(request: Request) -> tuple:
     return str(tenant_id), str(user_id)
 
 
+def _format_message_for_list(message) -> dict:
+    """Format a ChatMessage model with extra details for list views."""
+    metadata = message.message_metadata or {}
+
+    # Extract confidence score if present in metadata
+    confidence = metadata.get("confidence")
+
+    # Extract sources/nodes count
+    sources = metadata.get("sources")
+    nodes = len(sources) if isinstance(sources, list) else None
+
+    msg_dict = {
+        "role": message.role,
+        "content": message.content,
+    }
+
+    if confidence is not None:
+        msg_dict["confidence"] = confidence
+    if nodes is not None:
+        msg_dict["nodes"] = nodes
+    if message.created_at:
+        msg_dict["timestamp"] = message.created_at.isoformat()
+
+    msg_dict["message_count"] = message.position + 1
+
+    return msg_dict
+
+
 def _format_session(session) -> dict:
     """Format a ChatSession model into API response dict."""
-    return {
+    formatted = {
         "id": str(session.id),
         "agent_id": str(session.agent_id),
         "title": session.title,
@@ -84,6 +112,11 @@ def _format_session(session) -> dict:
             session.created_at.isoformat() if session.created_at else None
         ),
     }
+
+    if hasattr(session, "messages"):
+        formatted["messages"] = [_format_message_for_list(m) for m in session.messages]
+
+    return formatted
 
 
 def _format_message(message) -> dict:
@@ -98,6 +131,7 @@ def _format_message(message) -> dict:
             message.created_at.isoformat() if message.created_at else None
         ),
     }
+
 
 
 # ============================================================================

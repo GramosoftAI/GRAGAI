@@ -363,3 +363,33 @@ class ChatRepository(BaseRepository):
             f"(session {session_id}, total={session.message_count})"
         )
         return messages
+
+    async def get_messages_for_sessions(
+        self,
+        session_ids: List[uuid.UUID],
+    ) -> List[ChatMessage]:
+        """
+        Get all messages for a list of session IDs, ordered by session_id and position.
+
+        Args:
+            session_ids: List of session UUIDs
+
+        Returns:
+            List of ChatMessage models
+        """
+        if not session_ids:
+            return []
+
+        query = (
+            select(ChatMessage)
+            .where(
+                and_(
+                    ChatMessage.session_id.in_(session_ids),
+                    ChatMessage.tenant_id == self.tenant_id,
+                )
+            )
+            .order_by(ChatMessage.session_id, ChatMessage.position.asc())
+        )
+        result = await self.db.execute(query)
+        return list(result.scalars().all())
+

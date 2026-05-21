@@ -74,6 +74,10 @@ async def rag_websocket(
         from ..chats.service import ChatService
         chat_service = ChatService(db=db, tenant_id=tenant_id)
 
+        # Initialize QueryRewriter for Prompt Enhancement
+        from ...core.query_rewriter import QueryRewriter
+        query_rewriter = QueryRewriter()
+
         try:
             while True:
                 # 4. WAIT FOR MESSAGE
@@ -82,6 +86,7 @@ async def rag_websocket(
                     msg = json.loads(data)
                     query = msg.get("query")
                     session_id = msg.get("session_id")
+                    enhance_prompt = msg.get("prompt_enhancer", False) or msg.get("enhance_prompt", False)
                 except:
                     await websocket.send_text(json.dumps({"error": "Invalid JSON format"}))
                     continue
@@ -114,8 +119,22 @@ async def rag_websocket(
                 )
                 await db.commit()
 
+                # 6.5 CHECK PROMPT ENHANCER / QUERY REWRITING
+                enhanced_query = query
+                is_enhanced = False
+                if enhance_prompt:
+                    try:
+                        logger.info(f"✨ Running Prompt Enhancer for: '{query}'")
+                        rewritten = await query_rewriter.rewrite_query(query)
+                        if rewritten and rewritten != query:
+                            enhanced_query = rewritten
+                            is_enhanced = True
+                            logger.info(f"✨ Enhanced Query: '{query}' -> '{enhanced_query}'")
+                    except Exception as e:
+                        logger.error(f"⚠️ Prompt enhancement failed: {e}", exc_info=True)
+
                 # 7. LOAD RECENT MEMORY (CONVERSATION HISTORY)
-                augmented_query = query
+                augmented_query = enhanced_query
                 memory_used = False
                 conversation_turns = 0
 
@@ -129,16 +148,23 @@ async def rag_websocket(
                         if history_messages:
                             augmented_query = chat_service._format_memory_context(
                                 history=history_messages,
-                                current_query=query
+                                current_query=enhanced_query
                             )
                             memory_used = True
                             conversation_turns = sum(1 for m in history_messages if m.role == "user")
                     except Exception as me:
                         logger.warning(f"⚠️ WebSocket Memory injection failed: {me}")
 
+                logger.info(f"🔍 Raw Query: {query}")
+                if is_enhanced:
+                    logger.info(f"✨ Enhanced RAG Query: {enhanced_query}")
+                if memory_used:
+                    logger.info(f"🧠 Augmented Query: \n{augmented_query}")
+
                 # 8. STREAM RESPONSE & COLLECT CHUNKS FOR PERSISTENCE
                 full_response_text = ""
                 sources = []
+                has_error = False
 
                 async for chunk in rag_service.stream_rag_answer(
                     query=augmented_query,
@@ -149,11 +175,20 @@ async def rag_websocket(
                     try:
                         # Extract metadata if it's the first JSON payload
                         parsed = json.loads(chunk)
-                        if isinstance(parsed, dict) and parsed.get("type") == "metadata":
-                            parsed["session_id"] = active_session_id
-                            sources = parsed.get("sources", [])
-                            await websocket.send_text(json.dumps(parsed))
-                            continue
+                        if isinstance(parsed, dict):
+                            if parsed.get("type") == "metadata":
+                                parsed["session_id"] = active_session_id
+                                if is_enhanced:
+                                    parsed["is_enhanced"] = True
+                                    parsed["enhanced_query"] = enhanced_query
+                                sources = parsed.get("sources", [])
+                                await websocket.send_text(json.dumps(parsed))
+                                continue
+                            elif "error" in parsed:
+                                await websocket.send_text(chunk)
+                                full_response_text = parsed["error"]
+                                has_error = True
+                                break
                     except:
                         pass
 
@@ -167,6 +202,9 @@ async def rag_websocket(
                     "memory_used": memory_used,
                     "conversation_turns": conversation_turns
                 }
+                if has_error:
+                    assistant_metadata["error"] = True
+
                 await chat_service.chat_repo.add_message(
                     session_id=active_session_id,
                     role="assistant",
@@ -176,7 +214,8 @@ async def rag_websocket(
                 await db.commit()
 
                 # 10. SIGNAL COMPLETION
-                await websocket.send_text(json.dumps({"type": "done"}))
+                if not has_error:
+                    await websocket.send_text(json.dumps({"type": "done"}))
 
         except WebSocketDisconnect:
             logger.info(f"❌ WebSocket disconnected: Agent={agent_id}")

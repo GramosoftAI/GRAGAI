@@ -115,6 +115,7 @@ class ChatService:
         user_id: str,
         limit: int = 50,
         offset: int = 0,
+        include_messages: bool = True,
     ) -> tuple:
         """
         List chat sessions for a user+agent pair.
@@ -124,16 +125,37 @@ class ChatService:
             user_id: User UUID
             limit: Max results
             offset: Pagination offset
+            include_messages: Whether to load and attach messages to sessions
 
         Returns:
             Tuple of (sessions, total_count)
         """
-        return await self.chat_repo.list_sessions_by_agent(
+        sessions, total = await self.chat_repo.list_sessions_by_agent(
             agent_id=agent_id,
             user_id=user_id,
             limit=limit,
             offset=offset,
         )
+
+        if not sessions:
+            return [], total
+
+        if include_messages:
+            session_ids = [s.id for s in sessions]
+            messages = await self.chat_repo.get_messages_for_sessions(session_ids)
+
+            # Group messages by session_id
+            from collections import defaultdict
+            messages_by_session = defaultdict(list)
+            for msg in messages:
+                messages_by_session[msg.session_id].append(msg)
+
+            # Attach messages to session models
+            for session in sessions:
+                session.messages = messages_by_session.get(session.id, [])
+
+        return sessions, total
+
 
     async def get_session_with_messages(
         self,

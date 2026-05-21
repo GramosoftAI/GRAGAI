@@ -134,6 +134,9 @@ class RAGService:
 
         # Fetch Agent details for persona branding (system_prompt, description)
         agent = await self.agent_repo.get_by_id(agent_id)
+        if not agent:
+            yield json.dumps({"error": f"Agent {agent_id} not found or inactive under the current tenant"})
+            return
         
         base_prompt = agent.system_prompt or ""
         personality_description = agent.personality or "You are a warm, approachable, and supportive assistant." # Fallback
@@ -192,7 +195,8 @@ Base Instruction:
                 {"subject": t["subject"], "predicate": t["predicate"], "object": t["object"]}
                 for t in (context.triplets or [])
             ],
-            "kb_name": kb.name if len(kb_ids) == 1 else f"Multi-KB ({len(kb_ids)})"
+            "kb_name": kb.name if len(kb_ids) == 1 else f"Multi-KB ({len(kb_ids)})",
+            "augmented_query": query
         }
         yield json.dumps(metadata)
 
@@ -308,6 +312,13 @@ Base Instruction:
 
         # Fetch Agent details for persona branding (system_prompt, description)
         agent = await self.agent_repo.get_by_id(agent_id)
+        if not agent:
+            logger.error(f"❌ Agent {agent_id} not found or inactive under the current tenant")
+            return {
+                "error": f"Agent {agent_id} not found or inactive under the current tenant",
+                "answer": None,
+                "sources": [],
+            }
         
         base_prompt = agent.system_prompt or ""
         personality_description = agent.personality or "You are a warm, approachable, and supportive assistant." # Fallback
@@ -529,6 +540,7 @@ Base Instruction:
                 "chunks_used": len(context.chunks),
                 "entities_mentioned": list(context.entity_mentions.keys()),
                 "reasoning_path": reasoning_path,
+                "augmented_query": query,
             },
             "stats": {
                 "total_chunks": len(context.chunks),
