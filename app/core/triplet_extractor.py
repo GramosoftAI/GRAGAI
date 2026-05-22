@@ -172,17 +172,30 @@ class TripletExtractor:
 
         try:
             # --- ONTOLOGY GROUNDING INJECTION ---
-            valid_types = "PERSON, ORGANIZATION, LOCATION, CONCEPT, EVENT, PRODUCT, TECHNOLOGY, NUMERIC"
+            valid_types_str = "PERSON, ORGANIZATION, LOCATION, CONCEPT, EVENT, PRODUCT, TECHNOLOGY, NUMERIC"
+            valid_relations_str = ""
+            rules_text = ""
             if self.tenant_id:
                 from ..modules.ontology.service import OntologyService
                 ont_svc = OntologyService(self.tenant_id)
                 ont_data = await ont_svc.get_ontology()
                 if ont_data.get("classes"):
-                    valid_types = ", ".join([c["name"] for c in ont_data["classes"]])
+                    valid_types_str = ", ".join([c["name"] for c in ont_data["classes"]])
+                if ont_data.get("relations"):
+                    # Avoid duplicate empty objects if no relations
+                    rels = [r["name"] for r in ont_data["relations"] if r.get("name")]
+                    if rels:
+                        valid_relations_str = "\nValid relationship predicates: " + ", ".join(rels)
+                if ont_data.get("rules"):
+                    rules_list = [f"({r['source_class']} -> {r['relation']} -> {r['target_class']})" for r in ont_data["rules"] if r.get("source_class")]
+                    if rules_list:
+                        rules_text = "\nALLOWED RELATIONSHIP RULES (STRICT SCHEMA):\n" + "\n".join(rules_list) + "\nYou MUST ONLY use these exact relationships if they apply."
+
+            replacement = f"Valid entity types: {valid_types_str}{valid_relations_str}{rules_text}"
             
             prompt = TRIPLET_EXTRACTION_PROMPT.replace(
                 "Valid entity types: PERSON, ORGANIZATION, LOCATION, CONCEPT, EVENT, PRODUCT, TECHNOLOGY, NUMERIC",
-                f"Valid entity types: {valid_types}"
+                replacement
             ).format(text=chunk_text[:2000])
 
             logger.info(f"Calling LLM for triplet extraction (chunk {chunk_id[:8]}, text length: {len(chunk_text)})")

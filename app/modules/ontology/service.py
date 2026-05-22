@@ -2,7 +2,7 @@
 
 import logging
 from typing import List, Dict, Optional
-from ..graphs.neo4j_repository import Neo4jRepository
+from ...core.neo4j_repository import Neo4jRepository
 from ...core.embeddings import EmbeddingGenerator
 from . import schemas
 
@@ -59,19 +59,56 @@ class OntologyService:
         logger.info(f"✅ Ontology Relation created: {name}")
         return {"success": True, "name": name}
 
+    async def create_rule(self, request: schemas.OntologyRuleCreate) -> dict:
+        """Create a new strict ontology rule"""
+        source = request.source_class.upper().strip().replace(" ", "_")
+        relation = request.relation.upper().strip().replace(" ", "_")
+        target = request.target_class.upper().strip().replace(" ", "_")
+        
+        query = """
+        MERGE (c1:OntologyClass {tenant_id: $tenant_id, name: $source})
+        MERGE (c2:OntologyClass {tenant_id: $tenant_id, name: $target})
+        MERGE (r:OntologyRelation {tenant_id: $tenant_id, name: $relation})
+        MERGE (c1)-[rule:ALLOWED_RELATION {name: $relation}]->(c2)
+        SET rule.description = $description,
+            rule.updated_at = timestamp()
+        RETURN rule.name as name
+        """
+        
+        await self.neo4j_repo.execute_write(query, {
+            "tenant_id": self.tenant_id,
+            "source": source,
+            "relation": relation,
+            "target": target,
+            "description": request.description
+        })
+        
+        logger.info(f"✅ Ontology Rule created: {source} -[{relation}]-> {target}")
+        return {"success": True, "source": source, "relation": relation, "target": target}
+
     async def get_ontology(self) -> dict:
         """Fetch the full ontology for a tenant"""
         query = """
         MATCH (c:OntologyClass {tenant_id: $tenant_id})
         WITH collect({name: c.name, description: c.description}) as classes
-        MATCH (r:OntologyRelation {tenant_id: $tenant_id})
+        
+        OPTIONAL MATCH (r:OntologyRelation {tenant_id: $tenant_id})
         WITH classes, collect({name: r.name, description: r.description}) as relations
-        RETURN classes, relations
+        
+        OPTIONAL MATCH (c1:OntologyClass {tenant_id: $tenant_id})-[rule:ALLOWED_RELATION]->(c2:OntologyClass {tenant_id: $tenant_id})
+        WITH classes, relations, collect({
+            source_class: c1.name, 
+            relation: rule.name, 
+            target_class: c2.name, 
+            description: rule.description
+        }) as rules
+        
+        RETURN classes, relations, rules
         """
         
         results = await self.neo4j_repo.execute_read(query, {"tenant_id": self.tenant_id})
         if not results:
-            return {"classes": [], "relations": []}
+            return {"classes": [], "relations": [], "rules": []}
             
         return results[0]
 

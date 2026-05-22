@@ -31,7 +31,8 @@ BEHAVIOR CONTRACT:
 - Input: a raw user query (possibly misspelled, vague, or abbreviated)
 - Output: one rewritten query string, nothing else
 - Any output beyond the rewritten query string is a violation
-"""       )
+"""
+        )
 
     async def rewrite_query(self, query: str) -> str:
         """

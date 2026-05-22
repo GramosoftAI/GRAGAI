@@ -1,213 +1,147 @@
-# GraphMind - Production-Grade Multi-Tenant FastAPI Backend
+<div align="center">
 
-A modular, scalable FastAPI backend with:
+# 🌐 GRAG
+**Enterprise-Grade Multi-Tenant Graph RAG & Autonomous AI Platform**
 
-✅ **Modular Architecture** - Each feature is a self-contained module  
-✅ **Plug-and-Play Modules** - Dynamic router loading  
-✅ **Shared Core Resources** - Centralized config, database, security  
-✅ **Multi-Tenant Support** - Built-in tenant isolation  
-✅ **Production Ready** - Docker, migrations, testing setup  
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Neo4j](https://img.shields.io/badge/Neo4j-008CC1?style=for-the-badge&logo=neo4j&logoColor=white)](https://neo4j.com/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
-## Project Structure
+*Transforming unstructured data into strict, actionable intelligence using Active Ontologies, Vector Search, and Multi-Hop Graph Traversals.*
 
-```
-fastapi-backend/
-├── app/
-│   ├── core/              # Shared logic (config, db, security, middleware)
-│   ├── modules/           # Feature modules (auth, users, tenants, etc.)
-│   ├── schemas/           # Pydantic models (request/response)
-│   ├── models/            # SQLAlchemy ORM models
-│   ├── utils/             # Utility functions (validators, formatters, helpers)
-│   ├── plugins/           # Plugin system (dynamic router loading)
-│   └── main.py            # FastAPI app entry point
-│
-├── tests/                 # Test suite
-├── config/                # Environment-specific configs
-├── migrations/            # Database migrations (Alembic)
-├── requirements.txt       # Python dependencies
-├── docker-compose.yml     # Docker services
-├── dockerfile             # Docker image
-└── .env                   # Environment variables
-```
+</div>
 
-## Quick Start
+---
 
-### 1. Install Dependencies
+## 🚀 Welcome to GRAG
+
+**GRAG** (formerly GraphMind) is a state-of-the-art backend system that bridges the gap between raw documents and autonomous AI reasoning. By combining the deterministic structure of **Neo4j Knowledge Graphs**, the semantic power of **Vector Embeddings (pgvector)**, and **Active Enterprise Ontologies**, GRAG allows organizations to deploy highly accurate, context-aware AI Agents isolated securely across multiple tenants.
+
+---
+
+## ✨ Cutting-Edge Features
+
+### 🏢 Ironclad Multi-Tenancy
+* **Row-Level Security (RLS):** Enforced natively at the PostgreSQL level for all relational data. 
+* **Graph Isolation:** Mandatory `tenant_id` constraints enforced on every single Neo4j node and relationship. 
+* Zero cross-tenant data leakage, guaranteed natively by the database layers.
+
+### 🧠 Active Enterprise Ontology (AEO)
+* Move beyond hallucinated LLM entities. GRAG enforces a **Strict Semantic Schema**.
+* Define allowed Classes (e.g., `Application`, `Server`) and Rules (e.g., `Application -> DEPENDS_ON -> Database`).
+* The extraction pipeline dynamically injects these rules directly into the LLM prompt, guaranteeing that the Knowledge Graph is built predictably and accurately.
+
+### 🕸️ True Hybrid Graph RAG
+* **Multi-Hop Reasoning:** Doesn't just find similar text—traverses relationships (`SIMILAR`, `MENTIONS`, `NEXT`) to assemble comprehensive evidence.
+* **Semantic Vector Search:** Integrates `bge-large-en-v1.5` embeddings for deep contextual matching.
+* **Triplet Extraction:** Uses advanced LLMs to extract factual `(Subject, Predicate, Object)` graphs from data chunks.
+
+### 💬 Conversational Memory & Agents
+* **Session Persistence:** Remembers user contexts across multi-turn conversations.
+* **Persona Engine:** Configure Agents with tailored system prompts and dynamic personalities (Technical, Formal, Friendly, etc.).
+* **Memory Injection:** Past chat history is dynamically embedded into the RAG context for seamless follow-up reasoning.
+
+### 📄 Intelligent Data Ingestion
+* **Multimodal Fallbacks:** Automatically utilizes Vision AI (e.g., Llama-3-Vision) to OCR scanned PDFs lacking text layers.
+* **Automated Web Crawling:** Point to a URL and auto-ingest hierarchies.
+* **Smart Chunking:** Sentence-aware text splitting with optimized token overlap.
+
+### 🔌 Plug-and-Play Architecture
+* **Dynamic Module Loading:** Drop a new feature into `app/modules/` and FastAPI automatically discovers and registers its routers. No monolithic boilerplate.
+
+---
+
+## 🛠️ Technology Stack
+
+| Component | Technology | Purpose |
+| :--- | :--- | :--- |
+| **Core Framework** | `FastAPI` | High-performance async REST & WebSocket APIs |
+| **Relational DB** | `PostgreSQL` | Users, Tenants, Billing, Auth, RLS Security |
+| **Vector Engine** | `pgvector` | Semantic similarity and embedding indexing |
+| **Knowledge Graph**| `Neo4j` | Entity relationships, Triplet storage, Multi-hop RAG |
+| **Inference/LLM** | `Ollama` / `DeepInfra` | Local/Remote LLM orchestration, Triplet Extraction |
+| **Caching** | `Redis` | Session management and fast volatile data |
+| **ORM** | `SQLAlchemy` (Async) | Database modeling and schema migrations |
+
+---
+
+## 🚦 Quick Start Guide
+
+### 1. Prerequisites
+Ensure you have Docker and Docker Compose installed.
+
+### 2. Clone & Configure
 ```bash
-pip install -r requirements.txt
-```
-
-### 2. Setup Environment
-```bash
+git clone https://github.com/GramosoftAI/GRAGAI.git
+cd GRAGAI
 cp .env.example .env
-# Update .env with your settings
+# Edit .env with your specific API keys (DeepInfra, etc.) and passwords
 ```
 
-### 3. Run Locally
+### 3. Launch via Docker (Recommended)
 ```bash
-uvicorn app.main:app --reload
+docker-compose up -d --build
 ```
+This will spin up Postgres, Neo4j, Redis, Ollama, and the GRAG API server. 
+The API will be accessible at: `http://localhost:8000/docs`
 
-Visit: http://localhost:8000/docs
-
-### 4. Run with Docker
+### 4. Local Development Setup (Manual)
 ```bash
-docker-compose up
+# Create Virtual Environment
+python -m venv mind
+
+# Windows Activation
+.\\mind\\Scripts\\activate
+# Linux/Mac Activation
+# source mind/bin/activate
+
+# Install Dependencies
+pip install -r requirements.txt
+
+# Start Backend
+./start_backend.ps1  # Windows PowerShell
+# ./start_backend.sh # Linux/Mac
 ```
 
-## Features
+---
 
-### Dynamic Module Loading
-New modules are automatically discovered and registered. Just create a new directory in `app/modules/` with a `routes.py` file containing a `router` object.
+## 📁 Project Architecture
 
-### Module Template
+```plaintext
+GRAG/
+├── app/
+│   ├── core/              # Shared logic (Config, DB, Security, RLS, Triplet Extractor)
+│   ├── modules/           # Dynamic Feature Modules
+│   │   ├── agents/        # AI Agent configuration
+│   │   ├── auth/          # JWT Security & Registration
+│   │   ├── chats/         # Memory and conversational history
+│   │   ├── etl/           # Ingestion, Chunking, OCR
+│   │   ├── ontology/      # Strict Schema Rules & Relationship constraints
+│   │   ├── rag/           # Hybrid retrieval pipeline & generation
+│   │   └── tenants/       # Isolation management
+│   ├── main.py            # Application entry point
+├── config/                # Environment configurations
+├── migrations/            # Alembic DB migrations
+└── docker-compose.yml     # Infrastructure orchestration
 ```
-app/modules/feature_name/
+
+---
+
+## 🤝 Contributing & Extension
+
+**Adding New Features:**
+Because of the dynamic module system, creating a new feature is as simple as creating a new folder in `app/modules/`. 
+
+```plaintext
+app/modules/my_feature/
 ├── __init__.py
-├── routes.py       # FastAPI router
-├── models.py       # SQLAlchemy models
-├── schemas.py      # Pydantic schemas
-├── services.py     # Business logic
-└── dependencies.py # FastAPI dependencies
+├── routes.py       # Expose APIRouter as 'router' (auto-loaded)
+├── models.py       # SQLAlchemy ORM models
+├── schemas.py      # Pydantic validation schemas
+└── service.py      # Business logic
 ```
 
-### Multi-Tenant Support
-- Tenant isolation via middleware
-- Tenant dependency injection
-- X-Tenant-ID header support
-
-### Security
-- JWT authentication
-- Password hashing (bcrypt)
-- CORS middleware
-- Role-based access control
-
-## Testing
-
-```bash
-# Run all tests
-pytest
-
-# With coverage
-pytest --cov=app tests/
-
-# Run specific test file
-pytest tests/unit/test_auth.py
-```
-
-## Database Migrations
-
-```bash
-# Create migration
-alembic revision --autogenerate -m "migration message"
-
-# Apply migrations
-alembic upgrade head
-
-# Rollback
-alembic downgrade -1
-```
-
-## Environment Configuration
-
-- **Development**: `config/development.py`
-- **Production**: `config/production.py`
-- **Testing**: `config/testing.py`
-
-## Adding New Features
-
-1. Create module directory: `app/modules/feature_name/`
-2. Implement `routes.py` with a `router` object
-3. Add models, schemas, services as needed
-4. Router is automatically loaded on startup
-
-## API Documentation
-
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-
-## Architecture Principles
-
-- **Separation of Concerns**: Each module is independent
-- **DRY (Don't Repeat Yourself)**: Shared logic in core/
-- **Dependency Injection**: FastAPI Depends() for clean code
-- **Type Safety**: Pydantic for validation, mypy for type checking
-- **Testability**: Easy to mock and isolate
-
-## Core Modules
-
-### `core/config.py` - Configuration Management
-- Environment variable support
-- Settings for different environments
-
-### `core/database.py` - Database Management
-- SQLAlchemy integration
-- Session factory
-- Context managers
-
-### `core/security.py` - Security Utilities
-- JWT token creation/verification
-- Password hashing
-- Token validation
-
-### `core/middleware.py` - Request Processing
-- Tenant middleware
-- Error handling
-- Request logging
-
-### `core/exceptions.py` - Custom Exceptions
-- HTTP exceptions
-- Tenant/Auth errors
-- Validation errors
-
-## Built-in Modules
-
-### Auth Module (`modules/auth/`)
-- User registration
-- Login with JWT
-- Token refresh
-
-### Users Module (`modules/users/`)
-- User CRUD operations
-- User listing with pagination
-- User role management
-
-### Tenants Module (`modules/tenants/`)
-- Tenant creation/management
-- Multi-tenant data isolation
-- Tenant membership
-
-## Utilities
-
-### `utils/validators.py`
-- Email validation
-- Slug validation
-- Password strength checking
-
-### `utils/formatters.py`
-- DateTime formatting
-- Response formatting
-- camelCase to snake_case conversion
-
-### `utils/helpers.py`
-- ID generation
-- List chunking
-- Dictionary operations
-
-## Plugin System (`plugins/loader.py`)
-
-Automatically discovers and loads routers from modules. Supports:
-- Auto-discovery of module routers
-- Custom router loading
-- Error handling for failed loads
-
-## Next Steps
-
-1. **Database Setup**: Configure PostgreSQL connection in `.env`
-2. **Create First Feature**: Add module in `app/modules/`
-3. **Write Tests**: Use `tests/` directory structure
-4. **Deploy**: Use Docker for containerization
-
-## License
-
-MIT
+## 📜 License
+This project is licensed under the **MIT License**.
