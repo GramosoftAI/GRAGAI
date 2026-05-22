@@ -50,8 +50,8 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # ============= CHECK IF ROUTE IS PUBLIC =============
         route_key = (request.url.path, request.method)
-        if route_key in self.PUBLIC_ROUTES:
-            logger.debug(f"Public route: {request.method} {request.url.path}")
+        if route_key in self.PUBLIC_ROUTES or request.url.path.startswith("/api/v1/embed"):
+            logger.debug(f"Public/Embed route: {request.method} {request.url.path}")
             return await call_next(request)
 
         # ============= EXTRACT JWT =============

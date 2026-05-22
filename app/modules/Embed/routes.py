@@ -1,0 +1,508 @@
+"""REST routes for Embeddable Chat Widget
+
+This module handles public requests from the external chat widget.
+It bypasses standard JWT authorization but enforces strict Multi-Tenancy
+by validating agent ownership against tenant_id and setting PostgreSQL RLS.
+"""
+
+import os
+import uuid
+import logging
+import json
+import asyncio
+from typing import Optional
+from fastapi import APIRouter, Request, HTTPException, status, BackgroundTasks, Query, Response, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
+
+from ..chats.service import ChatService
+from ..chats.knowledge_service import ChatKnowledgeService
+from ..agents.repository import AgentRepository
+from ..auth.models import User
+from ...core.database import AsyncSessionLocal, get_db_public
+from ...utils.formatters import format_success, format_error
+from sqlalchemy import select, text
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v1/embed", tags=["Embed"])
+
+# ============================================================================
+# PYDANTIC SCHEMAS
+# ============================================================================
+
+class EmbedMessageRequest(BaseModel):
+    tenant_id: str = Field(..., description="Tenant UUID")
+    message: str = Field(..., min_length=1, max_length=5000, description="User message text")
+    session_id: Optional[str] = Field(None, description="Existing session UUID")
+    top_k: Optional[int] = Field(10, ge=5, le=50, description="RAG retrieve top K chunks")
+    max_depth: Optional[int] = Field(2, ge=1, le=3, description="Graph expansion depth")
+
+
+# ============================================================================
+# HELPER FOR TENANT/AGENT SECURITY
+# ============================================================================
+
+async def verify_agent_belongs_to_tenant(db, tenant_id: str, agent_id: str) -> bool:
+    """
+    Securely verify that the agent exists and belongs to the given tenant.
+    Enforces active PostgreSQL RLS.
+    """
+    try:
+        # Step 1: Set PostgreSQL session variable for RLS
+        await db.execute(
+            text("SELECT set_config('app.current_tenant', :tenant_id, false)"),
+            {"tenant_id": str(tenant_id)}
+        )
+
+        # Step 2: Initialize repo (which queries under active RLS)
+        agent_repo = AgentRepository(db, tenant_id=tenant_id)
+        agent = await agent_repo.get_by_id(agent_id)
+        
+        return agent is not None
+    except Exception as e:
+        logger.error(f"Error validating agent-tenant mapping: {e}", exc_info=True)
+        return False
+
+
+async def get_or_create_widget_user(db, tenant_id: str) -> User:
+    """
+    Retrieve or create a single system-designated user for this tenant
+    to own all widget conversation histories.
+    """
+    tenant_uuid = uuid.UUID(tenant_id)
+    widget_email = f"widget_user_{tenant_id[:8]}@graphmind.local"
+    
+    # Check if user already exists (scoped by RLS to the set tenant_id)
+    result = await db.execute(
+        select(User).where(User.email == widget_email)
+    )
+    widget_user = result.scalar_one_or_none()
+    
+    if not widget_user:
+        logger.info(f"Creating new anonymous widget user for tenant {tenant_id}")
+        widget_user = User(
+            id=uuid.uuid4(),
+            tenant_id=tenant_uuid,
+            email=widget_email,
+            first_name="Anonymous",
+            last_name="Visitor",
+            hashed_password="WIDGET_DUMMY_PASSWORD_NOT_AUTHENTICATABLE",
+            is_active=True,
+            is_admin=False
+        )
+        db.add(widget_user)
+        await db.flush()
+        
+    return widget_user
+
+
+# ============================================================================
+# PUBLIC ENDPOINTS
+# ============================================================================
+
+@router.get("/chats/script")
+async def serve_widget_script(request: Request):
+    """
+    Dynamically serve the float chat widget script (chat.js).
+    Auto-injects the current server's base URL to ensure zero-config installation.
+    """
+    try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(current_dir, "chat.js")
+        
+        if not os.path.exists(script_path):
+            raise HTTPException(status_code=404, detail="Widget script not found")
+            
+        with open(script_path, "r", encoding="utf-8") as f:
+            js_code = f.read()
+            
+        # Dynamically determine the backend host (protocol + host name)
+        backend_url = f"{request.url.scheme}://{request.url.netloc}"
+        
+        # Inject host into script placeholder
+        js_code = js_code.replace("{{BACKEND_URL}}", backend_url)
+        
+        return Response(
+            content=js_code,
+            media_type="application/javascript",
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to serve widget script: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal script loader error")
+
+
+@router.get("/chats/{agent_id}/details")
+async def get_agent_public_details(
+    agent_id: str,
+    tenant_id: str = Query(..., description="Tenant UUID")
+):
+    """
+    Retrieve agent name and greeting context for the widget header.
+    """
+    async with AsyncSessionLocal() as db:
+        valid = await verify_agent_belongs_to_tenant(db, tenant_id, agent_id)
+        if not valid:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Agent not found or unauthorized access"
+            )
+            
+        # Get details
+        agent_repo = AgentRepository(db, tenant_id=tenant_id)
+        agent = await agent_repo.get_by_id(agent_id)
+        
+        return format_success({
+            "name": agent.name,
+            "personality": agent.personality or "Friendly",
+            "system_prompt": agent.system_prompt
+        })
+
+
+@router.get("/chats/{agent_id}/sessions/{session_id}")
+async def get_widget_session_history(
+    agent_id: str,
+    session_id: str,
+    tenant_id: str = Query(..., description="Tenant UUID")
+):
+    """
+    Load previous conversation turn histories for the visitor.
+    """
+    async with AsyncSessionLocal() as db:
+        valid = await verify_agent_belongs_to_tenant(db, tenant_id, agent_id)
+        if not valid:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Agent not found or unauthorized access"
+            )
+            
+        chat_service = ChatService(db=db, tenant_id=tenant_id)
+        result = await chat_service.get_session_with_messages(session_id)
+        
+        if not result:
+            raise HTTPException(status_code=404, detail="Session not found")
+            
+        session = result["session"]
+        
+        # Verify ownership
+        if str(session.agent_id) != str(agent_id):
+            raise HTTPException(status_code=403, detail="Unauthorized session access")
+            
+        # Formatted details
+        formatted_messages = []
+        for msg in result["messages"]:
+            formatted_messages.append({
+                "role": msg.role,
+                "content": msg.content,
+                "timestamp": msg.created_at.isoformat() if msg.created_at else None,
+                "metadata": msg.message_metadata
+            })
+            
+        return format_success({
+            "session_id": str(session.id),
+            "title": session.title,
+            "messages": formatted_messages
+        })
+
+
+@router.post("/chats/{agent_id}/message")
+async def send_widget_message(
+    agent_id: str,
+    body: EmbedMessageRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Process message turn sent from the embedded widget.
+    Runs completely inside RAG pipeline with proper tenant RLS active.
+    """
+    tenant_id = body.tenant_id
+    message_text = body.message.strip()
+    
+    async with AsyncSessionLocal() as db:
+        try:
+            # 1. Enforce security (Verifies tenant/agent mapping & sets RLS)
+            valid = await verify_agent_belongs_to_tenant(db, tenant_id, agent_id)
+            if not valid:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Agent not found or unauthorized access"
+                )
+                
+            # 2. Get the tenant-designated anonymous visitor user
+            widget_user = await get_or_create_widget_user(db, tenant_id)
+            
+            # 3. Create or load the session under this widget user
+            chat_service = ChatService(db=db, tenant_id=tenant_id)
+            session_id = body.session_id
+            
+            if session_id:
+                session = await chat_service.chat_repo.get_session_by_id(session_id)
+                if not session or str(session.agent_id) != str(agent_id):
+                    session = await chat_service.create_session(
+                        agent_id=agent_id,
+                        user_id=str(widget_user.id),
+                        title="Website Chat"
+                    )
+                    session_id = str(session.id)
+            else:
+                session = await chat_service.create_session(
+                    agent_id=agent_id,
+                    user_id=str(widget_user.id),
+                    title="Website Chat"
+                )
+                session_id = str(session.id)
+                
+            # 4. Generate RAG-grounded response
+            result = await chat_service.send_message(
+                agent_id=agent_id,
+                user_id=str(widget_user.id),
+                message=message_text,
+                session_id=session_id,
+                top_k=body.top_k or 10,
+                max_depth=body.max_depth or 2,
+            )
+            
+            # 5. Extract knowledge flywheel (sync turn back to graph)
+            if result.get("answer") and result.get("sources"):
+                top_chunk_id = result["sources"][0]["chunk_id"]
+                kb_id = result.get("context", {}).get("kb_id")
+                
+                if top_chunk_id and kb_id:
+                    background_tasks.add_task(
+                        ChatKnowledgeService.run_sync_background,
+                        tenant_id=tenant_id,
+                        session_id=result["session_id"],
+                        kb_id=kb_id,
+                        chunk_id=top_chunk_id,
+                        user_message=message_text,
+                        assistant_message=result["answer"]
+                    )
+                    
+            return format_success(result)
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Embed message failed: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to process chatbot interaction: {str(e)}"
+            )
+
+
+# ============================================================================
+# WEBSOCKET STREAMING ENDPOINT
+# ============================================================================
+
+@router.websocket("/chats/{agent_id}/ws")
+async def websocket_chat_endpoint(
+    websocket: WebSocket,
+    agent_id: str
+):
+    """
+    WebSocket endpoint for real-time streaming RAG chatbot interaction.
+    Requires tenant_id in query parameters, e.g. /chats/{agent_id}/ws?tenant_id=UUID
+    """
+    tenant_id = websocket.query_params.get("tenant_id")
+    if not tenant_id:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing tenant_id query parameter")
+        return
+        
+    await websocket.accept()
+    logger.info(f"🔌 WebSocket connection accepted: agent={agent_id}, tenant={tenant_id}")
+    
+    try:
+        while True:
+            # 1. Receive JSON message frame
+            try:
+                data = await websocket.receive_json()
+            except Exception:
+                # Malformed JSON or disconnection during recv
+                break
+                
+            message_text = data.get("message", "").strip()
+            session_id = data.get("session_id")
+            top_k = data.get("top_k", 10)
+            max_depth = data.get("max_depth", 2)
+            
+            if not message_text:
+                await websocket.send_json({"type": "error", "detail": "Message cannot be empty"})
+                continue
+                
+            # 2. Process within isolated RLS DB session
+            async with AsyncSessionLocal() as db:
+                # A. Enforce multi-tenancy security
+                valid = await verify_agent_belongs_to_tenant(db, tenant_id, agent_id)
+                if not valid:
+                    await websocket.send_json({"type": "error", "detail": "Agent unauthorized or not found"})
+                    continue
+                    
+                # B. Provision visitor user and resolve session
+                widget_user = await get_or_create_widget_user(db, tenant_id)
+                chat_service = ChatService(db=db, tenant_id=tenant_id)
+                
+                if session_id:
+                    session = await chat_service.chat_repo.get_session_by_id(session_id)
+                    if not session or str(session.agent_id) != str(agent_id):
+                        session = await chat_service.create_session(
+                            agent_id=agent_id,
+                            user_id=str(widget_user.id),
+                            title="WebSocket Chat"
+                        )
+                        session_id = str(session.id)
+                else:
+                    session = await chat_service.create_session(
+                        agent_id=agent_id,
+                        user_id=str(widget_user.id),
+                        title="WebSocket Chat"
+                    )
+                    session_id = str(session.id)
+                    
+                # Notify client that session is active
+                await websocket.send_json({
+                    "type": "start",
+                    "session_id": session_id
+                })
+                
+                # C. Save User message to history
+                user_msg = await chat_service.chat_repo.add_message(
+                    session_id=session_id,
+                    role="user",
+                    content=message_text
+                )
+                await db.commit() # Commit user message first
+                
+                # D. Resolve Agent Knowledge Bases
+                kbs, _ = await chat_service.kb_repo.list_by_agent(agent_id, limit=10)
+                if not kbs:
+                    error_msg = "No knowledge base found for this agent."
+                    await chat_service.chat_repo.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=error_msg,
+                        metadata={"error": True}
+                    )
+                    await db.commit()
+                    await websocket.send_json({"type": "error", "detail": error_msg})
+                    continue
+                    
+                kb_ids = [str(kb.id) for kb in kbs]
+                
+                # E. Inject memory (recent messages)
+                memory_window = 10
+                augmented_query = message_text
+                memory_used = False
+                conversation_turns = 0
+                
+                if session.message_count > 1:
+                    try:
+                        memory_messages = await chat_service.chat_repo.get_recent_messages(
+                            session_id=session_id,
+                            count=memory_window
+                        )
+                        history_messages = [
+                            m for m in memory_messages if str(m.id) != str(user_msg.id)
+                        ]
+                        if history_messages:
+                            augmented_query = chat_service._format_memory_context(
+                                history=history_messages,
+                                current_query=message_text
+                            )
+                            memory_used = True
+                            conversation_turns = sum(1 for m in history_messages if m.role == "user")
+                    except Exception as me:
+                        logger.warning(f"WebSocket memory injection failed: {me}")
+                        
+                # F. Open RAG Service stream
+                from ..rag.service import RAGService
+                rag_service = RAGService(db=db, tenant_id=tenant_id)
+                
+                full_response_chunks = []
+                sources = []
+                kb_id_used = kb_ids[0]
+                
+                try:
+                    # stream_rag_answer streams chunks
+                    async for chunk in rag_service.stream_rag_answer(
+                        query=augmented_query,
+                        agent_id=agent_id,
+                        kb_id=kb_ids,
+                        user_id=str(widget_user.id),
+                        top_k=top_k,
+                        max_depth=max_depth
+                    ):
+                        # Chunk can be metadata (json string) or standard text
+                        if chunk.startswith("{") and "type" in chunk and "sources" in chunk:
+                            # It's the metadata frame!
+                            try:
+                                meta_payload = json.loads(chunk)
+                                sources = meta_payload.get("sources", [])
+                                await websocket.send_json({
+                                    "type": "sources",
+                                    "sources": sources
+                                })
+                            except Exception:
+                                pass
+                        else:
+                            # Standard text token chunk
+                            full_response_chunks.append(chunk)
+                            await websocket.send_json({
+                                "type": "content",
+                                "delta": chunk
+                            })
+                            
+                    # G. Stream Completed! Compile full answer
+                    compiled_answer = "".join(full_response_chunks)
+                    if not compiled_answer:
+                        compiled_answer = "I'm sorry, I couldn't generate an answer from the retrieved knowledge."
+                        
+                    # H. Save Assistant response to database
+                    assistant_metadata = {
+                        "sources": sources,
+                        "memory_used": memory_used,
+                        "conversation_turns": conversation_turns
+                    }
+                    
+                    await chat_service.chat_repo.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=compiled_answer,
+                        metadata=assistant_metadata
+                    )
+                    await db.commit()
+                    
+                    # I. Send terminal done frame
+                    await websocket.send_json({
+                        "type": "done",
+                        "session_id": session_id,
+                        "answer": compiled_answer
+                    })
+                    
+                    # J. Trigger Knowledge Flywheel background task
+                    if compiled_answer and sources:
+                        top_chunk_id = sources[0].get("chunk_id")
+                        if top_chunk_id and kb_id_used:
+                            asyncio.create_task(
+                                ChatKnowledgeService.run_sync_background(
+                                    tenant_id=tenant_id,
+                                    session_id=session_id,
+                                    kb_id=kb_id_used,
+                                    chunk_id=top_chunk_id,
+                                    user_message=message_text,
+                                    assistant_message=compiled_answer
+                                )
+                            )
+                            
+                except Exception as stream_err:
+                    logger.error(f"WebSocket stream processing failed: {stream_err}", exc_info=True)
+                    await websocket.send_json({
+                        "type": "error",
+                        "detail": f"Stream failed: {str(stream_err)}"
+                    })
+                    
+    except WebSocketDisconnect:
+        logger.info(f"🔌 WebSocket disconnected: agent={agent_id}")
+    except Exception as e:
+        logger.error(f"WebSocket uncaught exception: {e}", exc_info=True)
