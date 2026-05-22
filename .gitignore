@@ -65,3 +65,19 @@ test_triplet_diag.py
 
 # Streamlit
 .streamlit/config.toml
+
+#markdown files
+response.md
+
+# User requested inclusions
+start_backend.sh
+start_backend.ps1
+requirements-streamlit.txt
+graphmind_memory_architecture_analysis.md
+deploy.sh
+deploy_test.txt
+check_user_columns.py
+cognee_full_analysis_part1.md
+cognee_full_analysis_part2.md
+Cognee_Infrastructure_Blueprint.pptx
+docs/

@@ -71,7 +71,7 @@ class ScraperService:
             "proxymode": proxy_mode
         }
         
-        base_url = "https://gcrawl.gramopro.ai/scrape"
+        base_url = getattr(settings, "crawler_api_url", "https://gcrawlai.com").rstrip("/") + "/scrape"
         headers = {
             "accept": "application/json",
             "Content-Type": "application/json"
