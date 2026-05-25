@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState,useEffect } from "react";
 import Sidebar from "../components/layout/Sidebar";
 import Header from "../components/layout/Header";
 
@@ -11,7 +11,32 @@ export default function DashboardLayout({
 }) {
   // Desktop: collapsed/expanded sidebar
   const [collapsed, setCollapsed] = useState(false);
+  const [width, setWidth] = useState(0);
 
+  useEffect(() => {
+    const handleResize = () => {
+      setWidth(window.innerWidth);
+    };
+
+    handleResize(); // initial value
+    window.addEventListener("resize", handleResize);
+
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+  useEffect(() => {
+  const handleResize = () => {
+    setCollapsed(width < 769);
+  };
+
+  handleResize(); // initial check
+
+  window.addEventListener("resize", handleResize);
+
+  return () => {
+    window.removeEventListener("resize", handleResize);
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+},[]);
   return (
     <div className="h-screen flex w-full relative bg-[var(--app-surface-muted)] overflow-hidden transition-colors duration-500">
       {/* Premium Background Decorative Elements */}
@@ -22,18 +47,20 @@ export default function DashboardLayout({
 
       {/* Sidebar - Fixed Height flex-shrink-0 */}
       <div className="flex-shrink-0 relative z-10 transition-all duration-500 border-r border-[var(--app-border)]">
-        <Sidebar collapsed={collapsed} />
+        <Sidebar collapsed={collapsed} 
+          onToggle={() => setCollapsed((prev) => !prev)}
+        />
       </div>
 
       {/* Main column - Independently Scrollable */}
       <div className="flex-1 flex flex-col relative z-10 h-full overflow-hidden">
         <Header
-          collapsed={collapsed}
-          onToggle={() => setCollapsed((prev) => !prev)}
+          // collapsed={collapsed}
+          // onToggle={() => setCollapsed((prev) => !prev)}
         />
 
         {/* Page content - Scrollable area */}
-        <main className="flex-1 w-full p-6 md:p-12 xl:p-16 overflow-y-auto custom-dashboard-scroll animate-in fade-in slide-in-from-bottom-4 duration-1000">
+        <main className="flex-1 w-full p-0 md:p-0 xl:p-0 overflow-y-auto custom-dashboard-scroll animate-in fade-in slide-in-from-bottom-4 duration-1000">
           <div className="max-w-[1600px] mx-auto">
             {children}
           </div>

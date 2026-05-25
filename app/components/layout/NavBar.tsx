@@ -2,7 +2,7 @@
 import { Button, Flex } from 'antd'
 import React from 'react'
 import { useRouter } from 'next/navigation'
-import { routes } from '../../../services/routes'
+import { routes } from '@/app/services/routes'
 
 export default function NavBar() {
   const router = useRouter();
@@ -13,7 +13,7 @@ export default function NavBar() {
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#2879f3] shadow-lg shadow-blue-500/20 transition-transform group-hover:scale-110">
             <span className="text-sm font-black text-white">GM</span>
           </div>
-          <span className="text-2xl font-black tracking-tighter text-[#0f172a]">GraphMind</span>
+          <span className="text-2xl font-black tracking-tighter text-[#0f172a]">Grag</span>
         </div>
 
         <nav className="hidden md:flex items-center gap-10">

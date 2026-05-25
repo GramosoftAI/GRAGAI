@@ -34,6 +34,7 @@ export function useLogin() {
 
           if (user) {
             localStorage.setItem("userName", `${user.first_name} ${user.last_name}`);
+            router.push(routes.dashboard);
           }
 
           if (res?.data?.roleInfo?.permissions) {
@@ -48,7 +49,7 @@ export function useLogin() {
         }
       );
       
-      router.push(routes.dashboard);
+      
     } catch (err: unknown) {
       let msg = "Login failed";
       if (typeof err === "object" && err && "data" in err) {

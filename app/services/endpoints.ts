@@ -64,6 +64,10 @@ export const endpoints = {
   ANALYTICS_DASHBOARD: {
     url: "/analytics/dashboard",
     method: methods.get,
+  },
+  GET_AGENTS_BY_USER: {
+    url: "/agents/by-user",
+    method: methods.get,
   }
 
 } as const;

@@ -85,7 +85,7 @@ export default function LoginForm() {
             </button>
             
             <p className="no-account">
-              Don't Have an Account ?
+              {`Don't Have an Account ?`}
               <a 
                 className="link cursor-pointer ml-1" 
                 onClick={() => router.push(routes.register)}

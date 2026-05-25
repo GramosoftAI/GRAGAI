@@ -1,6 +1,6 @@
 "use client"
 import { Select } from 'antd'
-import { useStore } from '../../hooks/useStore'
+import { useAgents } from '../../hooks/useAgents'
 import React from 'react'
 import styles from './AgentList.module.css'
 
@@ -10,7 +10,7 @@ interface AgentListProps {
 }
 
 export default function AgentList({ selectedId, onChange }: AgentListProps) {
-  const agentList = useStore((state) => state.agentList)
+  const { agents: agentList } = useAgents();
 
   function handleChange(value: string) {
     const found = agentList?.find((agent) => agent.id === value)

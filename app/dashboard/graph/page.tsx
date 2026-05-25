@@ -1,14 +1,16 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Empty, Input, Spin } from "antd";
-import { ReloadOutlined, ZoomInOutlined } from "@ant-design/icons";
+import { Button, Empty, Input, Spin, Badge, Space, Typography } from "antd";
+import { ReloadOutlined, ZoomInOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import dynamic from "next/dynamic";
-const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 import AgentList from "../../components/ui/AgentList";
 import type { Agent } from "../../components/ui/type";
 import useAxios from "../../hooks/useAxios";
 import { useStore } from "../../hooks/useStore";
+
+const { Title, Text } = Typography;
+const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
 type NodeType = "Agent" | "KnowledgeBase" | "Chunk" | "Entity";
 
@@ -65,16 +67,11 @@ type GraphLink = {
   type: string;
 };
 
-type ForceGraph2DProps = Parameters<typeof ForceGraph2D<GraphNode, GraphLink>>[0];
-type ForceGraph2DRef = NonNullable<ForceGraph2DProps["ref"]> extends React.MutableRefObject<infer Instance>
-  ? Instance
-  : never;
-
 const NODE_COLORS: Record<NodeType, string> = {
-  Agent: "#6366f1", // Indigo
-  KnowledgeBase: "#06b6d4", // Cyan
-  Chunk: "#8b5cf6", // Purple
-  Entity: "#f59e0b", // Amber
+  Agent: "#6366f1", 
+  KnowledgeBase: "#06b6d4", 
+  Chunk: "#8b5cf6", 
+  Entity: "#f59e0b", 
 };
 
 const ENTITY_SUB_COLORS: Record<string, string> = {
@@ -88,13 +85,6 @@ function getEntityColor(node: RawNode): string {
   const subType = String(node.properties?.type ?? "");
   return ENTITY_SUB_COLORS[subType] || NODE_COLORS.Entity;
 }
-
-const NODE_STROKES: Record<NodeType, string> = {
-  Agent: "#4f46e5",
-  KnowledgeBase: "#0891b2",
-  Chunk: "#7c3aed",
-  Entity: "#d97706",
-};
 
 const NODE_VALUES: Record<NodeType, number> = {
   Agent: 12,
@@ -114,8 +104,7 @@ function normalizeType(type?: string): NodeType {
 
 function getNodeLabel(node: RawNode) {
   const properties = node.properties ?? {};
-  const possibleName = properties.name ?? properties.title ?? properties.text ?? node.label ?? node.id;
-  return String(possibleName);
+  return String(properties.name ?? properties.title ?? properties.text ?? node.label ?? node.id);
 }
 
 function getGraphPayload(response?: GraphResponse): GraphPayload {
@@ -133,7 +122,6 @@ function toGraphData(response?: GraphResponse) {
     nodes: apiNodes.map((node): GraphNode => {
       const type = normalizeType(node.type);
       const color = type === "Entity" ? getEntityColor(node) : NODE_COLORS[type];
-      // Filter out embedding arrays from properties
       const rawProps = node.properties ?? {};
       const filteredProps: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(rawProps)) {
@@ -152,7 +140,6 @@ function toGraphData(response?: GraphResponse) {
     links: (() => {
       const linksMap = new Map<string, GraphLink>();
 
-      // 1. Add edges from API
       apiEdges.forEach((edge) => {
         const src = String(edge.source ?? edge.from ?? "");
         const tgt = String(edge.target ?? edge.to ?? "");
@@ -162,12 +149,10 @@ function toGraphData(response?: GraphResponse) {
         }
       });
 
-      // 2. Artificially infer and add Agent -> KB -> Chunk connections if missing
       const agents = apiNodes.filter((n) => normalizeType(n.type) === "Agent");
       const kbs = apiNodes.filter((n) => normalizeType(n.type) === "KnowledgeBase");
       const chunks = apiNodes.filter((n) => normalizeType(n.type) === "Chunk");
 
-      // Agent -> KB
       if (agents.length > 0 && kbs.length > 0) {
         const primaryAgent = agents[0];
         kbs.forEach((kb) => {
@@ -178,14 +163,12 @@ function toGraphData(response?: GraphResponse) {
         });
       }
 
-      // KB -> Chunk
       if (kbs.length > 0 && chunks.length > 0) {
         chunks.forEach((chunk) => {
-          // Try to match KB by property if possible, else fallback to first KB
           const props = chunk.properties || {};
           const kbId = props.knowledge_base_id ?? props.kb_id ?? props.document_id;
           let targetKb = kbs.find((k) => k.id === kbId || k.properties?.document_id === kbId || k.properties?.id === kbId);
-          if (!targetKb) targetKb = kbs[0]; // fallback
+          if (!targetKb) targetKb = kbs[0];
 
           const key = `${targetKb.id}-${chunk.id}-HAS_CHUNK`;
           if (!linksMap.has(key)) {
@@ -197,14 +180,6 @@ function toGraphData(response?: GraphResponse) {
       return Array.from(linksMap.values());
     })(),
   };
-}
-
-function mapAgentsToList(agents: Agent[]) {
-  return agents.map((agent) => ({
-    id: agent.id,
-    name: agent.name,
-    status: agent.is_active ? "active" : "draft",
-  }));
 }
 
 function truncate(value: string, max = 72) {
@@ -226,10 +201,14 @@ function getEndpointId(endpoint: string | GraphNode) {
 export default function GraphViewPage() {
   const requestedAgentsRef = useRef(false);
   const loadedGraphForRef = useRef("");
-  const graphRef = useRef<ForceGraph2DRef>(undefined);
+  const graphRef = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [search, setSearch] = useState("");
+  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const [windowWidth, setWindowWidth] = useState(1200);
 
   const agentList = useStore((state) => state.agentList);
   const setAgentList = useStore((state) => state.setAgentList);
@@ -240,6 +219,48 @@ export default function GraphViewPage() {
     endpoint: "GRAPHVIEW",
     hideErrorMsg: false,
   });
+
+  function mapAgentsToList(agents: Agent[]) {
+    return agents.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      status: agent.is_active ? "active" : "draft",
+    }));
+  }
+
+  // Window resize sync for safe client UI changes
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setWindowWidth(window.innerWidth);
+    const handleWinResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener("resize", handleWinResize);
+    return () => window.removeEventListener("resize", handleWinResize);
+  }, []);
+
+  // Element resize logic with clean const bindings
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width } = entry.contentRect;
+        setDimensions({
+          width: width || 800,
+          height: window.innerWidth < 1024 ? 480 : 640
+        });
+      }
+    });
+    resizeObserver.observe(containerRef.current);
+    return () => resizeObserver.disconnect();
+  }, []);
+
+  useEffect(() => {
+    getAgents(undefined, (payload) => {
+      const agents = payload?.data?.agents ?? [];
+      setBotsCache(agents);
+      setAgentList(mapAgentsToList(agents));
+    });
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const activeAgentId = selectedAgentId || agentList[0]?.id || "";
   const activeAgentName = agentList.find((agent) => agent.id === activeAgentId)?.name ?? "Selected Agent";
@@ -306,14 +327,13 @@ export default function GraphViewPage() {
     if (!graphData.nodes.length) return;
     
     if (graphRef.current) {
-      // Increase repulsion between nodes to give entities more space
       graphRef.current.d3Force("charge")?.strength(-600)?.distanceMax(1000);
-      // Increase default link distance
       graphRef.current.d3Force("link")?.distance(140);
     }
     
-    window.setTimeout(() => graphRef.current?.zoomToFit(450, 70), 80);
-  }, [graphData.nodes.length]);
+    const timer = setTimeout(() => graphRef.current?.zoomToFit(450, 60), 120);
+    return () => clearTimeout(timer);
+  }, [graphData.nodes.length, dimensions.width]);
 
   const handleRefresh = () => {
     loadedGraphForRef.current = "";
@@ -325,81 +345,101 @@ export default function GraphViewPage() {
     graphRef.current?.zoomToFit(450, 70);
   };
 
+  const isMobile = windowWidth < 768;
+  const isTablet = windowWidth < 1024;
+
   return (
-    <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 18 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+    <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 24, padding:isMobile ? "20px" : "40px" }}>
+      {/* Top Bar Layout Layer */}
+      <div style={{ 
+        display: "flex", 
+        flexDirection: isMobile ? "column" : "row",
+        alignItems: isMobile ? "flex-start" : "center", 
+        justifyContent: "space-between", 
+        gap: 20 
+      }}>
         <div>
-          <h1 style={{ margin: 0, color: "var(--app-text)", fontWeight: 700, fontSize: 38, lineHeight: 1.1 }}>
+          <Title level={2} style={{ margin: 0, fontWeight: 700, letterSpacing: "-0.02em" }}>
             Graph View
-          </h1>
-          <p style={{ margin: "8px 0 0", color: "var(--app-text-muted)", fontSize: 16 }}>
+          </Title>
+          <Text type="secondary" style={{ fontSize: 15 }}>
             {activeAgentId ? activeAgentName : "Select an agent to render its knowledge graph"}
-          </p>
+          </Text>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <AgentList
-            selectedId={activeAgentId || undefined}
-            onChange={(id) => {
-              setSelectedAgentId(id);
-              loadedGraphForRef.current = "";
-            }}
-          />
-          <Button icon={<ZoomInOutlined />} onClick={handleFit} disabled={!graphData.nodes.length} />
-          <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={graphLoading} disabled={!activeAgentId} />
+        <div style={{ display: "flex", alignItems: "center", gap: 12, width: isMobile ? "100%" : "auto" ,flexWrap:"wrap"}}>
+          <div style={{ flexGrow: isMobile ? 1 : 0 }}>
+            <AgentList
+              selectedId={activeAgentId || undefined}
+              onChange={(id) => {
+                setSelectedAgentId(id);
+                loadedGraphForRef.current = "";
+              }}
+            />
+          </div>
+          <Space size={8}>
+            <Button icon={<ZoomInOutlined />} onClick={handleFit} disabled={!graphData.nodes.length} />
+            <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={graphLoading} disabled={!activeAgentId} />
+          </Space>
         </div>
       </div>
 
+      {/* Primary Split View Grid Layer */}
       <div
         style={{
-          border: "1px solid #e2e8f0",
-          background: "#ffffff",
-          borderRadius: 12,
-          overflow: "hidden",
-          minHeight: 700,
           display: "grid",
-          gridTemplateColumns: "minmax(0, 1fr) 340px",
-          boxShadow: "0 4px 24px rgba(0,0,0,0.06)",
+          gridTemplateColumns: isTablet ? "1fr" : "minmax(0, 1fr) 360px",
+          borderRadius: 16,
+          border: "1px solid #f0f0f0",
+          background: "#ffffff",
+          boxShadow: "0 10px 30px -10px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.02)",
+          overflow: "hidden"
         }}
       >
-        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", background: "#ffffff" }}>
+        {/* Left Interactive Graph Module */}
+        <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
           <div
             style={{
               display: "flex",
-              alignItems: "center",
+              flexDirection: isMobile ? "column" : "row",
+              alignItems: isMobile ? "stretch" : "center",
               justifyContent: "space-between",
-              gap: 12,
-              minHeight: 52,
-              padding: "10px 16px",
-              borderBottom: "1px solid #e2e8f0",
-              background: "#ffffff",
+              gap: 16,
+              padding: "16px 20px",
+              borderBottom: "1px solid #f0f0f0",
+              backgroundColor: "#fafafa"
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <span style={{ width: 8, height: 8, borderRadius: 999, background: "#22c55e", boxShadow: "0 0 12px #22c55e" }} />
-              <span style={{ color: "#64748b", fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>KNOWLEDGE GRAPH</span>
-              <span style={{ color: "#4f46e5", fontSize: 11, fontWeight: 600 }}>
+            <Space size={16} wrap>
+              <Space size={8}>
+                <Badge status="processing" color="#22c55e" />
+                <Text strong style={{ fontSize: 12, letterSpacing: "0.05em", color: "#8c8c8c" }}>
+                  KNOWLEDGE GRAPH
+                </Text>
+              </Space>
+              <TagWrapper color="#e0e7ff" textColor="#4f46e5">
                 {graphData.nodes.length} nodes · {graphData.links.length} relationships
-              </span>
-            </div>
+              </TagWrapper>
+            </Space>
+
             <Input.Search
               allowClear
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search graph"
-              style={{ width: 240 }}
+              placeholder="Search graph attributes..."
+              style={{ width: isMobile ? "100%" : 260 }}
             />
           </div>
 
-          <div style={{ position: "relative", height: 640, background: "#ffffff" }}>
+          <div ref={containerRef} style={{ position: "relative", height: dimensions.height, background: "#ffffff", overflow: "hidden" }}>
             <div
               style={{
                 position: "absolute",
                 inset: 0,
                 pointerEvents: "none",
-                backgroundImage: "radial-gradient(circle, #e2e8f0 1px, transparent 1px)",
-                backgroundSize: "28px 28px",
-                opacity: 0.8,
+                backgroundImage: "radial-gradient(#e8e8e8 1.2px, transparent 1.2px)",
+                backgroundSize: "24px 24px",
+                opacity: 0.6,
               }}
             />
 
@@ -411,29 +451,30 @@ export default function GraphViewPage() {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  background: "rgba(255,255,255,0.7)",
-                  zIndex: 2,
+                  background: "rgba(255,255,255,0.75)",
+                  backdropFilter: "blur(2px)",
+                  zIndex: 10,
                 }}
               >
-                <Spin size="large" />
+                <Spin size="large" tip="Loading Graph System..." />
               </div>
             )}
 
             {!activeAgentId && !graphLoading ? (
-              <div style={{ position: "relative", zIndex: 1, height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <Empty description="No agent selected" />
+              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Empty description="No active agent configuration loaded" image={Empty.PRESENTED_IMAGE_SIMPLE} />
               </div>
             ) : graphData.nodes.length === 0 && !graphLoading ? (
-              <div style={{ position: "relative", zIndex: 1, height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <Empty description="No graph data found" />
+              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Empty description="No executable relational clusters found" image={Empty.PRESENTED_IMAGE_SIMPLE} />
               </div>
             ) : (
               <ForceGraph2D
                 ref={graphRef}
                 graphData={visibleGraphData}
-                width={1000}
-                height={640}
-                backgroundColor="white"
+                width={dimensions.width}
+                height={dimensions.height}
+                backgroundColor="transparent"
                 d3AlphaDecay={0.02}
                 d3VelocityDecay={0.3}
                 cooldownTicks={100}
@@ -447,45 +488,43 @@ export default function GraphViewPage() {
                   return text ? `${title}\n${truncate(text, 160)}` : title;
                 }}
                 linkLabel={(link) => link.label}
-                linkColor={(link) =>
+                linkColor={(link: any) =>
                   selectedNode &&
                   (getEndpointId(link.source) === selectedNode.id || getEndpointId(link.target) === selectedNode.id)
-                    ? "rgba(0, 0, 0, 0.8)"
-                    : "rgba(0, 0, 0, 0.3)"
+                    ? "rgba(15, 23, 42, 0.9)"
+                    : "rgba(226, 232, 240, 0.8)"
                 }
-                linkWidth={(link) =>
+                linkWidth={(link: any) =>
                   selectedNode &&
                   (getEndpointId(link.source) === selectedNode.id || getEndpointId(link.target) === selectedNode.id)
-                    ? 2
-                    : 1
+                    ? 2.5
+                    : 1.2
                 }
                 linkCurvature={0}
-                linkDirectionalArrowLength={6}
+                linkDirectionalArrowLength={5}
                 linkDirectionalArrowRelPos={1}
-                linkDirectionalParticles={(link) =>
+                linkDirectionalParticles={(link: any) =>
                   selectedNode &&
                   (getEndpointId(link.source) === selectedNode.id || getEndpointId(link.target) === selectedNode.id)
-                    ? 2
+                    ? 3
                     : 0
                 }
-                linkDirectionalParticleWidth={2}
-                linkDirectionalParticleColor={() => "#000000"}
-                linkDirectionalParticleSpeed={0.006}
+                linkDirectionalParticleWidth={2.5}
+                linkDirectionalParticleColor={() => "#6366f1"}
+                linkDirectionalParticleSpeed={0.008}
                 linkCanvasObjectMode={() => "after"}
-                linkCanvasObject={(link, ctx, globalScale) => {
-                  if (globalScale < 1.5) return; // Hide labels when zoomed out
+                linkCanvasObject={(link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+                  if (globalScale < 1.8) return;
 
-                  const MAX_FONT_SIZE = 3.5;
+                  const MAX_FONT_SIZE = 3.2;
                   const label = link.label;
-                  const fontSize = Math.min(MAX_FONT_SIZE, 10 / globalScale);
-                  ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
+                  const fontSize = Math.min(MAX_FONT_SIZE, 9 / globalScale);
+                  ctx.font = `500 ${fontSize}px Inter, -apple-system, BlinkMacSystemFont, sans-serif`;
 
                   const start = typeof link.source === "string" ? { x: 0, y: 0 } : link.source;
                   const end = typeof link.target === "string" ? { x: 0, y: 0 } : link.target;
-
                   if (typeof start === "string" || typeof end === "string") return;
 
-                  // Calculate label position (midpoint)
                   const textPos = {
                     x: start.x! + (end.x! - start.x!) / 2,
                     y: start.y! + (end.y! - start.y!) / 2,
@@ -499,68 +538,63 @@ export default function GraphViewPage() {
                   ctx.rotate(labelRotation);
 
                   const textWidth = ctx.measureText(label).width;
-                  const bckgDimensions = [textWidth, fontSize].map((n) => n + fontSize * 0.5);
+                  const padding = fontSize * 0.4;
+                  const bckgDimensions = [textWidth + padding, fontSize + padding];
 
-                  // Draw text background
-                  ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+                  ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
                   ctx.beginPath();
                   const rx = bckgDimensions[0] / 2, ry = bckgDimensions[1] / 2;
-                  ctx.roundRect(-rx, -ry, bckgDimensions[0], bckgDimensions[1], 3);
+                  ctx.roundRect(-rx, -ry, bckgDimensions[0], bckgDimensions[1], 2);
                   ctx.fill();
 
-                  // Draw text
                   ctx.textAlign = "center";
                   ctx.textBaseline = "middle";
-                  ctx.fillStyle = "#000000";
+                  ctx.fillStyle = "#475569";
                   ctx.fillText(label, 0, 0);
                   ctx.restore();
                 }}
-                onNodeClick={(node) => setSelectedNode(node)}
+                onNodeClick={(node: any) => setSelectedNode(node)}
                 onBackgroundClick={() => setSelectedNode(null)}
-                onNodeDragEnd={(node) => {
+                onNodeDragEnd={(node: any) => {
                   node.fx = node.x;
                   node.fy = node.y;
                 }}
                 nodeCanvasObject={(node, ctx, globalScale) => {
-                  const typeRadius: Record<string, number> = { Agent: 24, KnowledgeBase: 20, Chunk: 14, Entity: 16 };
-                  const radius = typeRadius[node.type] ?? 16;
+                  const typeRadius: Record<string, number> = { Agent: 22, KnowledgeBase: 18, Chunk: 13, Entity: 15 };
+                  const radius = typeRadius[node.type] ?? 14;
                   const isSelected = selectedNode?.id === node.id;
                   const isConnected = selectedNode && graphData.links.some(
                     (l) => (getEndpointId(l.source) === selectedNode.id || getEndpointId(l.target) === selectedNode.id) &&
                            (getEndpointId(l.source) === node.id || getEndpointId(l.target) === node.id)
                   );
-                  const fontSize = Math.max(3, 10 / globalScale);
-                  const label = truncate(node.label, node.type === "Chunk" ? 16 : 14);
+                  const fontSize = Math.max(3.5, 9.5 / globalScale);
+                  const label = truncate(node.label, node.type === "Chunk" ? 14 : 12);
                   const dimmed = selectedNode && !isSelected && !isConnected;
 
-                  // Glow for selected
                   if (isSelected) {
                     ctx.beginPath();
-                    ctx.arc(node.x ?? 0, node.y ?? 0, radius + 6, 0, 2 * Math.PI);
-                    ctx.fillStyle = node.color + "30";
+                    ctx.arc(node.x ?? 0, node.y ?? 0, radius + 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = node.color + "25";
                     ctx.fill();
                   }
 
-                  // Main circle (Solid color for a cleaner look)
                   ctx.beginPath();
                   ctx.arc(node.x ?? 0, node.y ?? 0, radius, 0, 2 * Math.PI);
-                  ctx.fillStyle = node.color + (dimmed ? "40" : "cc");
+                  ctx.fillStyle = node.color + (dimmed ? "30" : "f5");
                   ctx.fill();
 
-                  // Border ring
-                  ctx.lineWidth = isSelected ? 3 : 1;
-                  ctx.strokeStyle = isSelected ? "#000000" : (node.color + (dimmed ? "20" : "88"));
+                  ctx.lineWidth = isSelected ? 2.5 : 1.2;
+                  ctx.strokeStyle = isSelected ? "#0f172a" : (node.color + (dimmed ? "15" : "af"));
                   ctx.stroke();
 
-                  // Label inside node
-                  ctx.font = `${isSelected ? "bold " : ""}${fontSize}px Inter, system-ui, sans-serif`;
+                  ctx.font = `${isSelected ? "600" : "500"} ${fontSize}px Inter, -apple-system, sans-serif`;
                   ctx.textAlign = "center";
                   ctx.textBaseline = "middle";
-                  ctx.fillStyle = dimmed ? "rgba(0,0,0,0.3)" : "#000000";
+                  ctx.fillStyle = dimmed ? "rgba(100,116,139,0.35)" : "#1e293b";
                   
-                  if (label.length > 10) {
+                  if (label.length > 9) {
                     const mid = Math.floor(label.length / 2);
-                    const splitPos = label.indexOf(" ", mid - 3) > -1 ? label.indexOf(" ", mid - 3) : mid;
+                    const splitPos = label.indexOf(" ", mid - 2) > -1 ? label.indexOf(" ", mid - 2) : mid;
                     ctx.fillText(label.slice(0, splitPos), node.x ?? 0, (node.y ?? 0) - fontSize * 0.55);
                     ctx.fillText(label.slice(splitPos).trim(), node.x ?? 0, (node.y ?? 0) + fontSize * 0.55);
                   } else {
@@ -572,56 +606,117 @@ export default function GraphViewPage() {
           </div>
         </div>
 
-        <aside style={{ borderLeft: "1px solid #e2e8f0", background: "#f8fafc", padding: 18, color: "#334155", minWidth: 0, overflowY: "auto", maxHeight: 700 }}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
-            {NODE_TYPES.map((type) => (
-              <span
-                key={type}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  color: NODE_COLORS[type],
-                  border: `1px solid ${NODE_COLORS[type]}55`,
-                  background: `${NODE_COLORS[type]}18`,
-                  borderRadius: 999,
-                  padding: "4px 8px",
-                  fontSize: 11,
-                }}
-              >
-                <span style={{ width: 7, height: 7, borderRadius: 999, background: NODE_COLORS[type] }} />
-                {type}
-              </span>
-            ))}
+        {/* Right Inspection Drawer / Sidebar */}
+        <aside 
+          style={{ 
+            borderLeft: isTablet ? "none" : "1px solid #f0f0f0", 
+            borderTop: isTablet ? "1px solid #f0f0f0" : "none",
+            background: "#fafafa", 
+            padding: 24, 
+            display: "flex",
+            flexDirection: "column",
+            gap: 20,
+            overflowY: "auto", 
+            maxHeight: isTablet ? "none" : dimensions.height + 53 
+          }}
+        >
+          {/* Legend Config */}
+          <div>
+            <Text strong style={{ fontSize: 11, color: "#8c8c8c", letterSpacing: "0.05em", display: "block", marginBottom: 12 }}>
+              NODE TYPES
+            </Text>
+            <div style={{ display: "flex", gap: "8px 10px", flexWrap: "wrap" }}>
+              {NODE_TYPES.map((type) => (
+                <span
+                  key={type}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    color: NODE_COLORS[type],
+                    background: "#ffffff",
+                    border: `1px solid ${NODE_COLORS[type]}30`,
+                    borderRadius: 6,
+                    padding: "4px 10px",
+                    fontSize: 12,
+                    fontWeight: 500,
+                    boxShadow: "0 1px 2px rgba(0,0,0,0.02)"
+                  }}
+                >
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: NODE_COLORS[type] }} />
+                  {type}
+                </span>
+              ))}
+            </div>
           </div>
 
-          {selectedNode ? (
-            <div>
-              <div style={{ color: selectedNode.color, fontSize: 12, fontWeight: 700, marginBottom: 6 }}>{selectedNode.type}</div>
-              <h2 style={{ margin: "0 0 14px", color: "#0f172a", fontSize: 20, lineHeight: 1.25 }}>{selectedNode.label}</h2>
+          <div style={{ borderTop: "1px solid #f0f0f0", paddingTop: 4 }} />
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {selectedNode ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              <div>
+                <span style={{ 
+                  textTransform: "uppercase", 
+                  fontSize: 10, 
+                  fontWeight: 700, 
+                  color: selectedNode.color, 
+                  backgroundColor: selectedNode.color + "15",
+                  padding: "2px 6px",
+                  borderRadius: 4,
+                  letterSpacing: "0.05em"
+                }}>
+                  {selectedNode.type}
+                </span>
+                <Title level={4} style={{ margin: "8px 0 0", color: "#1e293b", fontWeight: 600, lineHeight: 1.3 }}>
+                  {selectedNode.label}
+                </Title>
+              </div>
+
+              {/* Attributes Card Stack */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 {Object.entries(selectedNode.properties).map(([key, value]) => (
-                  <div key={key}>
-                    <div style={{ color: "#64748b", fontSize: 11, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.5 }}>{key}</div>
-                    <div style={{ color: "#334155", fontSize: 12, lineHeight: 1.45, overflowWrap: "anywhere" }}>
+                  <div key={key} style={{ background: "#ffffff", padding: "10px 14px", borderRadius: 8, border: "1px solid #f0f0f0" }}>
+                    <div style={{ color: "#94a3b8", fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>
+                      {key}
+                    </div>
+                    <div style={{ color: "#334155", fontSize: 13, lineHeight: 1.5, overflowWrap: "anywhere" }}>
                       {String(value)}
                     </div>
                   </div>
                 ))}
               </div>
 
+              {/* Edge/Link Data */}
               {selectedLinks.length > 0 && (
-                <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #e2e8f0" }}>
-                  <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8, letterSpacing: 1 }}>RELATIONSHIPS</div>
+                <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <Text strong style={{ fontSize: 11, color: "#8c8c8c", letterSpacing: "0.05em" }}>
+                    CONNECTED GRAPH LINKS
+                  </Text>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {selectedLinks.map((link, index) => {
                       const otherNode = nodeById.get(getLinkedNodeId(link, selectedNode.id));
                       return (
-                        <div key={`${getEndpointId(link.source)}-${getEndpointId(link.target)}-${index}`} style={{ fontSize: 12, lineHeight: 1.35 }}>
-                          <span style={{ color: "#4f46e5", fontWeight: 600 }}>{link.label}</span>
-                          <span style={{ color: "#94a3b8" }}>{" -> "}</span>
-                          <span style={{ color: "#334155", fontWeight: 500 }}>{otherNode?.label ?? "Unknown"}</span>
+                        <div 
+                          key={`${getEndpointId(link.source)}-${getEndpointId(link.target)}-${index}`} 
+                          style={{ 
+                            fontSize: 13, 
+                            padding: "10px 12px", 
+                            background: "#ffffff", 
+                            borderRadius: 8, 
+                            border: "1px solid #f0f0f0",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 12
+                          }}
+                        >
+                          <span style={{ color: "#4f46e5", fontWeight: 600, fontSize: 12 }}>{link.label}</span>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                            <span style={{ color: "#cbd5e1" }}>→</span>
+                            <span style={{ color: "#334155", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {otherNode?.label ?? "Unknown Reference"}
+                            </span>
+                          </div>
                         </div>
                       );
                     })}
@@ -630,8 +725,20 @@ export default function GraphViewPage() {
               )}
             </div>
           ) : (
-            <div style={{ color: "#64748b", fontSize: 13, lineHeight: 1.5 }}>
-              Select a node to inspect its properties and connected relationships.
+            <div style={{ 
+              height: "100%", 
+              display: "flex", 
+              flexDirection: "column", 
+              alignItems: "center", 
+              justifyContent: "center", 
+              padding: "40px 0",
+              color: "#94a3b8",
+              textAlign: "center"
+            }}>
+              <InfoCircleOutlined style={{ fontSize: 26, marginBottom: 12, color: "#cbd5e1" }} />
+              <Text type="secondary" style={{ fontSize: 13, maxWidth: 220 }}>
+                Select any visual element node within the graph view to inspect properties.
+              </Text>
             </div>
           )}
         </aside>
@@ -639,3 +746,674 @@ export default function GraphViewPage() {
     </div>
   );
 }
+
+function TagWrapper({ children, color, textColor }: { children: React.ReactNode, color: string, textColor: string }) {
+  return (
+    <span style={{
+      display: "inline-flex",
+      alignItems: "center",
+      padding: "2px 8px",
+      borderRadius: 6,
+      fontSize: 12,
+      fontWeight: 600,
+      backgroundColor: color,
+      color: textColor
+    }}>
+      {children}
+    </span>
+  );
+}
+
+// "use client";
+
+// import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// import { Button, Empty, Input, Spin } from "antd";
+// import { ReloadOutlined, ZoomInOutlined } from "@ant-design/icons";
+// import dynamic from "next/dynamic";
+// const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
+// import AgentList from "../../components/ui/AgentList";
+// import type { Agent } from "../../components/ui/type";
+// import useAxios from "../../hooks/useAxios";
+// import { useStore } from "../../hooks/useStore";
+
+// type NodeType = "Agent" | "KnowledgeBase" | "Chunk" | "Entity";
+
+// type RawNode = {
+//   id: string;
+//   type?: string;
+//   label?: string;
+//   properties?: Record<string, unknown>;
+// };
+
+// type RawEdge = {
+//   source: string;
+//   target: string;
+//   from?: string;
+//   to?: string;
+//   type?: string;
+//   properties?: Record<string, unknown>;
+// };
+
+// type GraphPayload = {
+//   nodes?: RawNode[];
+//   edges?: RawEdge[];
+// };
+
+// type GraphResponse = {
+//   data?: GraphPayload;
+//   nodes?: RawNode[];
+//   edges?: RawEdge[];
+// };
+
+// type AgentListResponse = {
+//   data?: {
+//     agents?: Agent[];
+//   };
+// };
+
+// type GraphNode = {
+//   id: string;
+//   type: NodeType;
+//   label: string;
+//   val: number;
+//   color: string;
+//   properties: Record<string, unknown>;
+//   x?: number;
+//   y?: number;
+//   fx?: number;
+//   fy?: number;
+// };
+
+// type GraphLink = {
+//   source: string | GraphNode;
+//   target: string | GraphNode;
+//   label: string;
+//   type: string;
+// };
+
+// // Using any for dynamic components to satisfy TypeScript build
+// // type ForceGraph2DProps = any;
+// // type ForceGraph2DRef = any;
+
+// const NODE_COLORS: Record<NodeType, string> = {
+//   Agent: "#6366f1", // Indigo
+//   KnowledgeBase: "#06b6d4", // Cyan
+//   Chunk: "#8b5cf6", // Purple
+//   Entity: "#f59e0b", // Amber
+// };
+
+// const ENTITY_SUB_COLORS: Record<string, string> = {
+//   PERSON: "#ec4899",
+//   ORGANIZATION: "#f97316",
+//   CONCEPT: "#a855f7",
+//   LOCATION: "#22c55e",
+// };
+
+// function getEntityColor(node: RawNode): string {
+//   const subType = String(node.properties?.type ?? "");
+//   return ENTITY_SUB_COLORS[subType] || NODE_COLORS.Entity;
+// }
+
+// // const NODE_STROKES: Record<NodeType, string> = {
+// //   Agent: "#4f46e5",
+// //   KnowledgeBase: "#0891b2",
+// //   Chunk: "#7c3aed",
+// //   Entity: "#d97706",
+// // };
+
+// const NODE_VALUES: Record<NodeType, number> = {
+//   Agent: 12,
+//   KnowledgeBase: 8,
+//   Chunk: 5,
+//   Entity: 3,
+// };
+
+// const NODE_TYPES = Object.keys(NODE_COLORS) as NodeType[];
+
+
+
+// function normalizeType(type?: string): NodeType {
+//   if (type === "Agent" || type === "KnowledgeBase" || type === "Chunk" || type === "Entity") {
+//     return type;
+//   }
+//   return "Entity";
+// }
+
+// function getNodeLabel(node: RawNode) {
+//   const properties = node.properties ?? {};
+//   const possibleName = properties.name ?? properties.title ?? properties.text ?? node.label ?? node.id;
+//   return String(possibleName);
+// }
+
+// function getGraphPayload(response?: GraphResponse): GraphPayload {
+//   if (response?.data?.nodes || response?.data?.edges) return response.data;
+//   return { nodes: response?.nodes, edges: response?.edges };
+// }
+
+// function toGraphData(response?: GraphResponse) {
+//   const payload = getGraphPayload(response);
+//   const apiNodes = payload.nodes ?? [];
+//   const apiEdges = payload.edges ?? [];
+//   const nodeIds = new Set(apiNodes.map((node) => node.id));
+
+//   return {
+//     nodes: apiNodes.map((node): GraphNode => {
+//       const type = normalizeType(node.type);
+//       const color = type === "Entity" ? getEntityColor(node) : NODE_COLORS[type];
+//       // Filter out embedding arrays from properties
+//       const rawProps = node.properties ?? {};
+//       const filteredProps: Record<string, unknown> = {};
+//       for (const [k, v] of Object.entries(rawProps)) {
+//         if (k === "embedding" || (Array.isArray(v) && v.length > 10)) continue;
+//         filteredProps[k] = v;
+//       }
+//       return {
+//         id: String(node.id),
+//         type,
+//         label: getNodeLabel(node),
+//         val: NODE_VALUES[type],
+//         color,
+//         properties: filteredProps,
+//       };
+//     }),
+//     links: (() => {
+//       const linksMap = new Map<string, GraphLink>();
+
+//       // 1. Add edges from API
+//       apiEdges.forEach((edge) => {
+//         const src = String(edge.source ?? edge.from ?? "");
+//         const tgt = String(edge.target ?? edge.to ?? "");
+//         if (nodeIds.has(src) && nodeIds.has(tgt)) {
+//           const type = String(edge.type ?? "RELATED_TO");
+//           linksMap.set(`${src}-${tgt}-${type}`, { source: src, target: tgt, label: type, type });
+//         }
+//       });
+
+//       // 2. Artificially infer and add Agent -> KB -> Chunk connections if missing
+//       const agents = apiNodes.filter((n) => normalizeType(n.type) === "Agent");
+//       const kbs = apiNodes.filter((n) => normalizeType(n.type) === "KnowledgeBase");
+//       const chunks = apiNodes.filter((n) => normalizeType(n.type) === "Chunk");
+
+//       // Agent -> KB
+//       if (agents.length > 0 && kbs.length > 0) {
+//         const primaryAgent = agents[0];
+//         kbs.forEach((kb) => {
+//           const key = `${primaryAgent.id}-${kb.id}-OWNS_KB`;
+//           if (!linksMap.has(key)) {
+//             linksMap.set(key, { source: primaryAgent.id, target: kb.id, label: "OWNS_KB", type: "OWNS_KB" });
+//           }
+//         });
+//       }
+
+//       // KB -> Chunk
+//       if (kbs.length > 0 && chunks.length > 0) {
+//         chunks.forEach((chunk) => {
+//           // Try to match KB by property if possible, else fallback to first KB
+//           const props = chunk.properties || {};
+//           const kbId = props.knowledge_base_id ?? props.kb_id ?? props.document_id;
+//           let targetKb = kbs.find((k) => k.id === kbId || k.properties?.document_id === kbId || k.properties?.id === kbId);
+//           if (!targetKb) targetKb = kbs[0]; // fallback
+
+//           const key = `${targetKb.id}-${chunk.id}-HAS_CHUNK`;
+//           if (!linksMap.has(key)) {
+//             linksMap.set(key, { source: targetKb.id, target: chunk.id, label: "HAS_CHUNK", type: "HAS_CHUNK" });
+//           }
+//         });
+//       }
+
+//       return Array.from(linksMap.values());
+//     })(),
+//   };
+// }
+
+// function truncate(value: string, max = 72) {
+//   return value.length > max ? `${value.slice(0, max - 1)}...` : value;
+// }
+
+// function getLinkedNodeId(link: GraphLink, selectedId: string) {
+//   const sourceId = getEndpointId(link.source);
+//   const targetId = getEndpointId(link.target);
+//   if (sourceId !== selectedId) return sourceId;
+//   if (targetId !== selectedId) return targetId;
+//   return "";
+// }
+
+// function getEndpointId(endpoint: string | GraphNode) {
+//   return typeof endpoint === "string" ? endpoint : endpoint.id;
+// }
+
+// export default function GraphViewPage() {
+//   const requestedAgentsRef = useRef(false);
+//   const loadedGraphForRef = useRef("");
+//   // const graphRef = useRef<any>(undefined);
+//   const graphRef = useRef<any>(null);
+//   const [selectedAgentId, setSelectedAgentId] = useState("");
+//   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+//   const [search, setSearch] = useState("");
+
+//   const agentList = useStore((state) => state.agentList);
+//   const setAgentList = useStore((state) => state.setAgentList);
+//   const setBotsCache = useStore((state) => state.setBotsCache);
+
+//   const [getAgents] = useAxios<AgentListResponse>({ endpoint: "GETAGENTLIST", hideErrorMsg: true });
+//   const [getGraph, graphResponse, graphLoading] = useAxios<GraphResponse>({
+//     endpoint: "GRAPHVIEW",
+//     hideErrorMsg: false,
+//   });
+
+
+//   function mapAgentsToList(agents: Agent[]) {
+//         return agents.map((agent) => ({
+//           id: agent.id,
+//           name: agent.name,
+//           status: agent.is_active ? "active" : "draft",
+//         }));
+//       }
+//     // ─── Persistence Logic ──────────────────────────────────────────────────────
+//     useEffect(()=>{
+//       getAgents(undefined, (payload) => {
+//         const agents = payload?.data?.agents ?? [];
+//         setBotsCache(agents);
+//         setAgentList(mapAgentsToList(agents));
+//       });
+//       // eslint-disable-next-line react-hooks/exhaustive-deps
+//     },[])
+
+//   const activeAgentId = selectedAgentId || agentList[0]?.id || "";
+//   const activeAgentName = agentList.find((agent) => agent.id === activeAgentId)?.name ?? "Selected Agent";
+
+//   const graphData = useMemo(() => toGraphData(graphResponse), [graphResponse]);
+
+//   const nodeById = useMemo(() => {
+//     return new Map(graphData.nodes.map((node) => [node.id, node]));
+//   }, [graphData.nodes]);
+
+//   const filteredNodes = useMemo(() => {
+//     const term = search.trim().toLowerCase();
+//     if (!term) return graphData.nodes;
+//     return graphData.nodes.filter((node) => {
+//       const properties = Object.values(node.properties).join(" ").toLowerCase();
+//       return `${node.label} ${node.type} ${properties}`.toLowerCase().includes(term);
+//     });
+//   }, [graphData.nodes, search]);
+
+//   const visibleNodeIds = useMemo(() => new Set(filteredNodes.map((node) => node.id)), [filteredNodes]);
+
+//   const visibleGraphData = useMemo(() => {
+//     return {
+//       nodes: filteredNodes,
+//       links: graphData.links.filter((link) => visibleNodeIds.has(getEndpointId(link.source)) && visibleNodeIds.has(getEndpointId(link.target))),
+//     };
+//   }, [filteredNodes, graphData.links, visibleNodeIds]);
+
+//   const selectedLinks = useMemo(() => {
+//     if (!selectedNode) return [];
+//     return graphData.links.filter((link) => getEndpointId(link.source) === selectedNode.id || getEndpointId(link.target) === selectedNode.id);
+//   }, [graphData.links, selectedNode]);
+
+//   const loadAgents = useCallback(() => {
+//     if (requestedAgentsRef.current || agentList.length > 0) return;
+//     requestedAgentsRef.current = true;
+//     getAgents(undefined, (payload) => {
+//       const agents = payload?.data?.agents ?? [];
+//       setBotsCache(agents);
+//       setAgentList(mapAgentsToList(agents));
+//     });
+//   }, [agentList.length, getAgents, setAgentList, setBotsCache]);
+
+//   const loadGraph = useCallback(
+//     (agentId: string, force = false) => {
+//       if (!agentId) return;
+//       if (!force && loadedGraphForRef.current === agentId) return;
+//       loadedGraphForRef.current = agentId;
+//       setSelectedNode(null);
+//       getGraph({ path: `/${agentId}` });
+//     },
+//     [getGraph],
+//   );
+
+//   useEffect(() => {
+//     loadAgents();
+//   }, [loadAgents]);
+
+//   useEffect(() => {
+//     loadGraph(activeAgentId);
+//   }, [activeAgentId, loadGraph]);
+
+//   useEffect(() => {
+//     if (!graphData.nodes.length) return;
+    
+//     if (graphRef.current) {
+//       // Increase repulsion between nodes to give entities more space
+//       graphRef.current.d3Force("charge")?.strength(-600)?.distanceMax(1000);
+//       // Increase default link distance
+//       graphRef.current.d3Force("link")?.distance(140);
+//     }
+    
+//     window.setTimeout(() => graphRef.current?.zoomToFit(450, 70), 80);
+//   }, [graphData.nodes.length]);
+
+//   const handleRefresh = () => {
+//     loadedGraphForRef.current = "";
+//     loadGraph(activeAgentId, true);
+//     graphRef.current?.d3ReheatSimulation();
+//   };
+
+//   const handleFit = () => {
+//     graphRef.current?.zoomToFit(450, 70);
+//   };
+
+//   return (
+//     <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 18,padding:"40px"}}>
+//       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+//         <div>
+//           <h1 style={{ margin: 0, color: "var(--app-text)", fontWeight: 700, fontSize: 38, lineHeight: 1.1 }}>
+//             Graph View
+//           </h1>
+//           <p style={{ margin: "8px 0 0", color: "var(--app-text-muted)", fontSize: 16 }}>
+//             {activeAgentId ? activeAgentName : "Select an agent to render its knowledge graph"}
+//           </p>
+//         </div>
+
+//         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+//           <AgentList
+//             selectedId={activeAgentId || undefined}
+//             onChange={(id) => {
+//               setSelectedAgentId(id);
+//               loadedGraphForRef.current = "";
+//             }}
+//           />
+//           <Button icon={<ZoomInOutlined />} onClick={handleFit} disabled={!graphData.nodes.length} />
+//           <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={graphLoading} disabled={!activeAgentId} />
+//         </div>
+//       </div>
+
+//       <div
+//         style={{
+//           border: "1px solid #e2e8f0",
+//           background: "#ffffff",
+//           borderRadius: 12,
+//           overflow: "hidden",
+//           minHeight: 700,
+//           display: "grid",
+//           gridTemplateColumns: "minmax(0, 1fr) 340px",
+//           boxShadow: "0 4px 24px rgba(0,0,0,0.06)",
+//         }}
+//       >
+//         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", background: "#ffffff" }}>
+//           <div
+//             style={{
+//               display: "flex",
+//               alignItems: "center",
+//               justifyContent: "space-between",
+//               gap: 12,
+//               minHeight: 52,
+//               padding: "10px 16px",
+//               borderBottom: "1px solid #e2e8f0",
+//               background: "#ffffff",
+//             }}
+//           >
+//             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+//               <span style={{ width: 8, height: 8, borderRadius: 999, background: "#22c55e", boxShadow: "0 0 12px #22c55e" }} />
+//               <span style={{ color: "#64748b", fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>KNOWLEDGE GRAPH</span>
+//               <span style={{ color: "#4f46e5", fontSize: 11, fontWeight: 600 }}>
+//                 {graphData.nodes.length} nodes · {graphData.links.length} relationships
+//               </span>
+//             </div>
+//             <Input.Search
+//               allowClear
+//               value={search}
+//               onChange={(event) => setSearch(event.target.value)}
+//               placeholder="Search graph"
+//               style={{ width: 240 }}
+//             />
+//           </div>
+
+//           <div style={{ position: "relative", height: 640, background: "#ffffff" }}>
+//             <div
+//               style={{
+//                 position: "absolute",
+//                 inset: 0,
+//                 pointerEvents: "none",
+//                 backgroundImage: "radial-gradient(circle, #e2e8f0 1px, transparent 1px)",
+//                 backgroundSize: "28px 28px",
+//                 opacity: 0.8,
+//               }}
+//             />
+
+//             {graphLoading && (
+//               <div
+//                 style={{
+//                   position: "absolute",
+//                   inset: 0,
+//                   display: "flex",
+//                   alignItems: "center",
+//                   justifyContent: "center",
+//                   background: "rgba(255,255,255,0.7)",
+//                   zIndex: 2,
+//                 }}
+//               >
+//                 <Spin size="large" />
+//               </div>
+//             )}
+
+//             {!activeAgentId && !graphLoading ? (
+//               <div style={{ position: "relative", zIndex: 1, height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+//                 <Empty description="No agent selected" />
+//               </div>
+//             ) : graphData.nodes.length === 0 && !graphLoading ? (
+//               <div style={{ position: "relative", zIndex: 1, height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+//                 <Empty description="No graph data found" />
+//               </div>
+//             ) : (
+//               <ForceGraph2D
+//                 ref={graphRef}
+//                 graphData={visibleGraphData}
+//                 width={1000}
+//                 height={640}
+//                 backgroundColor="white"
+//                 d3AlphaDecay={0.02}
+//                 d3VelocityDecay={0.3}
+//                 cooldownTicks={100}
+//                 nodeId="id"
+//                 nodeVal="val"
+//                 nodeRelSize={6}
+//                 nodeColor={(node) => node.color}
+//                 nodeLabel={(node) => {
+//                   const title = `${node.type}: ${node.label}`;
+//                   const text = String(node.properties.text ?? node.properties.description ?? "");
+//                   return text ? `${title}\n${truncate(text, 160)}` : title;
+//                 }}
+//                 linkLabel={(link) => link.label}
+//                 linkColor={(link: any) =>
+//                   selectedNode &&
+//                   (getEndpointId(link.source) === selectedNode.id || getEndpointId(link.target) === selectedNode.id)
+//                     ? "rgba(0, 0, 0, 0.8)"
+//                     : "rgba(0, 0, 0, 0.3)"
+//                 }
+//                 linkWidth={(link: any) =>
+//                   selectedNode &&
+//                   (getEndpointId(link.source) === selectedNode.id || getEndpointId(link.target) === selectedNode.id)
+//                     ? 2
+//                     : 1
+//                 }
+//                 linkCurvature={0}
+//                 linkDirectionalArrowLength={6}
+//                 linkDirectionalArrowRelPos={1}
+//                 linkDirectionalParticles={(link: any) =>
+//                   selectedNode &&
+//                   (getEndpointId(link.source) === selectedNode.id || getEndpointId(link.target) === selectedNode.id)
+//                     ? 2
+//                     : 0
+//                 }
+//                 linkDirectionalParticleWidth={2}
+//                 linkDirectionalParticleColor={() => "#000000"}
+//                 linkDirectionalParticleSpeed={0.006}
+//                 linkCanvasObjectMode={() => "after"}
+//                 linkCanvasObject={(link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+//                   if (globalScale < 1.5) return; // Hide labels when zoomed out
+
+//                   const MAX_FONT_SIZE = 3.5;
+//                   const label = link.label;
+//                   const fontSize = Math.min(MAX_FONT_SIZE, 10 / globalScale);
+//                   ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
+
+//                   const start = typeof link.source === "string" ? { x: 0, y: 0 } : link.source;
+//                   const end = typeof link.target === "string" ? { x: 0, y: 0 } : link.target;
+
+//                   if (typeof start === "string" || typeof end === "string") return;
+
+//                   // Calculate label position (midpoint)
+//                   const textPos = {
+//                     x: start.x! + (end.x! - start.x!) / 2,
+//                     y: start.y! + (end.y! - start.y!) / 2,
+//                   };
+
+//                   const relAngle = Math.atan2(end.y! - start.y!, end.x! - start.x!);
+//                   const labelRotation = relAngle > Math.PI / 2 || relAngle < -Math.PI / 2 ? relAngle + Math.PI : relAngle;
+
+//                   ctx.save();
+//                   ctx.translate(textPos.x, textPos.y);
+//                   ctx.rotate(labelRotation);
+
+//                   const textWidth = ctx.measureText(label).width;
+//                   const bckgDimensions = [textWidth, fontSize].map((n) => n + fontSize * 0.5);
+
+//                   // Draw text background
+//                   ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+//                   ctx.beginPath();
+//                   const rx = bckgDimensions[0] / 2, ry = bckgDimensions[1] / 2;
+//                   ctx.roundRect(-rx, -ry, bckgDimensions[0], bckgDimensions[1], 3);
+//                   ctx.fill();
+
+//                   // Draw text
+//                   ctx.textAlign = "center";
+//                   ctx.textBaseline = "middle";
+//                   ctx.fillStyle = "#000000";
+//                   ctx.fillText(label, 0, 0);
+//                   ctx.restore();
+//                 }}
+//                 onNodeClick={(node: any) => setSelectedNode(node)}
+//                 onBackgroundClick={() => setSelectedNode(null)}
+//                 onNodeDragEnd={(node: any) => {
+//                   node.fx = node.x;
+//                   node.fy = node.y;
+//                 }}
+//                 nodeCanvasObject={(node, ctx, globalScale) => {
+//                   const typeRadius: Record<string, number> = { Agent: 24, KnowledgeBase: 20, Chunk: 14, Entity: 16 };
+//                   const radius = typeRadius[node.type] ?? 16;
+//                   const isSelected = selectedNode?.id === node.id;
+//                   const isConnected = selectedNode && graphData.links.some(
+//                     (l) => (getEndpointId(l.source) === selectedNode.id || getEndpointId(l.target) === selectedNode.id) &&
+//                            (getEndpointId(l.source) === node.id || getEndpointId(l.target) === node.id)
+//                   );
+//                   const fontSize = Math.max(3, 10 / globalScale);
+//                   const label = truncate(node.label, node.type === "Chunk" ? 16 : 14);
+//                   const dimmed = selectedNode && !isSelected && !isConnected;
+
+//                   // Glow for selected
+//                   if (isSelected) {
+//                     ctx.beginPath();
+//                     ctx.arc(node.x ?? 0, node.y ?? 0, radius + 6, 0, 2 * Math.PI);
+//                     ctx.fillStyle = node.color + "30";
+//                     ctx.fill();
+//                   }
+
+//                   // Main circle (Solid color for a cleaner look)
+//                   ctx.beginPath();
+//                   ctx.arc(node.x ?? 0, node.y ?? 0, radius, 0, 2 * Math.PI);
+//                   ctx.fillStyle = node.color + (dimmed ? "40" : "cc");
+//                   ctx.fill();
+
+//                   // Border ring
+//                   ctx.lineWidth = isSelected ? 3 : 1;
+//                   ctx.strokeStyle = isSelected ? "#000000" : (node.color + (dimmed ? "20" : "88"));
+//                   ctx.stroke();
+
+//                   // Label inside node
+//                   ctx.font = `${isSelected ? "bold " : ""}${fontSize}px Inter, system-ui, sans-serif`;
+//                   ctx.textAlign = "center";
+//                   ctx.textBaseline = "middle";
+//                   ctx.fillStyle = dimmed ? "rgba(0,0,0,0.3)" : "#000000";
+                  
+//                   if (label.length > 10) {
+//                     const mid = Math.floor(label.length / 2);
+//                     const splitPos = label.indexOf(" ", mid - 3) > -1 ? label.indexOf(" ", mid - 3) : mid;
+//                     ctx.fillText(label.slice(0, splitPos), node.x ?? 0, (node.y ?? 0) - fontSize * 0.55);
+//                     ctx.fillText(label.slice(splitPos).trim(), node.x ?? 0, (node.y ?? 0) + fontSize * 0.55);
+//                   } else {
+//                     ctx.fillText(label, node.x ?? 0, node.y ?? 0);
+//                   }
+//                 }}
+//               />
+//             )}
+//           </div>
+//         </div>
+
+//         <aside style={{ borderLeft: "1px solid #e2e8f0", background: "#f8fafc", padding: 18, color: "#334155", minWidth: 0, overflowY: "auto", maxHeight: 700 }}>
+//           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+//             {NODE_TYPES.map((type) => (
+//               <span
+//                 key={type}
+//                 style={{
+//                   display: "inline-flex",
+//                   alignItems: "center",
+//                   gap: 6,
+//                   color: NODE_COLORS[type],
+//                   border: `1px solid ${NODE_COLORS[type]}55`,
+//                   background: `${NODE_COLORS[type]}18`,
+//                   borderRadius: 999,
+//                   padding: "4px 8px",
+//                   fontSize: 11,
+//                 }}
+//               >
+//                 <span style={{ width: 7, height: 7, borderRadius: 999, background: NODE_COLORS[type] }} />
+//                 {type}
+//               </span>
+//             ))}
+//           </div>
+
+//           {selectedNode ? (
+//             <div>
+//               <div style={{ color: selectedNode.color, fontSize: 12, fontWeight: 700, marginBottom: 6 }}>{selectedNode.type}</div>
+//               <h2 style={{ margin: "0 0 14px", color: "#0f172a", fontSize: 20, lineHeight: 1.25 }}>{selectedNode.label}</h2>
+
+//               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+//                 {Object.entries(selectedNode.properties).map(([key, value]) => (
+//                   <div key={key}>
+//                     <div style={{ color: "#64748b", fontSize: 11, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.5 }}>{key}</div>
+//                     <div style={{ color: "#334155", fontSize: 12, lineHeight: 1.45, overflowWrap: "anywhere" }}>
+//                       {String(value)}
+//                     </div>
+//                   </div>
+//                 ))}
+//               </div>
+
+//               {selectedLinks.length > 0 && (
+//                 <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #e2e8f0" }}>
+//                   <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8, letterSpacing: 1 }}>RELATIONSHIPS</div>
+//                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+//                     {selectedLinks.map((link, index) => {
+//                       const otherNode = nodeById.get(getLinkedNodeId(link, selectedNode.id));
+//                       return (
+//                         <div key={`${getEndpointId(link.source)}-${getEndpointId(link.target)}-${index}`} style={{ fontSize: 12, lineHeight: 1.35 }}>
+//                           <span style={{ color: "#4f46e5", fontWeight: 600 }}>{link.label}</span>
+//                           <span style={{ color: "#94a3b8" }}>{" -> "}</span>
+//                           <span style={{ color: "#334155", fontWeight: 500 }}>{otherNode?.label ?? "Unknown"}</span>
+//                         </div>
+//                       );
+//                     })}
+//                   </div>
+//                 </div>
+//               )}
+//             </div>
+//           ) : (
+//             <div style={{ color: "#64748b", fontSize: 13, lineHeight: 1.5 }}>
+//               Select a node to inspect its properties and connected relationships.
+//             </div>
+//           )}
+//         </aside>
+//       </div>
+//     </div>
+//   );
+// }

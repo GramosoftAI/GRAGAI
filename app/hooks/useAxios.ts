@@ -137,7 +137,7 @@ const res: AxiosResponse<T> = await http.request<T, AxiosResponse<T>, R>({
         deleteCookie(AUTH_COOKIE_KEY);
         notification.warning({
           title: "Session Expired",
-          description: "Please login again, your session has expired.",
+          description: "Please login again.",
           showProgress: true,
           pauseOnHover: true,
         });

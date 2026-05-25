@@ -1,7 +1,7 @@
 "use client";
 
 import React from 'react';
-import { Button, Typography, Space, Row, Col, Card, App } from 'antd';
+import { Button, Typography, Space, Row, Col, Card} from 'antd';
 import { 
   Database, 
   Cpu, 
@@ -12,10 +12,10 @@ import {
   ShieldCheck, 
   Zap,
   ArrowRight,
-  ChevronRight
+  // ChevronRight
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { routes } from '../services/routes';
+import { routes } from '@/app/services/routes';
 
 const { Title, Text } = Typography;
 
@@ -56,7 +56,7 @@ const LandingPage = () => {
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#2879f3] shadow-lg shadow-blue-500/20 transition-transform group-hover:scale-110">
               <span className="text-sm font-black text-white">GM</span>
             </div>
-            <span className="text-2xl font-black tracking-tighter text-[#0f172a]">GraphMind</span>
+            <span className="text-2xl font-black tracking-tighter text-[#0f172a]">GRAG</span>
           </div>
 
           <div className="hidden md:flex items-center gap-10">
@@ -115,7 +115,7 @@ const LandingPage = () => {
         </Title>
 
         <Text className="mx-auto mb-12 max-w-2xl block text-slate-500 font-medium" style={{ fontSize: '1.25rem', lineHeight: '1.6' }}>
-          GraphMind transforms complex relationships into actionable intelligence. 
+          GRAG transforms complex relationships into actionable intelligence. 
           Deploy context-aware agents that reason like humans.
         </Text>
 
@@ -146,7 +146,7 @@ const LandingPage = () => {
                     <div className="h-3 w-3 rounded-full bg-slate-200"></div>
                     <div className="h-3 w-3 rounded-full bg-slate-200"></div>
                   </div>
-                  <span className="ml-4 text-xs text-slate-400 font-bold uppercase tracking-widest">GraphMind Workspace</span>
+                  <span className="ml-4 text-xs text-slate-400 font-bold uppercase tracking-widest">GRAG Workspace</span>
                 </div>
                 <div className="h-6 w-32 rounded-full bg-slate-200/50"></div>
               </div>
@@ -158,7 +158,7 @@ const LandingPage = () => {
                 </div>
                 <div className="flex justify-start">
                   <div className="max-w-[85%] rounded-3xl border border-[#2879f3]/10 bg-white px-6 py-6 text-[15px] text-slate-600 shadow-[0_10px_30px_rgba(40,121,243,0.05)]">
-                    <p className="mb-4 font-semibold text-slate-800">I've traversed your knowledge graph and identified a critical pattern:</p>
+                    <p className="mb-4 font-semibold text-slate-800">Ive traversed your knowledge graph and identified a critical pattern:</p>
                     <div className="space-y-3">
                       <div className="flex items-center gap-3 p-3 rounded-2xl bg-[#2879f3]/5 border border-[#2879f3]/10">
                         <div className="h-8 w-8 rounded-lg bg-[#2879f3] text-white flex items-center justify-center">
@@ -166,7 +166,7 @@ const LandingPage = () => {
                         </div>
                         <span className="font-bold text-sm text-[#2879f3]">High Correlation Found (0.87)</span>
                       </div>
-                      <p className="pl-2 border-l-2 border-slate-100">Users who encounter "Empty Graph Node" errors in the Billing entity have a 40% higher churn rate within 7 days.</p>
+                      <p className="pl-2 border-l-2 border-slate-100">Users who encounter Empty Graph Node errors in the Billing entity have a 40% higher churn rate within 7 days.</p>
                     </div>
                   </div>
                 </div>
@@ -258,7 +258,7 @@ const LandingPage = () => {
           <Title level={2} className="!text-white !mb-6" style={{ fontSize: '3rem', fontWeight: 900, letterSpacing: '-0.02em' }}>
             Ready to unleash your graph?
           </Title>
-          <Text className="text-white/80 block mb-10 text-lg font-semibold">Join 500+ enterprises building the future of AI on GraphMind.</Text>
+          <Text className="text-white/80 block mb-10 text-lg font-semibold">Join 500+ enterprises building the future of AI on GRAG.</Text>
           <Button 
             size="large" 
             onClick={() => router.push(routes.register)}
@@ -274,10 +274,10 @@ const LandingPage = () => {
         <div className="mx-auto max-w-7xl px-6 text-center">
           <div className="flex items-center justify-center gap-2 mb-8">
             <div className="h-6 w-6 rounded bg-[#2879f3] flex items-center justify-center text-[8px] font-black text-white">GM</div>
-            <span className="text-lg font-black tracking-tight">GraphMind</span>
+            <span className="text-lg font-black tracking-tight">GRAG</span>
           </div>
           <Text style={{ color: '#94a3b8', fontSize: '15px', fontWeight: 600 }}>
-            © 2026 GraphMind AI Systems. All rights reserved. Built for the era of Knowledge Graphs.
+            © 2026 GRAG AI Systems. All rights reserved. Built for the era of Knowledge Graphs.
           </Text>
         </div>
       </footer>

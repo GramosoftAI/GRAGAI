@@ -1,71 +1,227 @@
 "use client";
 
-import { SearchOutlined, BellOutlined, MenuUnfoldOutlined, MenuFoldOutlined, SettingOutlined } from "@ant-design/icons";
+import { SearchOutlined} from "@ant-design/icons"; // Using Ant Icons for consistency
 import { menuItems } from "./Sidebar";
-import { Button, Input, Badge } from "antd";
-import { usePathname } from "next/navigation";
+import { Input, Avatar} from "antd";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { deleteCookie } from "../../config/cookies";
+import { Dropdown } from "antd";
+import type { MenuProps } from "antd";
 
-interface HeaderProps {
-  collapsed: boolean;
-  onToggle: () => void;
-}
-
-export default function Header({
-  collapsed,
-  onToggle,
-}: HeaderProps) {
+export default function Header() {
   const pathname = usePathname();
+  const router = useRouter();
+  const [userName, setUserName] = useState("User");
+
+  // Fetch real username directly in header now
+  useEffect(() => {
+    const storedName = localStorage.getItem("userName");
+    if (storedName) 
+      {
+        setUserName(storedName);
+      }
+    
+  }, []);
+
+  const handleLogout = () => {
+    localStorage.clear();
+    deleteCookie("AUTH_TOKEN");
+    router.push("/login");
+  };
+
+  const getInitials = (name: string) => {
+    return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+  };
+  
   const currentPage = menuItems.find(item => item.path === pathname)?.label || "Dashboard";
 
+  
+
+// Inside your Header component, replace the profile container with this:
+const profileDropdownItems: MenuProps['items'] = [
+  {
+    key: 'user_info',
+    label: (
+      <div className="flex flex-col px-2 py-2 min-w-[160px] border-b border-[var(--app-border)] mb-1">
+        <span className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--app-text-muted)] opacity-50">
+          Account
+        </span>
+        <span className="text-sm font-black text-[var(--app-text)] tracking-tight mt-1 truncate max-w-[150px]">
+          {userName}
+        </span>
+        {/* <span className="text-[9px] font-bold text-[#285d91] dark:text-blue-400 mt-0.5">
+          Workspace Admin
+        </span> */}
+      </div>
+    ),
+    disabled: true, // Making it a clean display card, non-clickable
+  },
+  {
+    key: 'logout',
+    danger: true,
+    label: (
+      <div className="flex items-center gap-3 px-2 py-2 font-bold text-xs tracking-tight">
+        {/* Modern minimal exit icon */}
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-4 h-4">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
+        </svg>
+        <span>Sign Out</span>
+      </div>
+    ),
+    onClick: handleLogout,
+  },
+];
+const [width, setWidth] = useState(0);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setWidth(window.innerWidth);
+    };
+
+    handleResize(); // initial value
+    window.addEventListener("resize", handleResize);
+
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
   return (
-    <header className="sticky top-0 z-[60] w-full h-24 flex flex-col justify-center bg-[var(--app-surface)]/80 backdrop-blur-xl border-b border-[var(--app-border)] px-6 md:px-10 transition-all">
-      <div className="flex items-center justify-between w-full max-w-[1600px] mx-auto">
-        {/* Left Side: Navigation Info */}
-        <div className="flex items-center gap-4 md:gap-6">
-          {/* Main Toggle Button */}
-          <Button 
-            type="text" 
-            onClick={onToggle}
-            className="flex items-center justify-center w-12 h-12 rounded-2xl bg-[var(--app-surface-muted)] text-[var(--app-text)] hover:bg-[var(--app-hover)] transition-all"
-            icon={collapsed ? <MenuUnfoldOutlined className="text-xl" /> : <MenuFoldOutlined className="text-xl" />}
-          />
-          
+    <header className="sticky top-0 z-[40] w-full h-24 flex flex-col justify-center bg-[var(--app-surface)]/80 backdrop-blur-xl border-b border-[var(--app-border)] px-6 md:px-10 transition-all">
+      <div className="flex items-center justify-between w-full max-w-[1600px] mx-auto gap-4">
+        
+        {/* LEFT SIDE: Workspace Info */}
+        <div className="flex items-center gap-4 shrink-0">
           <div className="flex flex-col">
-            <div className="flex items-center gap-2 text-[var(--app-text-muted)] font-black text-[10px] uppercase tracking-[0.2em]">
+            {(width > 568) && <div className="flex items-center gap-2 text-[var(--app-text-muted)] font-black text-[10px] uppercase tracking-[0.2em]">
               Workspace / {currentPage}
-            </div>
-            <h2 className="text-[var(--app-text)] font-black text-xl md:text-2xl tracking-tighter leading-none mt-1">
+            </div>}
+            {(width > 568) && <h2 className="text-[var(--app-text)] font-black text-xl md:text-2xl tracking-tighter leading-none mt-1">
               {currentPage}
-            </h2>
+            </h2>}
           </div>
         </div>
 
-        {/* Center: Visual Search (Non-functional) */}
-        <div className="hidden xl:flex flex-1 max-w-md mx-12">
+        {/* CENTER: Clean Search Bar */}
+        <div className="flex-1 max-w-md md:max-w-xl mx-2 md:mx-6">
           <Input 
             prefix={<SearchOutlined className="text-[var(--app-text-muted)] mr-2" />}
+            // suffix={
+            //   <kbd className="hidden md:inline-flex h-5 select-none items-center gap-0.5 rounded border border-[var(--app-border)] bg-[var(--app-surface-muted)] px-1.5 font-mono text-[10px] font-bold text-[var(--app-text-muted)]">
+            //     <span>⌘</span>K
+            //   </kbd>
+            // }
             placeholder="Search your knowledge base..."
-            className="h-12 !bg-[var(--app-surface-muted)] !border-none !rounded-2xl font-bold text-[var(--app-text)] placeholder:text-[var(--app-text-muted)] focus:!ring-2 focus:!ring-[#285d91]/10"
+            className="h-12 !bg-[var(--app-surface-muted)] !border-none !rounded-2xl font-bold text-[var(--app-text)] placeholder:text-[var(--app-text-muted)] focus:!ring-2 focus:!ring-[#285d91]/20 transition-all"
           />
         </div>
 
-        {/* Right Side: Quick Actions */}
-        <div className="flex items-center gap-2 md:gap-4">
-          <Badge count={3} offset={[-4, 4]} color="#285d91">
-            <Button 
-              type="text" 
-              className="w-10 h-10 md:w-12 md:h-12 rounded-2xl bg-[var(--app-surface-muted)] flex items-center justify-center text-[var(--app-text)] hover:bg-[var(--app-hover)] transition-all"
-              icon={<BellOutlined className="text-xl" />}
-            />
-          </Badge>
-          
-          <Button 
-            type="text" 
-            className="w-10 h-10 md:w-12 md:h-12 rounded-2xl bg-[var(--app-surface-muted)] flex items-center justify-center text-[var(--app-text)] hover:bg-[var(--app-hover)] transition-all"
-            icon={<SettingOutlined className="text-xl" />}
-          />
+        {/* RIGHT SIDE: Profile Card with Integrated Logout Button */}
+            <div className="flex items-center shrink-0 select-none">
+          <Dropdown 
+            menu={{ items: profileDropdownItems }} 
+            trigger={['click']} 
+            placement="bottomRight"
+            overlayClassName="premium-avatar-dropdown"
+          >
+            <div className="relative cursor-pointer group p-[2px]">
+              {/* Cyber Orbit Ring Effect on Hover */}
+              <div className="absolute inset-0 rounded-full bg-gradient-to-tr from-[#285d91] via-sky-400 to-indigo-500 opacity-0 group-hover:opacity-100 group-hover:rotate-180 transition-all duration-700 ease-out p-[1.5px]" />
+              
+              {/* Main Clean Avatar Container */}
+              <div className="p-1 bg-[var(--app-surface)] rounded-full relative z-10 transition-transform duration-300 active:scale-95">
+                <Avatar 
+                  className="bg-gradient-to-br from-[#285d91] to-[#163a5f] text-white font-extrabold tracking-wider border border-white/20 dark:border-zinc-800 shadow-md group-hover:shadow-lg transition-all"
+                  size={46}
+                >
+                  {getInitials(userName)}
+                </Avatar>
+              </div>
+
+              {/* Live Radial Pulse Beacon */}
+              <span className="absolute bottom-1 right-1 flex h-3.5 w-3.5 z-20">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500 border-2 border-[var(--app-surface)] shadow-md"></span>
+              </span>
+            </div>
+          </Dropdown>
         </div>
+
       </div>
     </header>
   );
 }
+
+
+
+
+// "use client";
+
+// import { SearchOutlined, BellOutlined, MenuUnfoldOutlined, MenuFoldOutlined, SettingOutlined } from "@ant-design/icons";
+// import { menuItems } from "./Sidebar";
+// import { Button, Input, Badge } from "antd";
+// import { usePathname } from "next/navigation";
+
+// interface HeaderProps {
+//   collapsed: boolean;
+//   onToggle: () => void;
+// }
+
+// export default function Header({
+//   collapsed,
+//   onToggle,
+// }: HeaderProps) {
+//   const pathname = usePathname();
+//   const currentPage = menuItems.find(item => item.path === pathname)?.label || "Dashboard";
+
+//   return (
+//     <header className="sticky top-0 z-[60] w-full h-24 flex flex-col justify-center bg-[var(--app-surface)]/80 backdrop-blur-xl border-b border-[var(--app-border)] px-6 md:px-10 transition-all">
+//       <div className="flex items-center justify-between w-full max-w-[1600px] mx-auto">
+//         {/* Left Side: Navigation Info */}
+//         <div className="flex items-center gap-4 md:gap-6">
+//           {/* Main Toggle Button */}
+//           <Button 
+//             type="text" 
+//             onClick={onToggle}
+//             className="flex items-center justify-center w-12 h-12 rounded-2xl bg-[var(--app-surface-muted)] text-[var(--app-text)] hover:bg-[var(--app-hover)] transition-all"
+//             icon={collapsed ? <MenuUnfoldOutlined className="text-xl" /> : <MenuFoldOutlined className="text-xl" />}
+//           />
+          
+//           <div className="flex flex-col">
+//             <div className="flex items-center gap-2 text-[var(--app-text-muted)] font-black text-[10px] uppercase tracking-[0.2em]">
+//               Workspace / {currentPage}
+//             </div>
+//             <h2 className="text-[var(--app-text)] font-black text-xl md:text-2xl tracking-tighter leading-none mt-1">
+//               {currentPage}
+//             </h2>
+//           </div>
+//         </div>
+
+//         {/* Center: Visual Search (Non-functional) */}
+//         <div className="hidden xl:flex flex-1 max-w-md mx-12">
+//           <Input 
+//             prefix={<SearchOutlined className="text-[var(--app-text-muted)] mr-2" />}
+//             placeholder="Search your knowledge base..."
+//             className="h-12 !bg-[var(--app-surface-muted)] !border-none !rounded-2xl font-bold text-[var(--app-text)] placeholder:text-[var(--app-text-muted)] focus:!ring-2 focus:!ring-[#285d91]/10"
+//           />
+//         </div>
+
+//         {/* Right Side: Quick Actions */}
+//         <div className="flex items-center gap-2 md:gap-4">
+//           <Badge count={3} offset={[-4, 4]} color="#285d91">
+//             <Button 
+//               type="text" 
+//               className="w-10 h-10 md:w-12 md:h-12 rounded-2xl bg-[var(--app-surface-muted)] flex items-center justify-center text-[var(--app-text)] hover:bg-[var(--app-hover)] transition-all"
+//               icon={<BellOutlined className="text-xl" />}
+//             />
+//           </Badge>
+          
+//           <Button 
+//             type="text" 
+//             className="w-10 h-10 md:w-12 md:h-12 rounded-2xl bg-[var(--app-surface-muted)] flex items-center justify-center text-[var(--app-text)] hover:bg-[var(--app-hover)] transition-all"
+//             icon={<SettingOutlined className="text-xl" />}
+//           />
+//         </div>
+//       </div>
+//     </header>
+//   );
+// }
