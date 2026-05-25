@@ -233,7 +233,7 @@ class DocumentChunk(Base):
     created_at = Column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-
+git
     __table_args__ = (
         Index("ix_chunks_tenant_id", "tenant_id"),
         Index("ix_chunks_kb_id", "kb_id"),

@@ -58,6 +58,9 @@ check_user_columns.py
 debug_db.py
 drop_tables.py
 test_triplet_diag.py
+test_ws_embed.py
+response.md 
+
 
 # Large files
 *.pptx
