@@ -1,5 +1,6 @@
 """Repository layer for Knowledge Base (PostgreSQL)"""
 
+from app.modules.knowledge_bases.models import DocumentChunk
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, delete
 from typing import Optional, List
@@ -307,3 +308,39 @@ class KnowledgeBaseRepository(BaseRepository):
         else:
             logger.warning(f"Cannot hard delete: KB not found: {kb_id}")
             return False
+  
+
+    async def list_knowledge_source(self, kb_id: str) -> List[dict]:
+        """
+        List all unique non-null sources from DocumentChunk for a given kb_id
+        along with their earliest created_at timestamp.
+        """
+        from sqlalchemy import func
+        result = await self.db.execute(
+            select(
+                DocumentChunk.source,
+                func.min(DocumentChunk.created_at).label("created_at")
+            )
+            .where(
+                and_(
+                    DocumentChunk.kb_id == (uuid.UUID(kb_id) if isinstance(kb_id, str) else kb_id),
+                    DocumentChunk.tenant_id == self.tenant_id,
+                    DocumentChunk.source.isnot(None),
+                )
+            )
+            .group_by(DocumentChunk.source)
+            .order_by(func.min(DocumentChunk.created_at).asc())
+        )
+        rows = result.all()
+        
+        # Filter and structure into dicts
+        sources = []
+        for r in rows:
+            src = r.source
+            if src and src.strip():
+                sources.append({
+                    "source": src.strip(),
+                    "created_at": r.created_at.isoformat() if isinstance(r.created_at, datetime) else r.created_at
+                })
+        logger.info(f"Listed {len(sources)} unique sources with timestamps for KB {kb_id}")
+        return sources 

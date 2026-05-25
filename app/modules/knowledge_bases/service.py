@@ -220,6 +220,7 @@ class KnowledgeBaseService:
         self,
         kb_id: str,
         document_text: str,
+        source: Optional[str] = None,
     ) -> dict:
         """
         Ingest a document with FULL RAG INTELLIGENCE (Optimized).
@@ -287,7 +288,8 @@ class KnowledgeBaseService:
             chunk_data = [{
                 "chunk_id": chunk_ids[i], "tenant_id": str(self.tenant_id), "kb_id": kb_id,
                 "text": chunks[i][:1000], "position": i, "token_count": TextChunker.estimate_tokens(chunks[i]),
-                "embedding": embeddings[i], "created_at": datetime.utcnow().isoformat()
+                "embedding": embeddings[i], "created_at": datetime.utcnow().isoformat(),
+                "source": source
             } for i in range(len(chunks))]
 
             # Save chunks to PostgreSQL pgvector table
@@ -299,6 +301,7 @@ class KnowledgeBaseService:
                     text=chunks[i],
                     chunk_index=i,
                     embedding=embeddings[i],
+                    source=source,
                 )
                 self.db.add(pg_chunk)
             logger.info(f"✅ Staged {len(chunks)} chunks in PostgreSQL")
@@ -309,7 +312,8 @@ class KnowledgeBaseService:
             CREATE (c:Chunk {
                 id: data.chunk_id, tenant_id: $tenant_id, kb_id: data.kb_id,
                 text: data.text, position: data.position, token_count: data.token_count,
-                embedding: data.embedding, created_at: data.created_at
+                embedding: data.embedding, created_at: data.created_at,
+                source: data.source
             })
             WITH c, data
             MATCH (kb:KnowledgeBase {id: data.kb_id, tenant_id: $tenant_id})
@@ -390,6 +394,21 @@ class KnowledgeBaseService:
     async def list_kbs(self, limit: int = 50, offset: int = 0) -> dict:
         kbs, total = await self.repository.list_kbs(limit=limit, offset=offset)
         return format_success({"kbs": [schemas.KBResponse.model_validate(kb, from_attributes=True) for kb in kbs], "total": total})
+
+    async def list_knowledge_source(self, kb_id: str) -> dict:
+        """
+        Get all unique sources for a given knowledge base.
+        """
+        try:
+            kb = await self.repository.get_by_id(kb_id)
+            if not kb:
+                return format_error(f"KB not found: {kb_id}", meta={"status_code": 404})
+
+            sources = await self.repository.list_knowledge_source(kb_id)
+            return format_success({"sources": sources})
+        except Exception as e:
+            logger.error(f"Error listing knowledge source: {e}")
+            return format_error(f"Failed to list knowledge sources: {str(e)}")
 
     async def list_kbs_by_agent(self, agent_id: str, limit: int = 50, offset: int = 0) -> dict:
         kbs, total = await self.repository.list_by_agent(agent_id, limit=limit, offset=offset)
@@ -666,6 +685,7 @@ class KnowledgeBaseService:
                 tenant_id: $tenant_id,
                 entity_type: item.entity_type,
                 entity_id: item.entity_id,
+                source: item.source,
                 weight: 1.0,
                 created_at: timestamp()
             })
@@ -674,13 +694,16 @@ class KnowledgeBaseService:
             
             batch_data = []
             for i, chunk in enumerate(extracted_chunks):
+                # source: e.g. "sqlite:Customer", "postgresql:Product"
+                source_str = f"{db_conn.db_type}:{chunk['entity_type']}"
                 batch_data.append({
                     "id": str(uuid.uuid4()),
                     "text": chunk["text"],
                     "embedding": embeddings[i],
                     "position": i,
                     "entity_type": chunk["entity_type"],
-                    "entity_id": str(chunk["entity_id"])
+                    "entity_id": str(chunk["entity_id"]),
+                    "source": source_str
                 })
 
             await self.neo4j_repo.execute_write(load_query, {
@@ -699,6 +722,7 @@ class KnowledgeBaseService:
                     text=item["text"],
                     chunk_index=i,
                     embedding=item["embedding"],
+                    source=item["source"],
                 )
                 self.db.add(pg_chunk)
             logger.info(f"✅ Loaded {len(batch_data)} database rows as DocumentChunks in PostgreSQL pgvector")

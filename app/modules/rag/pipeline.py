@@ -30,6 +30,7 @@ class RetrievedChunk:
     graph_score: float
     hybrid_score: float
     reason: str = ""  # Why this chunk was retrieved (SIMILAR, ENTITY, NEXT, Seed)
+    source: Optional[str] = None  # Source of the chunk (e.g., filename, URL, database table)
 
 
 @dataclass
@@ -317,6 +318,7 @@ class RAGPipeline:
                         DocumentChunk.text,
                         DocumentChunk.chunk_index,
                         DocumentChunk.kb_id,
+                        DocumentChunk.source,
                         (1.0 - DocumentChunk.embedding.cosine_distance(query_embedding)).label("similarity")
                     )
                     .where(
@@ -343,7 +345,8 @@ class RAGPipeline:
                             "kb_id": str(row.kb_id),
                             "embedding": None,  # embedding vector itself not needed downstream
                             "similarity": similarity,
-                            "weight": 1.0
+                            "weight": 1.0,
+                            "source": row.source
                         })
                 
                 logger.info(f"🎯 PostgreSQL pgvector retrieved {len(pg_chunks)} seed chunks")
@@ -360,7 +363,7 @@ class RAGPipeline:
         WHERE kb.id IN $kb_ids AND kb.tenant_id = $tenant_id
         MATCH (kb)-[:HAS_CHUNK]->(c:Chunk)
         WHERE c.embedding IS NOT NULL AND size(c.embedding) = $dimension
-        RETURN c.id as chunk_id, c.text as text, c.position as position, c.kb_id as kb_id, c.embedding as embedding, coalesce(c.weight, 1.0) as weight
+        RETURN c.id as chunk_id, c.text as text, c.position as position, c.kb_id as kb_id, c.embedding as embedding, coalesce(c.weight, 1.0) as weight, c.source as source
         LIMIT 1000
         """
 
@@ -397,6 +400,7 @@ class RAGPipeline:
                         "embedding": result["embedding"],
                         "similarity": similarity,
                         "weight": result.get("weight", 1.0),
+                        "source": result.get("source"),
                     }
                 )
 
@@ -541,6 +545,7 @@ class RAGPipeline:
                     graph_score=graph_score,
                     hybrid_score=hybrid_score,
                     reason="Seed chunk (semantic similarity)",
+                    source=seed.get("source"),
                 )
             )
 

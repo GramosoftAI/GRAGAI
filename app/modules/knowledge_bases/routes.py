@@ -286,8 +286,9 @@ async def ingest_document(
     try:
         tenant_id, _ = get_tenant_and_user(request)
 
-        # Extract document text
+        # Extract document text and optional source
         document_text = body.get("document_text", "").strip()
+        source = body.get("source", "text").strip()
         if not document_text:
             raise HTTPException(status_code=400, detail="document_text is required")
 
@@ -296,7 +297,7 @@ async def ingest_document(
 
         async with AsyncSessionLocal() as db:
             service = KnowledgeBaseService(db, tenant_id)
-            result = await service.ingest_document(kb_id, document_text)
+            result = await service.ingest_document(kb_id, document_text, source=source)
 
             if not result.get("success"):
                 error_msg = result.get("error", "Unknown error")
@@ -370,7 +371,7 @@ async def ingest_pdf(
         # Reuse existing ingestion logic
         async with AsyncSessionLocal() as db:
             service = KnowledgeBaseService(db, tenant_id)
-            result = await service.ingest_document(kb_id, document_text)
+            result = await service.ingest_document(kb_id, document_text, source=file.filename)
 
             if not result.get("success"):
                 error_msg = result.get("error", "Unknown error")
@@ -436,7 +437,7 @@ async def ingest_url(
                 if len(documents) > 1:
                     content = f"# SOURCE: {doc['source']}\n\n{content}"
 
-                ingest_result = await service.ingest_document(kb_id, content)
+                ingest_result = await service.ingest_document(kb_id, content, source=doc["source"])
 
                 if ingest_result.get("success"):
                     total_chunks += ingest_result["data"]["chunks_created"]
@@ -596,4 +597,24 @@ async def sync_db_to_graph(request: Request, kb_id: str) -> dict:
         raise
     except Exception as e:
         logger.error(f"Error in sync_db_to_graph: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@router.get("/{kb_id}/ingest/list_knowledge_bases")
+async def list_knowledge_bases(request: Request, kb_id: str) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+
+        async with AsyncSessionLocal() as db:
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.list_knowledge_source(kb_id)
+            
+            if not result.get("success"):
+                status_code = result.get("meta", {}).get("status_code", 400)
+                raise HTTPException(status_code=status_code, detail=result.get("error"))
+
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_knowledge_bases: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
