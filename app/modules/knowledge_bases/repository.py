@@ -310,26 +310,26 @@ class KnowledgeBaseRepository(BaseRepository):
             return False
   
 
-    async def list_knowledge_source(self, kb_id: str) -> List[dict]:
+    async def list_knowledge_source(self, agent_id: str) -> List[dict]:
         """
-        List all unique non-null sources from DocumentChunk for a given kb_id
+        List all unique non-null names (sources) from KnowledgeBase for a given agent_id
         along with their earliest created_at timestamp.
         """
         from sqlalchemy import func
         result = await self.db.execute(
             select(
-                DocumentChunk.source,
-                func.min(DocumentChunk.created_at).label("created_at")
+                KnowledgeBase.name.label("source"),
+                func.min(KnowledgeBase.created_at).label("created_at")
             )
             .where(
                 and_(
-                    DocumentChunk.kb_id == (uuid.UUID(kb_id) if isinstance(kb_id, str) else kb_id),
-                    DocumentChunk.tenant_id == self.tenant_id,
-                    DocumentChunk.source.isnot(None),
+                    KnowledgeBase.tenant_id == self.tenant_id,
+                    KnowledgeBase.agent_id == (uuid.UUID(agent_id) if isinstance(agent_id, str) else agent_id),
+                    KnowledgeBase.is_active == True,
                 )
             )
-            .group_by(DocumentChunk.source)
-            .order_by(func.min(DocumentChunk.created_at).asc())
+            .group_by(KnowledgeBase.name)
+            .order_by(func.min(KnowledgeBase.created_at).asc())
         )
         rows = result.all()
         
@@ -342,5 +342,5 @@ class KnowledgeBaseRepository(BaseRepository):
                     "source": src.strip(),
                     "created_at": r.created_at.isoformat() if isinstance(r.created_at, datetime) else r.created_at
                 })
-        logger.info(f"Listed {len(sources)} unique sources with timestamps for KB {kb_id}")
+        logger.info(f"Listed {len(sources)} unique sources with timestamps for agent {agent_id}")
         return sources 

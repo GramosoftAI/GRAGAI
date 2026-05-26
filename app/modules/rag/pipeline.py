@@ -318,7 +318,6 @@ class RAGPipeline:
                         DocumentChunk.text,
                         DocumentChunk.chunk_index,
                         DocumentChunk.kb_id,
-                        DocumentChunk.source,
                         (1.0 - DocumentChunk.embedding.cosine_distance(query_embedding)).label("similarity")
                     )
                     .where(
@@ -346,7 +345,7 @@ class RAGPipeline:
                             "embedding": None,  # embedding vector itself not needed downstream
                             "similarity": similarity,
                             "weight": 1.0,
-                            "source": row.source
+                            "source": None
                         })
                 
                 logger.info(f"🎯 PostgreSQL pgvector retrieved {len(pg_chunks)} seed chunks")

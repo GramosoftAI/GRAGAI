@@ -227,8 +227,7 @@ class DocumentChunk(Base):
     from pgvector.sqlalchemy import Vector
     embedding = Column(Vector(1024), nullable=True)
 
-    # Source attribution (filename, URL, database table, etc.)
-    source = Column(Text, nullable=True)
+
 
     created_at = Column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

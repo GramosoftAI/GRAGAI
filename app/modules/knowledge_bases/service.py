@@ -301,7 +301,6 @@ class KnowledgeBaseService:
                     text=chunks[i],
                     chunk_index=i,
                     embedding=embeddings[i],
-                    source=source,
                 )
                 self.db.add(pg_chunk)
             logger.info(f"✅ Staged {len(chunks)} chunks in PostgreSQL")
@@ -395,16 +394,12 @@ class KnowledgeBaseService:
         kbs, total = await self.repository.list_kbs(limit=limit, offset=offset)
         return format_success({"kbs": [schemas.KBResponse.model_validate(kb, from_attributes=True) for kb in kbs], "total": total})
 
-    async def list_knowledge_source(self, kb_id: str) -> dict:
+    async def list_knowledge_source(self, agent_id: str) -> dict:
         """
-        Get all unique sources for a given knowledge base.
+        Get all unique sources for a given agent.
         """
         try:
-            kb = await self.repository.get_by_id(kb_id)
-            if not kb:
-                return format_error(f"KB not found: {kb_id}", meta={"status_code": 404})
-
-            sources = await self.repository.list_knowledge_source(kb_id)
+            sources = await self.repository.list_knowledge_source(agent_id)
             return format_success({"sources": sources})
         except Exception as e:
             logger.error(f"Error listing knowledge source: {e}")
@@ -722,7 +717,6 @@ class KnowledgeBaseService:
                     text=item["text"],
                     chunk_index=i,
                     embedding=item["embedding"],
-                    source=item["source"],
                 )
                 self.db.add(pg_chunk)
             logger.info(f"✅ Loaded {len(batch_data)} database rows as DocumentChunks in PostgreSQL pgvector")

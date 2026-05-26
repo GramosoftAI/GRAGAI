@@ -599,14 +599,14 @@ async def sync_db_to_graph(request: Request, kb_id: str) -> dict:
         logger.error(f"Error in sync_db_to_graph: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@router.get("/{kb_id}/ingest/list_knowledge_bases")
-async def list_knowledge_bases(request: Request, kb_id: str) -> dict:
+@router.get("/{agent_id}/list_knowledge_bases")
+async def list_knowledge_bases(request: Request, agent_id: str) -> dict:
     try:
         tenant_id, _ = get_tenant_and_user(request)
 
         async with AsyncSessionLocal() as db:
             service = KnowledgeBaseService(db, tenant_id)
-            result = await service.list_knowledge_source(kb_id)
+            result = await service.list_knowledge_source(agent_id)
             
             if not result.get("success"):
                 status_code = result.get("meta", {}).get("status_code", 400)
