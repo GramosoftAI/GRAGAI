@@ -17,7 +17,8 @@ REQUEST FLOW:
 CRITICAL: Never trust client-provided tenant_id. Always extract from JWT.
 """
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, status, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -286,6 +287,69 @@ except Exception as e:
 # ============================================================================
 # ERROR HANDLING
 # ============================================================================
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Custom handler for validation errors.
+    Returns clean and simplified JSON responses for authentication routes.
+    """
+    if "/auth/" in request.url.path:
+        errors = exc.errors()
+        if errors:
+            first_error = errors[0]
+            field_name = first_error.get("loc", [-1])[-1]
+            err_type = first_error.get("type", "")
+            err_msg = first_error.get("msg", "")
+
+            # Default messages customization to match exact examples
+            # Example 1: Invalid email
+            if "email" in str(field_name) or "email" in err_type:
+                message = "Invalid email address"
+            # Example 2: Password validation failure
+            elif "password" in str(field_name):
+                # If password check raises error (e.g. min_length, uppercase, etc.)
+                if "at least 8 characters" in err_msg or "min_length" in err_type:
+                    message = "Password must contain at least 8 characters"
+                else:
+                    # Strip standard ValueError prefixes
+                    message = err_msg.replace("Value error, ", "")
+            else:
+                message = err_msg.replace("Value error, ", "")
+
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={
+                    "success": False,
+                    "message": message
+                }
+            )
+
+    # For other routes, fall back to standard FastAPI response
+    from fastapi.exception_handlers import request_validation_exception_handler
+    return await request_validation_exception_handler(request, exc)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    Custom handler for HTTP exceptions.
+    Returns clean and simplified JSON responses for authentication routes.
+    """
+    if "/auth/" in request.url.path:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "success": False,
+                "message": exc.detail
+            }
+        )
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
 
 
 @app.exception_handler(Exception)
