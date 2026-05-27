@@ -316,10 +316,103 @@ async def ingest_document(
 from fastapi import UploadFile, File
 
 @router.post(
+    "/{kb_id}/ingest/file",
+    response_model=dict,
+    summary="Ingest Document File",
+    description="Upload and ingest a PDF, Excel (.xlsx, .xls) or CSV (.csv) file into the knowledge base.",
+)
+async def ingest_file(
+    request: Request,
+    kb_id: str,
+    file: UploadFile = File(...),
+) -> dict:
+    """
+    Ingest a document file (PDF, Excel, or CSV) into a knowledge base.
+    """
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        filename = file.filename.lower()
+
+        # 1. Route based on file extension
+        if filename.endswith(".pdf"):
+            content = await file.read()
+            if len(content) > 10 * 1024 * 1024:  # 10MB limit
+                raise HTTPException(status_code=400, detail="PDF too large (max 10MB)")
+
+            # Extract PDF using PDFExtractor (Gdocz primary + pdfplumber fallback)
+            from ...core.pdf_extractor import PDFExtractor
+
+            try:
+                document_text = await PDFExtractor.extract(
+                    pdf_bytes=content,
+                    filename=file.filename,
+                    tenant_id=tenant_id,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except Exception as e:
+                logger.error(f"PDF extraction failed: {e}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to extract text from PDF: {str(e)}",
+                )
+
+            if not document_text.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not extract any text from the PDF",
+                )
+
+            # Ingest standard document text
+            async with AsyncSessionLocal() as db:
+                service = KnowledgeBaseService(db, tenant_id)
+                result = await service.ingest_document(kb_id, document_text)
+
+                if not result.get("success"):
+                    error_msg = result.get("error", "Unknown error")
+                    status_code = result.get("status_code", 400)
+                    raise HTTPException(status_code=status_code, detail=error_msg)
+
+                return result
+
+        elif filename.endswith((".xlsx", ".xls", ".csv")):
+            content = await file.read()
+            if len(content) > 20 * 1024 * 1024:  # 20MB limit
+                raise HTTPException(status_code=400, detail="Spreadsheet file too large (max 20MB)")
+
+            # Ingest structured Excel or CSV
+            async with AsyncSessionLocal() as db:
+                service = KnowledgeBaseService(db, tenant_id)
+                result = await service.ingest_excel_or_csv(
+                    kb_id=kb_id,
+                    file_bytes=content,
+                    filename=file.filename,
+                )
+
+                if not result.get("success"):
+                    error_msg = result.get("error", "Unknown error")
+                    status_code = result.get("status_code", 400)
+                    raise HTTPException(status_code=status_code, detail=error_msg)
+
+                return result
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported file format. Supported extensions: .pdf, .xlsx, .xls, .csv"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ingest file endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post(
     "/{kb_id}/ingest/pdf",
     response_model=dict,
-    summary="Ingest PDF Document",
-    description="Upload and ingest a PDF file into a knowledge base. Uses Gdocz SDK as primary extractor with pdfplumber fallback.",
+    summary="Ingest PDF Document (Alias/Legacy)",
+    description="Unified upload endpoint wrapper supporting PDF, Excel, and CSV under the legacy path.",
 )
 async def ingest_pdf(
     request: Request,
@@ -327,64 +420,9 @@ async def ingest_pdf(
     file: UploadFile = File(...),
 ) -> dict:
     """
-    Ingest a PDF document into a knowledge base.
-
-    EXTRACTION STRATEGY:
-    1. Gdocz SDK (primary) — Cloud API, handles complex/scanned PDFs
-    2. pdfplumber + AI-OCR (fallback) — Local extraction if Gdocz fails
-    3. Markdown cleaning — Strip formatting for optimal embedding quality
+    Unified PDF legacy route wrapper to support Excel/CSV uploaded through the existing PDF interface.
     """
-    try:
-        tenant_id, _ = get_tenant_and_user(request)
-
-        if not file.filename.lower().endswith(".pdf"):
-            raise HTTPException(status_code=400, detail="File must be a PDF")
-
-        content = await file.read()
-        if len(content) > 10 * 1024 * 1024:  # 10MB limit
-            raise HTTPException(status_code=400, detail="PDF too large (max 10MB)")
-
-        # Extract PDF using PDFExtractor (Gdocz primary + pdfplumber fallback)
-        from ...core.pdf_extractor import PDFExtractor
-
-        try:
-            document_text = await PDFExtractor.extract(
-                pdf_bytes=content,
-                filename=file.filename,
-                tenant_id=tenant_id,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            logger.error(f"PDF extraction failed: {e}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to extract text from PDF: {str(e)}",
-            )
-
-        if not document_text.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Could not extract any text from the PDF",
-            )
-
-        # Reuse existing ingestion logic
-        async with AsyncSessionLocal() as db:
-            service = KnowledgeBaseService(db, tenant_id)
-            result = await service.ingest_document(kb_id, document_text, source=file.filename)
-
-            if not result.get("success"):
-                error_msg = result.get("error", "Unknown error")
-                status_code = result.get("status_code", 400)
-                raise HTTPException(status_code=status_code, detail=error_msg)
-
-            return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Ingest PDF endpoint error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await ingest_file(request=request, kb_id=kb_id, file=file)
 
 
 @router.post(
@@ -617,4 +655,118 @@ async def list_knowledge_bases(request: Request, agent_id: str) -> dict:
         raise
     except Exception as e:
         logger.error(f"Error in list_knowledge_bases: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+# ============================================================================
+# GOOGLE DRIVE CONNECTOR ENDPOINTS
+# ============================================================================
+
+@router.post(
+    "/{kb_id}/google-drive/register",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Register Google Drive Connection",
+    description="Register Google Drive credentials and folder configurations for this KB"
+)
+async def register_google_drive(
+    request: Request,
+    kb_id: str,
+    gd_request: schemas.GoogleDriveRegister
+) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            from .models import DatabaseConnection
+            import uuid
+            
+            # Check if a connection already exists to update it (upsert)
+            query = select(DatabaseConnection).where(
+                DatabaseConnection.kb_id == uuid.UUID(kb_id),
+                DatabaseConnection.tenant_id == uuid.UUID(tenant_id)
+            )
+            db_conn_res = await db.execute(query)
+            db_conn = db_conn_res.scalar_one_or_none()
+
+            connection_params = {
+                "credentials": gd_request.credentials,
+                "folder_urls": gd_request.folder_urls or []
+            }
+
+            if db_conn:
+                db_conn.db_type = "google_drive"
+                db_conn.connection_params = connection_params
+            else:
+                db_conn = DatabaseConnection(
+                    tenant_id=uuid.UUID(tenant_id),
+                    kb_id=uuid.UUID(kb_id),
+                    db_type="google_drive",
+                    connection_params=connection_params
+                )
+                db.add(db_conn)
+
+            await db.commit()
+            return format_success(
+                {"success": True},
+                meta={"message": "Google Drive connection registered successfully"}
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in register_google_drive: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post(
+    "/{kb_id}/google-drive/sync",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Synchronize Google Drive to Graph",
+    description="Crawl Google Drive, download files, generate embeddings, and load them into Neo4j graph"
+)
+async def sync_google_drive_to_graph(request: Request, kb_id: str) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            from .models import DatabaseConnection
+            from datetime import datetime
+            import uuid
+            
+            query = select(DatabaseConnection).where(
+                DatabaseConnection.kb_id == uuid.UUID(kb_id),
+                DatabaseConnection.tenant_id == uuid.UUID(tenant_id),
+                DatabaseConnection.db_type == "google_drive"
+            )
+            res = await db.execute(query)
+            db_conn = res.scalar_one_or_none()
+            if not db_conn:
+                raise HTTPException(status_code=404, detail="No registered Google Drive connection found for this KB")
+
+            connection_params = db_conn.connection_params
+            credentials = connection_params.get("credentials", {})
+            folder_urls = connection_params.get("folder_urls", [])
+
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.sync_google_drive_source(
+                kb_id=kb_id,
+                credentials_dict=credentials,
+                folder_urls=folder_urls
+            )
+
+            if not result.get("success"):
+                raise HTTPException(status_code=400, detail=result.get("error"))
+
+            # Update sync status timestamp
+            db_conn.last_synced_at = datetime.now()
+            await db.commit()
+
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in sync_google_drive_to_graph: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")

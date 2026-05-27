@@ -385,6 +385,45 @@ class KnowledgeBaseService:
             logger.error(f"❌ Ingestion failed: {e}", exc_info=True)
             return format_error(f"Failed to ingest document: {str(e)}")
 
+    async def ingest_excel_or_csv(
+        self,
+        kb_id: str,
+        file_bytes: bytes,
+        filename: str,
+    ) -> dict:
+        """
+        Ingest an Excel or CSV file by parsing it, discovering relationships,
+        and loading structured chunks & entities into PostgreSQL & Neo4j.
+        """
+        try:
+            # 1. Validate KB exists
+            kb = await self.repository.get_by_id(kb_id)
+            if not kb:
+                return format_error(f"KB not found: {kb_id}", meta={"status_code": 404})
+
+            # 2. Invoke ExcelIngestionService
+            from .services.excel_ingestion_service import ExcelIngestionService
+            ingestor = ExcelIngestionService(self.db, str(self.tenant_id))
+            result = await ingestor.ingest_file(kb_id, file_bytes, filename)
+
+            if not result.get("success"):
+                return format_error(result.get("error", "Failed to ingest Excel/CSV"))
+
+            # 3. Update chunk count metadata in PostgreSQL
+            chunks_created = result["data"]["chunks_created"]
+            await self.repository.increment_chunks(kb_id, chunks_created)
+            await self.db.commit()
+
+            return format_success(
+                result["data"],
+                meta={"message": f"Successfully ingested structured file '{filename}' into KB"}
+            )
+
+        except Exception as e:
+            await self.db.rollback()
+            logger.error(f"❌ Excel/CSV Ingestion failed: {e}", exc_info=True)
+            return format_error(f"Failed to ingest Excel/CSV: {str(e)}")
+
     async def get_kb(self, kb_id: str) -> dict:
         kb = await self.repository.get_by_id(kb_id)
         if not kb: return format_error(f"KB not found", status_code=404)
@@ -740,3 +779,178 @@ class KnowledgeBaseService:
             await self.db.rollback()
             logger.error(f"❌ Database synchronization failed: {e}", exc_info=True)
             return format_error(f"Failed to synchronize database source: {str(e)}")
+
+    async def sync_google_drive_source(
+        self,
+        kb_id: str,
+        credentials_dict: dict,
+        folder_urls: Optional[List[str]] = None,
+    ) -> dict:
+        """
+        Synchronize a Google Drive directory structure with the Knowledge Graph.
+        Crawls files/folders, downloads/exports raw streams, extracts text,
+        pipes them to the existing chunk/entity pipelines, and maps folder relationships.
+        """
+        import time
+        sync_start_time = time.time()
+        # Convert to milliseconds for Neo4j timestamps
+        sync_start_timestamp = int(sync_start_time * 1000)
+        
+        try:
+            # 1. INITIALIZE CONNECTOR
+            from app.modules.connectors.google.crawler import GoogleDriveConnector
+            connector = GoogleDriveConnector(folder_urls=folder_urls)
+            connector.load_credentials(credentials_dict)
+            
+            checkpoint = connector.build_dummy_checkpoint()
+            
+            files_synced = 0
+            folders_synced = 0
+            
+            # 2. RUN PAGINATED GENERATOR LOOP
+            generator = connector.load_from_checkpoint(0.0, 0.0, checkpoint)
+            
+            from app.core.connectors import HierarchyNode, SlimDocument
+            
+            async for item in generator:
+                # Case A: Hierarchy/Folder Node
+                if isinstance(item, HierarchyNode):
+                    folders_synced += 1
+                    # Save Folder Node in Neo4j
+                    folder_query = """
+                    MERGE (f:Folder {id: $folder_id, tenant_id: $tenant_id})
+                    SET f.name = $name, f.link = $link, f.updated_at = timestamp()
+                    """
+                    await self.neo4j_repo.execute_write(folder_query, {
+                        "folder_id": item.raw_node_id,
+                        "tenant_id": str(self.tenant_id),
+                        "name": item.display_name,
+                        "link": item.link
+                    })
+                    
+                    # If folder has parent, link them
+                    if item.raw_parent_id:
+                        parent_query = """
+                        MERGE (p:Folder {id: $parent_id, tenant_id: $tenant_id})
+                        MERGE (f:Folder {id: $folder_id, tenant_id: $tenant_id})
+                        MERGE (p)-[:PARENT_OF]->(f)
+                        """
+                        await self.neo4j_repo.execute_write(parent_query, {
+                            "parent_id": item.raw_parent_id,
+                            "folder_id": item.raw_node_id,
+                            "tenant_id": str(self.tenant_id)
+                        })
+                
+                # Case B: SlimDocument (File Footprint)
+                elif isinstance(item, SlimDocument):
+                    file_id = item.id
+                    filename = item.metadata.get("filename", "unnamed")
+                    mime_type = item.metadata.get("mime_type", "")
+                    parents = item.metadata.get("parents", [])
+                    user_email = item.metadata.get("user_email")
+                    
+                    logger.info(f"Syncing Google Drive file: {filename} ({mime_type})")
+                    
+                    # Download file content
+                    try:
+                        file_bytes = await connector.download_file_bytes(
+                            file_id=file_id,
+                            mime_type=mime_type,
+                            impersonate_email=user_email
+                        )
+                    except Exception as download_err:
+                        logger.error(f"Failed to download bytes for file {filename}: {download_err}")
+                        continue
+                    
+                    # Determine ingestion path based on MIME type
+                    # 1. CSV / Excel
+                    if mime_type == "text/csv" or "spreadsheet" in mime_type or filename.endswith((".csv", ".xlsx", ".xls")):
+                        logger.info(f"Piping {filename} to tabular excel/csv ingestion service")
+                        ingest_res = await self.ingest_excel_or_csv(
+                            kb_id=kb_id,
+                            file_bytes=file_bytes,
+                            filename=filename
+                        )
+                        if ingest_res.get("success"):
+                            files_synced += 1
+                    
+                    # 2. Textual Documents (PDF, Docx, Plaintext)
+                    else:
+                        text = ""
+                        try:
+                            # 2.1 PDF Parsing
+                            if mime_type == "application/pdf" or filename.endswith(".pdf"):
+                                import io
+                                from PyPDF2 import PdfReader
+                                reader = PdfReader(io.BytesIO(file_bytes))
+                                pages_text = []
+                                for page in reader.pages:
+                                    pages_text.append(page.extract_text() or "")
+                                text = "\n".join(pages_text)
+                            
+                            # 2.2 Word / Docx Parsing (Zip XML structure)
+                            elif filename.endswith(".docx"):
+                                import zipfile
+                                import io
+                                import xml.etree.ElementTree as ET
+                                with zipfile.ZipFile(io.BytesIO(file_bytes)) as docx:
+                                    xml_content = docx.read('word/document.xml')
+                                    tree = ET.fromstring(xml_content)
+                                    paragraphs = []
+                                    for elem in tree.iter():
+                                        if elem.tag.endswith('t'):
+                                            paragraphs.append(elem.text or "")
+                                    text = "".join(paragraphs)
+                                    
+                            # 2.3 Plaintext Fallback
+                            else:
+                                text = file_bytes.decode("utf-8", errors="ignore")
+                        except Exception as parse_err:
+                            logger.error(f"Failed to parse text content from file {filename}: {parse_err}")
+                            continue
+                        
+                        if text.strip():
+                            logger.info(f"Piping extracted text of {filename} to standard RAG pipeline")
+                            ingest_res = await self.ingest_document(
+                                kb_id=kb_id,
+                                document_text=text
+                            )
+                            if ingest_res.get("success"):
+                                files_synced += 1
+                                
+                    # 3. Post-Process Neo4j Directory Graph Relations
+                    if parents and files_synced > 0:
+                        parent_id = parents[0]
+                        # Ensure the parent folder exists
+                        await self.neo4j_repo.execute_write(
+                            "MERGE (f:Folder {id: $folder_id, tenant_id: $tenant_id}) ON CREATE SET f.name = 'Google Drive Folder'",
+                            {"folder_id": parent_id, "tenant_id": str(self.tenant_id)}
+                        )
+                        # Link newly created Chunk nodes under this sync to the Folder node
+                        link_query = """
+                        MATCH (f:Folder {id: $parent_id, tenant_id: $tenant_id})
+                        MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})-[:HAS_CHUNK]->(c:Chunk)
+                        WHERE c.created_at >= $sync_start_time
+                        MERGE (f)-[:HAS_FILE]->(c)
+                        """
+                        await self.neo4j_repo.execute_write(link_query, {
+                            "parent_id": parent_id,
+                            "tenant_id": str(self.tenant_id),
+                            "kb_id": kb_id,
+                            "sync_start_time": sync_start_timestamp
+                        })
+            
+            return format_success(
+                {
+                    "success": True,
+                    "kb_id": kb_id,
+                    "files_synced": files_synced,
+                    "folders_synced": folders_synced,
+                    "sync_duration_seconds": time.time() - sync_start_time
+                },
+                meta={"message": "Google Drive synchronized with Knowledge Graph successfully"}
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Google Drive synchronization failed: {e}", exc_info=True)
+            return format_error(f"Failed to synchronize Google Drive: {str(e)}")

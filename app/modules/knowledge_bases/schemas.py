@@ -216,3 +216,28 @@ class DatabaseValidationResponse(BaseModel):
     message: str
     tables: Optional[list[str]] = None
     schema_details: Optional[dict] = None
+
+
+class GoogleDriveRegister(BaseModel):
+    """
+    Schema to register/associate a Google Drive connection with an Agent KB.
+    """
+    credentials: dict = Field(..., description="Service Account JSON payload or OAuth token data")
+    folder_urls: Optional[list[str]] = Field(None, description="Optional Google Drive or Folder URLs to isolate indexing")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "credentials": {
+                    "type": "service_account",
+                    "project_id": "graphmind-prod",
+                    "private_key_id": "abcdef123456",
+                    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEv...",
+                    "client_email": "crawler@graphmind.iam.gserviceaccount.com",
+                    "primary_admin_email": "admin@yourdomain.com"
+                },
+                "folder_urls": [
+                    "https://drive.google.com/drive/folders/1A2B3C4D5E6F7G8H9I"
+                ]
+            }
+        }

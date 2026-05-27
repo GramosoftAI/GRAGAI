@@ -75,6 +75,12 @@ def get_tenant_and_user(request: Request) -> tuple[str, str]:
     summary="Create Agent",
     description="Create a new agent for the current tenant",
 )
+@router.post(
+    "/",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
 async def create_agent(
     request: Request,
     agent_request: schemas.AgentCreate,
@@ -162,6 +168,11 @@ async def list_agents_detailed(
     response_model=dict,
     summary="List Agents",
     description="List all agents for the current tenant",
+)
+@router.get(
+    "/",
+    response_model=dict,
+    include_in_schema=False,
 )
 async def list_agents(
     request: Request,
@@ -457,8 +468,8 @@ async def generic_ingest_source(
     "/{agent_id}/sources/pdf",
     response_model=dict,
     status_code=status.HTTP_201_CREATED,
-    summary="Instant PDF Ingestion",
-    description="Automatically create a knowledge base data source and parse the uploaded PDF directly for the given agent. Uses Gdocz SDK as primary extractor with pdfplumber+AI-OCR fallback.",
+    summary="Instant File Ingestion",
+    description="Automatically create a knowledge base data source and parse the uploaded PDF, Excel, or CSV directly for the given agent.",
 )
 async def instant_ingest_pdf(
     request: Request,
@@ -466,33 +477,93 @@ async def instant_ingest_pdf(
     file: UploadFile = File(...),
 ) -> dict:
     """
-    COMBINED ROUTE: Create KB + Ingest PDF.
+    COMBINED ROUTE: Create KB + Ingest PDF/Excel/CSV.
 
     EXTRACTION STRATEGY:
-    1. Gdocz SDK (primary) — Cloud API, handles complex/scanned PDFs
-    2. pdfplumber + AI-OCR (fallback) — Local extraction if Gdocz fails
-    3. Markdown cleaning — Strip formatting for optimal embedding quality
-
-    Matches the Frontend Dashboard UI workflow where users select an agent
-    and directly upload a file (bypassing manual KB creation).
+    1. For PDFs: Gdocz SDK (primary) — Cloud API, handles complex/scanned PDFs, falls back to pdfplumber
+    2. For Excel/CSV: ExcelIngestionService ontology-based graph ingestion
     """
     try:
         tenant_id, user_id = get_tenant_and_user(request)
 
-        if not file.filename.lower().endswith(".pdf"):
-            raise HTTPException(status_code=400, detail="File must be a PDF")
+        filename = file.filename
+        ext = filename.lower().split(".")[-1]
+        if ext not in ["pdf", "csv", "xlsx", "xls"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported file format. Supported formats: PDF, CSV, Excel (.xlsx, .xls)"
+            )
 
         content = await file.read()
         if len(content) > 10 * 1024 * 1024:  # 10MB limit
-            raise HTTPException(status_code=400, detail="PDF too large (max 10MB)")
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
 
-        # 1. Extract PDF using PDFExtractor (Gdocz primary + pdfplumber fallback)
+        # ----------------------------------------------------
+        # SPREADSHEET (EXCEL/CSV) ONTOLOGY PIPELINE
+        # ----------------------------------------------------
+        if ext in ["csv", "xlsx", "xls"]:
+            from ..knowledge_bases.services.excel_ingestion_service import ExcelIngestionService
+
+            async with AsyncSessionLocal() as db:
+                # 1. Verify Agent belongs to User/Tenant
+                agent_service = AgentService(db, tenant_id)
+                agent_result = await agent_service.get_agent(agent_id)
+                if not agent_result.get("success"):
+                    raise HTTPException(status_code=404, detail="Agent not found")
+
+                # 2. Create implicit Knowledge Base tracking row
+                kb_service = KnowledgeBaseService(db, tenant_id)
+                kb_request = KBCreate(
+                    name=f"Spreadsheet: {filename}",
+                    description=f"Automated Spreadsheet upload source (Ontological Ingestion)",
+                    agent_id=uuid.UUID(agent_id),
+                    source="excel_upload"
+                )
+                
+                kb_result = await kb_service.create_knowledge_base(user_id, kb_request)
+                if not kb_result.get("success"):
+                    raise HTTPException(status_code=500, detail="Internal storage error")
+                    
+                kb_id = str(kb_result["data"]["kb"].id)
+
+                # 3. Ontological Spreadsheet Ingestion
+                excel_service = ExcelIngestionService(db, tenant_id)
+                ingest_result = await excel_service.ingest_file(
+                    kb_id=kb_id,
+                    file_bytes=content,
+                    filename=filename
+                )
+
+                if not ingest_result.get("success"):
+                    error_msg = ingest_result.get("error", "Unknown ingestion error")
+                    raise HTTPException(status_code=400, detail=error_msg)
+
+                await db.commit()
+
+                agent_name = agent_result["data"]["agent"].name
+                return {
+                    "success": True,
+                    "data": {
+                        "kb_id": kb_id,
+                        "agent_name": agent_name,
+                        "chunks_created": ingest_result["data"]["chunks_created"],
+                        "entities_created": ingest_result["data"]["entities_created"],
+                        "relationships_created": ingest_result["data"]["relationships_created"]
+                    },
+                    "meta": {
+                        "message": f"Spreadsheet successfully ingested to agent: {agent_name}"
+                    }
+                }
+
+        # ----------------------------------------------------
+        # PDF PIPELINE (EXISTING)
+        # ----------------------------------------------------
         from ...core.pdf_extractor import PDFExtractor
 
         try:
             document_text = await PDFExtractor.extract(
                 pdf_bytes=content,
-                filename=file.filename,
+                filename=filename,
                 tenant_id=tenant_id,
                 agent_id=agent_id,
             )
@@ -521,7 +592,7 @@ async def instant_ingest_pdf(
             # 3. Create implicit Knowledge Base tracking row
             kb_service = KnowledgeBaseService(db, tenant_id)
             kb_request = KBCreate(
-                name=f"PDF: {file.filename}",
+                name=f"PDF: {filename}",
                 description=f"Automated PDF upload source (Gdocz extraction)",
                 agent_id=uuid.UUID(agent_id),
                 source="pdf_upload"
@@ -551,7 +622,7 @@ async def instant_ingest_pdf(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Instant Ingest PDF error: {e}")
+        logger.error(f"Instant Ingest file error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

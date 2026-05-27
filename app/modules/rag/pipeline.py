@@ -461,8 +461,8 @@ class RAGPipeline:
             
             WITH c
             MATCH (c)-[r]-(neighbor:Chunk {tenant_id: $tenant_id})
-            WHERE neighbor.id NOT IN $existing_ids
-            AND NOT (neighbor)-[:HAS_CHUNK]-(:KnowledgeBase)  # Not KB root
+            WHERE NOT (neighbor.id IN $existing_ids)
+            AND NOT (neighbor)-[:HAS_CHUNK]-(:KnowledgeBase)  // Not KB root
             
             RETURN DISTINCT
                 neighbor.id as chunk_id,
