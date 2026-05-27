@@ -71,13 +71,13 @@ async def register_user(request: schemas.RegisterRequest, db: AsyncSession) -> d
             logger.warning(f"  ❌ No tenant_name provided for signup")
             return {"success": False, "error": "tenant_name required for registration"}
 
-        # ============= CHECK DUPLICATE USER =============
-        logger.debug(f"  Checking if email '{request.email}' already exists...")
+        # ============= VERIFY EMAIL UNIQUENESS =============
+        logger.debug(f"  Checking if email '{request.email}' is already registered...")
         existing_user = await db.execute(
             select(User).where(User.email == request.email)
         )
         if existing_user.scalar_one_or_none():
-            logger.warning(f"  ❌ Email '{request.email}' already registered")
+            logger.warning(f"  ❌ Email '{request.email}' already exists")
             return {
                 "success": False,
                 "error": "Email already registered",

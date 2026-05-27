@@ -89,3 +89,4 @@ docs/
 sample_enterprise_ontology.xlsx
 sample_ontology_test.xlsx
 scripts/
+start_frontend.sh

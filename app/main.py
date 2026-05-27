@@ -17,8 +17,7 @@ REQUEST FLOW:
 CRITICAL: Never trust client-provided tenant_id. Always extract from JWT.
 """
 
-from fastapi import FastAPI, Request, status, HTTPException
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -289,68 +288,62 @@ except Exception as e:
 # ============================================================================
 
 
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
-    Custom handler for validation errors.
-    Returns clean and simplified JSON responses for authentication routes.
+    Handle FastAPI Pydantic validation errors globally.
+    Formats array of dicts into simple {"success": false, "message": "friendly message"}.
     """
-    if "/auth/" in request.url.path:
-        errors = exc.errors()
-        if errors:
-            first_error = errors[0]
-            field_name = first_error.get("loc", [-1])[-1]
-            err_type = first_error.get("type", "")
-            err_msg = first_error.get("msg", "")
+    errors = exc.errors()
+    msg = "Validation failed"
+    if errors:
+        err = errors[0]
+        raw_msg = err.get("msg", "")
+        loc = err.get("loc", [])
+        
+        # Clean up standard Pydantic messages for a user-friendly format
+        if "Value error, " in raw_msg:
+            msg = raw_msg.replace("Value error, ", "")
+        elif "String should have at least" in raw_msg and "password" in loc:
+            msg = "Password must contain at least 8 characters"
+        elif "valid email" in raw_msg.lower():
+            msg = "Invalid email address"
+        elif "Field required" in raw_msg:
+            field = str(loc[-1]) if loc else "Field"
+            msg = f"{field.title().replace('_', ' ')} is required"
+        else:
+            msg = raw_msg
 
-            # Default messages customization to match exact examples
-            # Example 1: Invalid email
-            if "email" in str(field_name) or "email" in err_type:
-                message = "Invalid email address"
-            # Example 2: Password validation failure
-            elif "password" in str(field_name):
-                # If password check raises error (e.g. min_length, uppercase, etc.)
-                if "at least 8 characters" in err_msg or "min_length" in err_type:
-                    message = "Password must contain at least 8 characters"
-                else:
-                    # Strip standard ValueError prefixes
-                    message = err_msg.replace("Value error, ", "")
-            else:
-                message = err_msg.replace("Value error, ", "")
-
-            return JSONResponse(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                content={
-                    "success": False,
-                    "message": message
-                }
-            )
-
-    # For other routes, fall back to standard FastAPI response
-    from fastapi.exception_handlers import request_validation_exception_handler
-    return await request_validation_exception_handler(request, exc)
-
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    """
-    Custom handler for HTTP exceptions.
-    Returns clean and simplified JSON responses for authentication routes.
-    """
-    if "/auth/" in request.url.path:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "success": False,
-                "message": exc.detail
-            }
-        )
-    
     return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail}
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "success": False,
+            "message": msg
+        },
     )
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """
+    Handle HTTPExceptions globally.
+    Ensures consistent {"success": false, "message": "..."} format.
+    """
+    # Some Fastapi internal exceptions return a dict for detail, check for that
+    if isinstance(exc.detail, dict) and "message" in exc.detail:
+        message = exc.detail["message"]
+    else:
+        message = str(exc.detail)
+        
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "success": False,
+            "message": message
+        },
+    )
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
