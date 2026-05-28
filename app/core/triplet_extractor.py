@@ -7,16 +7,16 @@ using LLM, then creates typed relationship edges in Neo4j graph.
 INTEGRATION STRATEGY (ZERO BREAKING CHANGES):
     - Runs as a POST-INGESTION hook AFTER existing pipeline succeeds
     - Feature-flagged via settings.use_triplet_extraction (OFF by default)
-    - Creates NEW node/edge types (Triplet, RELATES_TO) — never modifies existing
+    - Creates NEW node/edge types (Triplet, RELATES_TO)  never modifies existing
     - Existing MENTIONS, SIMILAR, NEXT edges remain untouched
     - If triplet extraction fails, ingestion still succeeds (graceful degradation)
 
 ARCHITECTURE:
-    Chunk Text → LLM Extract Triplets → (Subject, Predicate, Object)
-                                       → MERGE Entity nodes (deduplicated)
-                                       → CREATE typed RELATES_TO edges
-                                       → CREATE Triplet nodes with embedded text
-                                       → Embed triplet strings for semantic search
+    Chunk Text  LLM Extract Triplets  (Subject, Predicate, Object)
+                                        MERGE Entity nodes (deduplicated)
+                                        CREATE typed RELATES_TO edges
+                                        CREATE Triplet nodes with embedded text
+                                        Embed triplet strings for semantic search
 
 GRAPH SCHEMA (additive):
     (:Entity {text, type, tenant_id})
@@ -55,8 +55,8 @@ class ExtractedTriplet:
 
     @property
     def text(self) -> str:
-        """Triplet as searchable string: 'Einstein → born_in → Ulm'"""
-        return f"{self.subject} → {self.predicate} → {self.object}"
+        """Triplet as searchable string: 'Einstein  born_in  Ulm'"""
+        return f"{self.subject}  {self.predicate}  {self.object}"
 
     def normalize(self) -> "ExtractedTriplet":
         """Normalize triplet fields for consistency."""
@@ -86,8 +86,8 @@ class TripletExtractionResult:
 # TRIPLET EXTRACTOR (LLM-BASED)
 # ============================================================================
 
-# Extraction prompt — deterministic, structured output
-# NOTE: All literal {{ }} are escaped for Python .format() — only {text} is a placeholder
+# Extraction prompt  deterministic, structured output
+# NOTE: All literal {{ }} are escaped for Python .format()  only {text} is a placeholder
 TRIPLET_EXTRACTION_PROMPT = """Extract knowledge triplets from the following text.
 Each triplet must be a factual relationship in the form (Subject, Predicate, Object).
 
@@ -235,7 +235,7 @@ class TripletExtractor:
         """
         import asyncio
         
-        logger.info(f"🚀 Batch extracting triplets from {len(chunks)} chunks in parallel...")
+        logger.info(f" Batch extracting triplets from {len(chunks)} chunks in parallel...")
         
         # Create tasks for all chunks
         tasks = [
@@ -252,7 +252,7 @@ class TripletExtractor:
         total_triplets = sum(len(r.triplets) for r in results)
         failed = sum(1 for r in results if not r.success)
         logger.info(
-            f"✅ Batch extraction complete: {total_triplets} triplets "
+            f" Batch extraction complete: {total_triplets} triplets "
             f"from {len(chunks)} chunks ({failed} failures)"
         )
         return results
@@ -318,7 +318,7 @@ class TripletGraphWriter:
     """
     Persist extracted triplets to Neo4j graph.
 
-    CREATES (additive only — never modifies existing graph):
+    CREATES (additive only  never modifies existing graph):
         1. MERGE Entity nodes (deduplicated by text+type+tenant)
         2. CREATE typed RELATES_TO edges between entities
         3. CREATE Triplet nodes with embedded text for semantic search
@@ -365,10 +365,10 @@ class TripletGraphWriter:
                     })
 
         if not all_triplets:
-            logger.info("📊 No triplets to persist")
+            logger.info(" No triplets to persist")
             return {"entities_created": 0, "relationships_created": 0, "triplets_created": 0}
 
-        logger.info(f"📊 Persisting {len(all_triplets)} triplets to Neo4j...")
+        logger.info(f" Persisting {len(all_triplets)} triplets to Neo4j...")
 
         # Step 1: ONTOLOGY GROUNDING (Coreference Resolution)
         from .ontology_resolver import OntologyResolver
@@ -424,7 +424,7 @@ class TripletGraphWriter:
         }
 
         logger.info(
-            f"✅ Triplet persistence complete: "
+            f" Triplet persistence complete: "
             f"{entities_created} entities, "
             f"{relationships_created} relationships, "
             f"{triplets_created} triplet nodes"
@@ -458,7 +458,7 @@ class TripletGraphWriter:
             )
             return len(entity_list)
         except Exception as e:
-            logger.warning(f"⚠️ Entity MERGE failed: {e}")
+            logger.warning(f" Entity MERGE failed: {e}")
             return 0
 
     async def _create_relationships(self, all_triplets: List[Dict]) -> int:
@@ -502,7 +502,7 @@ class TripletGraphWriter:
             )
             return len(rel_data)
         except Exception as e:
-            logger.warning(f"⚠️ Relationship creation failed: {e}")
+            logger.warning(f" Relationship creation failed: {e}")
             return 0
 
     async def _create_triplet_nodes(self, all_triplets: List[Dict]) -> int:
@@ -515,7 +515,7 @@ class TripletGraphWriter:
                 triplet_texts
             )
         except Exception as e:
-            logger.warning(f"⚠️ Triplet embedding generation failed: {e}")
+            logger.warning(f" Triplet embedding generation failed: {e}")
             embeddings = [None] * len(triplet_texts)
 
         node_data = []
@@ -563,7 +563,7 @@ class TripletGraphWriter:
             )
             return len(node_data)
         except Exception as e:
-            logger.warning(f"⚠️ Triplet node creation failed: {e}")
+            logger.warning(f" Triplet node creation failed: {e}")
             return 0
 
 
@@ -576,11 +576,11 @@ class TripletRetriever:
     Retrieve relevant triplets for a query using semantic search.
 
     INTEGRATION: Called as an optional enrichment step in RAG pipeline.
-    Does NOT replace existing retrieval — ADDS triplet context alongside chunks.
+    Does NOT replace existing retrieval  ADDS triplet context alongside chunks.
 
     FLOW:
-        Query → Embed → Search Triplet embeddings → Get relevant (S,P,O)
-              → Expand to neighboring entities → Format as context
+        Query  Embed  Search Triplet embeddings  Get relevant (S,P,O)
+               Expand to neighboring entities  Format as context
     """
 
     def __init__(self, tenant_id: str):
@@ -663,7 +663,7 @@ class TripletRetriever:
             return scored_triplets[:top_k]
 
         except Exception as e:
-            logger.warning(f"⚠️ Triplet search failed: {e}")
+            logger.warning(f" Triplet search failed: {e}")
             return []
 
     async def get_entity_neighborhood(
@@ -702,7 +702,7 @@ class TripletRetriever:
             )
             return [dict(r) for r in results] if results else []
         except Exception as e:
-            logger.warning(f"⚠️ Entity neighborhood search failed: {e}")
+            logger.warning(f" Entity neighborhood search failed: {e}")
             return []
 
     def format_triplets_as_context(self, triplets: List[Dict]) -> str:
@@ -714,7 +714,7 @@ class TripletRetriever:
         for t in triplets:
             score = t.get("similarity", 0)
             lines.append(
-                f"  • {t['subject']} —[{t['predicate']}]→ {t['object']} "
+                f"   {t['subject']} [{t['predicate']}] {t['object']} "
                 f"(relevance: {score:.2f})"
             )
         return "\n".join(lines)

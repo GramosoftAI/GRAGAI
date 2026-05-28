@@ -46,7 +46,7 @@ class ScraperService:
             response_data = await ScraperService.call_gcrawl_api(url, crawl_type, proxy_mode)
             
             if response_data and response_data.get("data"):
-                logger.info(f"✅ Gcrawl success for {url}")
+                logger.info(f" Gcrawl success for {url}")
                 return ScraperService.normalize_gcrawl_response(response_data)
             
             logger.warning(f"Gcrawl returned empty data for {url}. Falling back.")
@@ -131,7 +131,7 @@ class ScraperService:
         Standard resilient scraping for non-JS heavy sites.
         """
         try:
-            logger.info(f"🪂 BeautifulSoup extraction for: {url}")
+            logger.info(f" BeautifulSoup extraction for: {url}")
             async with httpx.AsyncClient(timeout=15.0) as client:
                 headers = {"User-Agent": "GraphMind/1.0.0"}
                 response = await client.get(url, headers=headers, follow_redirects=True)

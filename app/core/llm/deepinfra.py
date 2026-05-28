@@ -72,7 +72,7 @@ class DeepInfraEmbeddingClient:
         self.model = "BAAI/bge-large-en-v1.5"
         self.timeout = 10.0  # Request timeout in seconds
         self.max_retries = 3  # Number of retry attempts
-        self.max_text_length = 2000  # Prevent API overload
+        self.max_text_length = 1200  # Prevent API overload (approx 300-400 tokens)
         self.expected_dimension = EXPECTED_EMBEDDING_DIMENSION  # 1024
 
         logger.info(

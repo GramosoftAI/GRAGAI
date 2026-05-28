@@ -5,9 +5,9 @@ ARCHITECTURE:
     ChatMessage: Individual message within a session (user or assistant).
 
 RELATIONSHIPS:
-    Tenant  ──1:N──  ChatSession  ──1:N──  ChatMessage
-    User    ──1:N──  ChatSession
-    Agent   ──1:N──  ChatSession
+    Tenant  1:N  ChatSession  1:N  ChatMessage
+    User    1:N  ChatSession
+    Agent   1:N  ChatSession
 
 MULTI-TENANCY:
     - Both tables have tenant_id for RLS enforcement

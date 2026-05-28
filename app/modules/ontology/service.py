@@ -36,7 +36,7 @@ class OntologyService:
             "embedding": embedding
         })
         
-        logger.info(f"✅ Ontology Class created: {name} for tenant {self.tenant_id}")
+        logger.info(f" Ontology Class created: {name} for tenant {self.tenant_id}")
         return {"success": True, "name": name}
 
     async def create_relation(self, request: schemas.OntologyRelationCreate) -> dict:
@@ -56,7 +56,7 @@ class OntologyService:
             "description": request.description
         })
         
-        logger.info(f"✅ Ontology Relation created: {name}")
+        logger.info(f" Ontology Relation created: {name}")
         return {"success": True, "name": name}
 
     async def create_rule(self, request: schemas.OntologyRuleCreate) -> dict:
@@ -83,7 +83,7 @@ class OntologyService:
             "description": request.description
         })
         
-        logger.info(f"✅ Ontology Rule created: {source} -[{relation}]-> {target}")
+        logger.info(f" Ontology Rule created: {source} -[{relation}]-> {target}")
         return {"success": True, "source": source, "relation": relation, "target": target}
 
     async def get_ontology(self) -> dict:

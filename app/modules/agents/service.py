@@ -510,8 +510,7 @@ class AgentService:
             MATCH (a:Agent {tenant_id: $tenant_id, id: $agent_id})
             OPTIONAL MATCH (a)-[:OWNS_KB]->(kb:KnowledgeBase {tenant_id: $tenant_id})
             OPTIONAL MATCH (kb)-[:HAS_CHUNK]->(c:Chunk {tenant_id: $tenant_id})
-            OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity {tenant_id: $tenant_id})
-            DETACH DELETE a, kb, c, e
+            DETACH DELETE a, kb, c
             RETURN count(a) as deleted_agents
             """
 
@@ -542,6 +541,34 @@ class AgentService:
             # ============= STEP 2: POSTGRES SOFT-DELETE (AFTER NEO4J SUCCESS) =============
             # Only soft-delete if Neo4j succeeded
             deleted = await self.repository.soft_delete(agent_id)
+            
+            # CRITICAL: Cascade delete KnowledgeBases and DocumentChunks from Postgres
+            from sqlalchemy import update, delete, select
+            import uuid
+            from app.modules.knowledge_bases.models import KnowledgeBase, DocumentChunk
+            
+            agent_uuid = uuid.UUID(agent_id) if isinstance(agent_id, str) else agent_id
+            
+            # Find KBs to delete their chunks
+            kbs_query = select(KnowledgeBase.id).where(
+                KnowledgeBase.agent_id == agent_uuid,
+                KnowledgeBase.tenant_id == self.tenant_id
+            )
+            
+            # Hard-delete chunks (frees up pgvector space and prevents zombie retrieval)
+            await self.db.execute(
+                delete(DocumentChunk).where(DocumentChunk.kb_id.in_(kbs_query))
+            )
+            
+            # Soft-delete KnowledgeBases
+            await self.db.execute(
+                update(KnowledgeBase)
+                .where(
+                    KnowledgeBase.agent_id == agent_uuid,
+                    KnowledgeBase.tenant_id == self.tenant_id
+                )
+                .values(is_active=False, deleted_at=datetime.utcnow())
+            )
 
             if not deleted:
                 # Rare case: agent not found in PostgreSQL

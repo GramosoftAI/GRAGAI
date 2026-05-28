@@ -109,7 +109,7 @@ class ExcelIngestionService:
         Main entry point for Excel/CSV ingestion.
         Reads worksheets, discovers schema via LLM, and populates both databases.
         """
-        logger.info(f"📁 Ingesting structured file '{filename}' for KB {kb_id} under tenant {self.tenant_id}")
+        logger.info(f" Ingesting structured file '{filename}' for KB {kb_id} under tenant {self.tenant_id}")
         
         # 1. Parse Excel or CSV into sheets dictionary
         sheets_data: Dict[str, pd.DataFrame] = {}
@@ -230,7 +230,7 @@ class ExcelIngestionService:
                 return None
 
             mapping = json.loads(match.group(0))
-            logger.info(f"✅ Schema mapped successfully for sheet '{sheet_name}': {mapping}")
+            logger.info(f" Schema mapped successfully for sheet '{sheet_name}': {mapping}")
             return mapping
 
         except Exception as e:
@@ -404,7 +404,7 @@ class ExcelIngestionService:
         CREATE (kb)-[:HAS_CHUNK]->(c)
         """
         await retry_neo4j_operation(lambda: self.neo4j_repo.execute_write(batch_create_query, {"chunks": chunk_nodes_data}))
-        logger.info(f"✅ Staged row chunks in PostgreSQL and Neo4j")
+        logger.info(f" Staged row chunks in PostgreSQL and Neo4j")
 
         # 5. Populate Ontology Graph: Entities and Typed relationships row-by-row
         for idx, item in enumerate(row_attributes_list):
@@ -525,7 +525,7 @@ class ExcelIngestionService:
             """
             await retry_neo4j_operation(lambda: self.neo4j_repo.execute_write(next_link_query, {"rels": next_pairs}))
 
-        logger.info(f"✅ Ingested sheet '{sheet_name}': {chunks_created} chunks, {len(entities_created)} entities, {relationships_created} relationships")
+        logger.info(f" Ingested sheet '{sheet_name}': {chunks_created} chunks, {len(entities_created)} entities, {relationships_created} relationships")
 
         return {
             "chunks_created": chunks_created,

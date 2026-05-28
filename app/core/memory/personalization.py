@@ -6,9 +6,9 @@ Unlike Knowledge Graph triplets which are shared within a tenant, Personal
 Memories are private to a specific User ID.
 
 ARCHITECTURE:
-    User Interaction → LLM Analysis → Personal Preference (Atomic Fact)
-                     → MERGE UserMemory node (Neo4j)
-                     → Search & Inject into RAG context
+    User Interaction  LLM Analysis  Personal Preference (Atomic Fact)
+                      MERGE UserMemory node (Neo4j)
+                      Search & Inject into RAG context
 
 DESIGN PRINCIPLES:
     1. Privacy First: Strictly isolated by user_id.
@@ -83,7 +83,7 @@ class PersonalMemoryService:
                 temperature=0.0
             )
 
-            logger.debug(f"🧠 Personal Memory LLM Response: {response_text}")
+            logger.debug(f" Personal Memory LLM Response: {response_text}")
 
             memories = self._parse_memories(response_text)
             if not memories:
@@ -128,11 +128,11 @@ class PersonalMemoryService:
                 {"memories": memory_data, "tenant_id": self.tenant_id}
             )
 
-            logger.info(f"👤 Saved {len(memory_data)} personal memories for user {user_id[:8]}")
+            logger.info(f" Saved {len(memory_data)} personal memories for user {user_id[:8]}")
             return {"count": len(memory_data), "status": "success"}
 
         except Exception as e:
-            logger.error(f"❌ Failed to add personal memory: {e}")
+            logger.error(f" Failed to add personal memory: {e}")
             return {"count": 0, "status": "error", "error": str(e)}
 
     async def get_relevant_memories(self, user_id: str, query_embedding: List[float], top_k: int = 3) -> List[str]:
@@ -173,7 +173,7 @@ class PersonalMemoryService:
             return [s["fact"] for s in scored[:top_k] if s["score"] > 0.7]
 
         except Exception as e:
-            logger.warning(f"⚠️ Failed to retrieve personal memories: {e}")
+            logger.warning(f" Failed to retrieve personal memories: {e}")
             return []
 
     def _parse_memories(self, text: str) -> List[Dict]:

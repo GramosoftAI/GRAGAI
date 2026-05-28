@@ -64,17 +64,17 @@ class QueryRouter:
         # --- STAGE 1: REGEX (Zero Latency) ---
         for search_type, pattern in self.patterns.items():
             if pattern.search(query):
-                logger.info(f"🚦 Router Stage 1: Regex match -> {search_type.name}")
+                logger.info(f" Router Stage 1: Regex match -> {search_type.name}")
                 return search_type
 
         # --- STAGE 2: SEMANTIC LLM CLASSIFICATION (High Intelligence) ---
         # Only triggered for complex or ambiguous queries to save tokens
         if len(query.split()) > 5:
-            logger.debug("🚦 Router Stage 1 inconclusive. Escalating to Stage 2 (LLM)...")
+            logger.debug(" Router Stage 1 inconclusive. Escalating to Stage 2 (LLM)...")
             try:
                 return await self._llm_classify(query)
             except Exception as e:
-                logger.warning(f"⚠️ Router Stage 2 failed: {e}. Falling back to default.")
+                logger.warning(f" Router Stage 2 failed: {e}. Falling back to default.")
         
         # Default fallback
         return SearchType.GRAPH_COMPLETION
@@ -109,5 +109,5 @@ Return ONLY the category name."""
         try:
             return SearchType(category)
         except ValueError:
-            logger.warning(f"⚠️ LLM returned invalid category: {category}")
+            logger.warning(f" LLM returned invalid category: {category}")
             return SearchType.GRAPH_COMPLETION

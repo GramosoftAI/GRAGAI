@@ -27,7 +27,7 @@ class EmailService:
         - In production, this should use a background task (e.g., Celery or FastAPI background tasks)
         - Use a robust provider like AWS SES or SendGrid
         """
-        logger.info(f"📧 SENDING EMAIL TO: {to_email}")
+        logger.info(f" SENDING EMAIL TO: {to_email}")
         logger.info(f"   SUBJECT: {subject}")
         logger.info(f"   BODY: {body}")
         

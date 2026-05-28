@@ -1,8 +1,8 @@
-"""PDF Extraction Service — Gdocz SDK (Primary) + pdfplumber (Fallback)
+"""PDF Extraction Service  Gdocz SDK (Primary) + pdfplumber (Fallback)
 
 ARCHITECTURE:
-    Primary:  Gdocz SDK → Converts PDF to clean markdown via cloud API
-    Fallback: pdfplumber + AI-OCR → Local extraction with Vision LLM for scans
+    Primary:  Gdocz SDK  Converts PDF to clean markdown via cloud API
+    Fallback: pdfplumber + AI-OCR  Local extraction with Vision LLM for scans
 
 STRATEGY:
     1. Try Gdocz SDK first (best quality, handles complex PDFs + scans)
@@ -13,13 +13,13 @@ STRATEGY:
 MARKDOWN CLEANING:
     The raw markdown from Gdocz contains formatting artifacts that are
     noise for embedding models. We clean:
-    - Headers (## Title → Title)
-    - Bold/Italic (**text**, *text* → text)
-    - Links ([text](url) → text)
-    - Images (![alt](url) → removed)
-    - Tables (| col | → flattened to sentences)
-    - Code blocks (```code``` → code)
-    - HTML tags (<tag> → removed)
+    - Headers (## Title  Title)
+    - Bold/Italic (**text**, *text*  text)
+    - Links ([text](url)  text)
+    - Images (![alt](url)  removed)
+    - Tables (| col |  flattened to sentences)
+    - Code blocks (```code```  code)
+    - HTML tags (<tag>  removed)
     - Excessive whitespace normalized
 
 NON-BREAKING:
@@ -45,8 +45,8 @@ settings = get_settings()
 class PDFExtractor:
     """
     PDF content extraction with dual-layer strategy:
-    1. Gdocz SDK (primary) — Cloud-based, high-quality PDF → Markdown
-    2. pdfplumber (fallback) — Local extraction with AI-OCR for scans
+    1. Gdocz SDK (primary)  Cloud-based, high-quality PDF  Markdown
+    2. pdfplumber (fallback)  Local extraction with AI-OCR for scans
 
     Usage:
         text = await PDFExtractor.extract(pdf_bytes, filename="doc.pdf")
@@ -64,7 +64,7 @@ class PDFExtractor:
 
         FLOW:
         1. Try Gdocz SDK (cloud API, handles complex/scanned PDFs)
-        2. If Gdocz fails → fall back to pdfplumber + AI-OCR
+        2. If Gdocz fails  fall back to pdfplumber + AI-OCR
         3. Clean raw output into GraphRAG-friendly text
         4. Return cleaned text ready for chunking
 
@@ -80,7 +80,7 @@ class PDFExtractor:
         Raises:
             ValueError: If no text could be extracted from the PDF
         """
-        logger.info(f"📄 PDF Extraction starting: {filename} ({len(pdf_bytes)} bytes)")
+        logger.info(f" PDF Extraction starting: {filename} ({len(pdf_bytes)} bytes)")
 
         extracted_text = ""
 
@@ -92,29 +92,29 @@ class PDFExtractor:
                 )
                 if extracted_text and extracted_text.strip():
                     logger.info(
-                        f"✅ Gdocz extraction success: {filename} "
+                        f" Gdocz extraction success: {filename} "
                         f"({len(extracted_text)} chars raw markdown)"
                     )
-                    # Clean markdown → GraphRAG-friendly text
+                    # Clean markdown  GraphRAG-friendly text
                     cleaned = PDFExtractor._clean_markdown_for_rag(extracted_text)
                     logger.info(
-                        f"✅ Cleaned for RAG: {len(cleaned)} chars "
+                        f" Cleaned for RAG: {len(cleaned)} chars "
                         f"(from {len(extracted_text)} raw)"
                     )
                     return cleaned
                 else:
                     logger.warning(
-                        f"⚠️ Gdocz returned empty result for {filename}. "
+                        f" Gdocz returned empty result for {filename}. "
                         f"Falling back to pdfplumber."
                     )
             except Exception as e:
                 logger.warning(
-                    f"⚠️ Gdocz extraction failed for {filename}: {e}. "
+                    f" Gdocz extraction failed for {filename}: {e}. "
                     f"Falling back to pdfplumber."
                 )
         else:
             logger.info(
-                "ℹ️ GDOCZ_API_KEY not configured. Using pdfplumber directly."
+                " GDOCZ_API_KEY not configured. Using pdfplumber directly."
             )
 
         # ============= FALLBACK: PDFPLUMBER + AI-OCR =============
@@ -124,12 +124,12 @@ class PDFExtractor:
             )
             if extracted_text and extracted_text.strip():
                 logger.info(
-                    f"✅ pdfplumber extraction success: {filename} "
+                    f" pdfplumber extraction success: {filename} "
                     f"({len(extracted_text)} chars)"
                 )
                 return extracted_text
         except Exception as e:
-            logger.error(f"❌ pdfplumber also failed for {filename}: {e}")
+            logger.error(f" pdfplumber also failed for {filename}: {e}")
 
         # ============= BOTH FAILED =============
         raise ValueError(
@@ -237,7 +237,7 @@ class PDFExtractor:
                 else:
                     # OCR FALLBACK: Page is likely a scan/image
                     logger.info(
-                        f"🔄 Empty page {page.page_number} in {filename}. "
+                        f" Empty page {page.page_number} in {filename}. "
                         f"Attempting AI-OCR..."
                     )
                     try:
@@ -261,13 +261,13 @@ class PDFExtractor:
                                 f"{ocr_text}\n\n"
                             )
                             logger.info(
-                                f"✅ AI-OCR success for page {page.page_number}"
+                                f" AI-OCR success for page {page.page_number}"
                             )
                     except Exception as ocr_err:
                         logger.error(
-                            f"❌ AI-OCR failed for page {page.page_number}: {ocr_err}"
+                            f" AI-OCR failed for page {page.page_number}: {ocr_err}"
                         )
-                        # Continue — other pages may have text
+                        # Continue  other pages may have text
 
         return document_text
 
@@ -314,38 +314,38 @@ class PDFExtractor:
         text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
 
         # ============= STEP 2: CONVERT LINKS TO TEXT =============
-        # [link text](url) → link text
+        # [link text](url)  link text
         text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
 
         # ============= STEP 3: REMOVE CODE FENCES =============
-        # ```language\ncode\n``` → code
+        # ```language\ncode\n```  code
         text = re.sub(r"```[\w]*\n?", "", text)
 
         # ============= STEP 4: REMOVE HTML TAGS =============
         text = re.sub(r"<[^>]+>", "", text)
 
         # ============= STEP 5: CONVERT HEADERS TO PLAIN TEXT =============
-        # ## Header → Header (keep the text, remove #)
+        # ## Header  Header (keep the text, remove #)
         text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
 
         # ============= STEP 6: REMOVE FORMATTING =============
-        # Bold: **text** or __text__ → text
+        # Bold: **text** or __text__  text
         text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
         text = re.sub(r"__([^_]+)__", r"\1", text)
 
-        # Italic: *text* or _text_ → text
+        # Italic: *text* or _text_  text
         text = re.sub(r"\*([^*]+)\*", r"\1", text)
         text = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", text)
 
-        # Strikethrough: ~~text~~ → text
+        # Strikethrough: ~~text~~  text
         text = re.sub(r"~~([^~]+)~~", r"\1", text)
 
-        # Inline code: `text` → text
+        # Inline code: `text`  text
         text = re.sub(r"`([^`]+)`", r"\1", text)
 
         # ============= STEP 7: CLEAN TABLE FORMATTING =============
         # Convert markdown table rows to readable text
-        # | Col1 | Col2 | Col3 | → Col1, Col2, Col3
+        # | Col1 | Col2 | Col3 |  Col1, Col2, Col3
         text = re.sub(
             r"\|([^|\n]+)\|",
             lambda m: m.group(1).strip() + ". ",
@@ -357,9 +357,9 @@ class PDFExtractor:
         text = re.sub(r"\|", " ", text)
 
         # ============= STEP 8: CLEAN LIST MARKERS =============
-        # - item or * item or • item → item
-        text = re.sub(r"^[\s]*[-*+•●▪▫◦]\s+", "", text, flags=re.MULTILINE)
-        # 1. item → item (Only 1-2 digit numbers to avoid stripping years like 2023.)
+        # - item or * item or  item  item
+        text = re.sub(r"^[\s]*[-*+]\s+", "", text, flags=re.MULTILINE)
+        # 1. item  item (Only 1-2 digit numbers to avoid stripping years like 2023.)
         text = re.sub(r"^[\s]*\d{1,2}\.\s+", "", text, flags=re.MULTILINE)
 
         # ============= STEP 9: REMOVE HORIZONTAL RULES =============
@@ -385,7 +385,7 @@ class PDFExtractor:
         text = text.strip()
 
         logger.debug(
-            f"Markdown cleaned: {len(raw_markdown)} chars → {len(text)} chars "
+            f"Markdown cleaned: {len(raw_markdown)} chars  {len(text)} chars "
             f"(removed {len(raw_markdown) - len(text)} chars of formatting)"
         )
 
