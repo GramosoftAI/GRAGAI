@@ -294,6 +294,11 @@ class DeepInfraEmbeddingClient:
         to_embed_texts = []
         
         for i, text in enumerate(texts):
+            # Validate and truncate text to prevent API token limit errors
+            if not text or not text.strip():
+                text = "empty"
+            text = text[: self.max_text_length]
+            
             text_hash = hashlib.sha256(text.encode()).hexdigest()
             if text_hash in _embedding_cache:
                 results_map[i] = _embedding_cache[text_hash]
@@ -326,7 +331,11 @@ class DeepInfraEmbeddingClient:
                 
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     response = await client.post(self.base_url, headers=headers, json=payload)
-                    response.raise_for_status()
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        logger.error(f"❌ DeepInfra API Error ({response.status_code}): {response.text}")
+                        raise
                     data = response.json()
                     
                     # Extract embeddings: {"data": [{"embedding": [...], "index": 0}, ...]}
