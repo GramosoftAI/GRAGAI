@@ -106,6 +106,13 @@ class AgentService:
                 personality=request.personality,
                 personality_id=request.personality_id,
                 system_prompt=request.system_prompt,
+                agent_type=request.agent_type,
+                organization_name=request.organization_name,
+                contact_phone=request.contact_phone,
+                contact_email=request.contact_email,
+                website_url=request.website_url,
+                fallback_message_enabled=request.fallback_message_enabled,
+                brand_persona=request.brand_persona,
             )
             agent_id = str(pg_agent.id)
             logger.info(f"✅ PostgreSQL: Created agent {agent_id}")

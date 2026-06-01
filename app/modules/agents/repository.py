@@ -20,57 +20,71 @@ class AgentRepository(BaseRepository):
     Repository for Agent CRUD operations.
 
     CRITICAL: All queries include tenant_id filtering (RLS enforcement).
-    """
-
-    def __init__(self, db: AsyncSession, tenant_id: str):
-        """
-        Initialize agent repository with tenant context.
-
-        Args:
-            db: Database session
-            tenant_id: Tenant UUID (for RLS filtering)
-        """
-        super().__init__(db, tenant_id)
-        self.model = Agent
-
-    async def create(
-        self,
-        name: str,
-        user_id: str,
-        personality: Optional[str] = "Friendly",
-        personality_id: Optional[uuid.UUID] = None,
-        system_prompt: Optional[str] = None,
-    ) -> Agent:
-        """
-        Create a new agent.
-
-        CRITICAL:
-        - tenant_id is ALWAYS set from context
-        - Returns agent for immediate Neo4j node creation
-
-        Args:
-            name: Agent name
-            user_id: User ID (agent owner)
-            personality: Optional personality/tone
-            system_prompt: Optional system prompt
-
-        Returns:
-            Created Agent model instance
-        """
-        agent = Agent(
-            id=uuid.uuid4(),
-            tenant_id=self.tenant_id,
-            user_id=uuid.UUID(user_id),
-            name=name,
-            personality=personality,
-            personality_id=personality_id,
-            system_prompt=system_prompt,
-            is_active=True,
-        )
-
-        self.db.add(agent)
-        await self.db.flush()  # Create without commit (let service handle transaction)
-
+    """
+
+    def __init__(self, db: AsyncSession, tenant_id: str):
+        """
+        Initialize agent repository with tenant context.
+
+        Args:
+            db: Database session
+            tenant_id: Tenant UUID (for RLS filtering)
+        """
+        super().__init__(db, tenant_id)
+        self.model = Agent
+
+    async def create(
+        self,
+        name: str,
+        user_id: str,
+        personality: Optional[str] = "Friendly",
+        personality_id: Optional[uuid.UUID] = None,
+        system_prompt: Optional[str] = None,
+        agent_type: str = "platform",
+        organization_name: Optional[str] = None,
+        contact_phone: Optional[str] = None,
+        contact_email: Optional[str] = None,
+        website_url: Optional[str] = None,
+        fallback_message_enabled: bool = True,
+        brand_persona: Optional[str] = None,
+    ) -> Agent:
+        """
+        Create a new agent.
+
+        CRITICAL:
+        - tenant_id is ALWAYS set from context
+        - Returns agent for immediate Neo4j node creation
+
+        Args:
+            name: Agent name
+            user_id: User ID (agent owner)
+            personality: Optional personality/tone
+            system_prompt: Optional system prompt
+
+        Returns:
+            Created Agent model instance
+        """
+        agent = Agent(
+            id=uuid.uuid4(),
+            tenant_id=self.tenant_id,
+            user_id=uuid.UUID(user_id),
+            name=name,
+            personality=personality,
+            personality_id=personality_id,
+            system_prompt=system_prompt,
+            is_active=True,
+            agent_type=agent_type,
+            organization_name=organization_name,
+            contact_phone=contact_phone,
+            contact_email=contact_email,
+            website_url=website_url,
+            fallback_message_enabled=fallback_message_enabled,
+            brand_persona=brand_persona,
+        )
+
+        self.db.add(agent)
+        await self.db.flush()  # Create without commit (let service handle transaction)
+
         logger.info(
             f" Created agent in PostgreSQL: {agent.id} (tenant: {self.tenant_id})"
         )

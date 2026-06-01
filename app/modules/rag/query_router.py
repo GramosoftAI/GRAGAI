@@ -18,6 +18,10 @@ class SearchType(Enum):
     MEMORY_ONLY = "MEMORY_ONLY"             # Personal preferences/chat history
     ENTITY_CONNECTION = "ENTITY_CONNECTION" # How A relates to B
     SOCIAL = "SOCIAL"                       # Greetings, small talk, polite interaction
+    ORGANIZATION_SPECIFIC = "ORGANIZATION_SPECIFIC" # Pricing, services, location
+    KNOWLEDGE_BASE = "KNOWLEDGE_BASE"       # "Summarize this document"
+    GENERAL_KNOWLEDGE = "GENERAL_KNOWLEDGE" # "What is diabetes"
+    SUPPORT_INTENT = "SUPPORT_INTENT"       # Complaints, human assistance
 
 class QueryRouter:
     """
@@ -30,6 +34,14 @@ class QueryRouter:
     def __init__(self):
         # Pre-compile regex patterns for high performance
         self.patterns = {
+            SearchType.SUPPORT_INTENT: re.compile(
+                r'\b(help|support|complaint|human|call me|contact support|representative|agent|operator)\b',
+                re.IGNORECASE
+            ),
+            SearchType.ORGANIZATION_SPECIFIC: re.compile(
+                r'\b(services?|pricing|cost|charges?|fee|staff|policies|contact|location|appointments?|book|products?|operations?)\b',
+                re.IGNORECASE
+            ),
             SearchType.GRAPH_SUMMARY: re.compile(
                 r'\b(summarize|summary|overview|tldr|briefly explain|main points|give me a breakdown|tell me everything about)\b', 
                 re.IGNORECASE
@@ -51,7 +63,7 @@ class QueryRouter:
                 re.IGNORECASE
             ),
             SearchType.SOCIAL: re.compile(
-                r'\b(hi|hello|hey|greetings|good morning|good afternoon|good evening|how are you|who are you|thanks|thank you|bye|goodbye|help)\b',
+                r'\b(hi|hello|hey|greetings|good morning|good afternoon|good evening|how are you|who are you|thanks|thank you|bye|goodbye)\b',
                 re.IGNORECASE
             )
         }
@@ -86,6 +98,10 @@ class QueryRouter:
         prompt = f"""Classify the user's search intent into exactly one category.
 
 CATEGORIES:
+- SUPPORT_INTENT: Requests requiring human assistance (e.g., "I need help", "How do I contact support", "I have a complaint")
+- ORGANIZATION_SPECIFIC: Questions about the organization (e.g., "What services do you provide?", "How can I book an appointment?", "What are your consultation fees?")
+- KNOWLEDGE_BASE: Document specific questions (e.g., "Summarize this document", "What does the policy say")
+- GENERAL_KNOWLEDGE: Questions unrelated to the organization (e.g., "What is diabetes", "Who invented the internet")
 - CHUNK_SEARCH: Direct fact lookup (e.g., "What is John's email?")
 - GRAPH_SUMMARY: Requests for overviews (e.g., "Tell me about Project X")
 - CHAIN_OF_THOUGHT: Complex reasoning (e.g., "Compare these two candidates")

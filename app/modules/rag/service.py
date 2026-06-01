@@ -445,45 +445,102 @@ Base Instruction:
                 }
         except Exception as e:
             logger.error(f" RAG pipeline failed: {e}")
-            return {
-                "error": f"RAG retrieval failed: {str(e)}",
-                "answer": None,
-                "sources": [],
-            }
-
-        # ============= STEP 3.5: CHECK IF CONTEXT IS EMPTY =============
-        # EXCEPTION: If the router identified this as a SOCIAL query (greeting),
-        # we proceed to the LLM to provide a human-like response even with no context.
-        is_social = context.search_type == "SOCIAL" if context else False
-        
-        if (not context or not context.chunks) and not is_social:
-            logger.info("Empty context retrieved and not social, returning fallback message.")
-            return {
-                "answer": "Im sorry, but I don't have that specific information in my current knowledge base.",
-                "sources": [],
-                "context": {
-                    "kb_id": kb_id,
-                    "kb_name": kb.name,
-                    "chunks_used": 0,
-                    "entities_mentioned": [],
-                    "reasoning_path": "No relevant knowledge found in graph to answer this question.",
-                },
-                "stats": {
-                    "total_chunks": 0,
-                    "total_tokens": 0,
-                    "entity_count": 0,
-                    "llm_tokens": 0,
-                    "llm_source": "Fallback",
-                    "search_strategy": context.search_type if context else "DEFAULT",
-                },
-                "confidence": 0.0,
-                "nodes_used": 0,
-                "reasoning_path": "No relevant knowledge found in graph to answer this question.",
-            }
-        
-        if is_social and (not context or not context.chunks):
+            return {
+                "error": f"RAG retrieval failed: {str(e)}",
+                "answer": None,
+                "sources": [],
+            }
+
+        # ============= STEP 3.5: CHECK IF CONTEXT IS EMPTY OR INTENT BYPASS =============
+        # EXCEPTION: If the router identified this as a SOCIAL query (greeting),
+        # we proceed to the LLM to provide a human-like response even with no context.
+        is_social = context.search_type == "SOCIAL" if context else False
+        is_support = context.search_type == "SUPPORT_INTENT" if context else False
+        
+        # BYPASS: Support Intent for Integrated Agents
+        if is_support and agent.agent_type == "integrated":
+            logger.info("Integrated agent handling SUPPORT_INTENT directly.")
+            contact_info = []
+            if agent.contact_phone: contact_info.append(f"Phone: {agent.contact_phone}")
+            if agent.contact_email: contact_info.append(f"Email: {agent.contact_email}")
+            if agent.website_url: contact_info.append(f"Website: {agent.website_url}")
+            
+            contact_str = " | ".join(contact_info)
+            org_name = agent.organization_name or "our organization"
+            
+            msg = f"For support or human assistance, please contact {org_name} directly."
+            if contact_str:
+                msg += f" You can reach us at: {contact_str}"
+                
+            return {
+                "answer": msg,
+                "sources": [],
+                "context": {
+                    "kb_id": kb_id,
+                    "kb_name": kb.name,
+                    "chunks_used": 0,
+                    "entities_mentioned": [],
+                    "reasoning_path": "Bypassed retrieval for integrated support intent.",
+                },
+                "stats": {
+                    "total_chunks": 0,
+                    "total_tokens": 0,
+                    "entity_count": 0,
+                    "llm_tokens": 0,
+                    "llm_source": "SupportFallback",
+                    "search_strategy": "SUPPORT_INTENT",
+                },
+                "confidence": 1.0,
+                "nodes_used": 0,
+                "reasoning_path": "Bypassed retrieval for integrated support intent.",
+            }
+        
+        if (not context or not context.chunks) and not is_social:
+            logger.info("Empty context retrieved and not social, returning fallback message.")
+            
+            # Determine fallback message based on agent_type
+            if agent.agent_type == "integrated":
+                if agent.fallback_message_enabled:
+                    org_name = agent.organization_name or "our organization"
+                    contact_info = []
+                    if agent.contact_phone: contact_info.append(f"Phone: {agent.contact_phone}")
+                    if agent.contact_email: contact_info.append(f"Email: {agent.contact_email}")
+                    if agent.website_url: contact_info.append(f"Website: {agent.website_url}")
+                    contact_str = " | ".join(contact_info)
+                    
+                    fallback_msg = f"I am unable to find information regarding your query. Please contact {org_name} for more details."
+                    if contact_str:
+                        fallback_msg += f" You can reach us at: {contact_str}"
+                else:
+                    fallback_msg = "I'm sorry, but I don't have enough information to answer that question."
+            else:
+                fallback_msg = "I'm sorry, but I don't have that specific information in my current knowledge base."
+            
+            return {
+                "answer": fallback_msg,
+                "sources": [],
+                "context": {
+                    "kb_id": kb_id,
+                    "kb_name": kb.name,
+                    "chunks_used": 0,
+                    "entities_mentioned": [],
+                    "reasoning_path": "No relevant knowledge found in graph to answer this question.",
+                },
+                "stats": {
+                    "total_chunks": 0,
+                    "total_tokens": 0,
+                    "entity_count": 0,
+                    "llm_tokens": 0,
+                    "llm_source": "Fallback",
+                    "search_strategy": context.search_type if context else "DEFAULT",
+                },
+                "confidence": 0.0,
+                "nodes_used": 0,
+                "reasoning_path": "No relevant knowledge found in graph to answer this question.",
+            }
+            
+        if is_social and (not context or not context.chunks):
             logger.info("Social query detected with empty context, proceeding to LLM for conversational response.")
-
         # ============= STEP 4: FORMAT CONTEXT FOR LLM =============
         logger.debug("Formatting context for LLM...")
         formatted_context = self._format_context(context)
