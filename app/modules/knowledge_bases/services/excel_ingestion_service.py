@@ -118,7 +118,8 @@ class ExcelIngestionService:
 
         # Fallback to mime_type if extension is empty or not standard
         if ext not in ["csv", "xlsx", "xls"] and mime_type:
-            if "csv" in mime_type.lower():
+            # Native Google Spreadsheets are exported as CSV bytes, so treat them as csv
+            if "csv" in mime_type.lower() or mime_type == "application/vnd.google-apps.spreadsheet":
                 ext = "csv"
             elif "spreadsheet" in mime_type.lower() or "excel" in mime_type.lower():
                 ext = "xlsx"
