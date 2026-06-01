@@ -390,6 +390,7 @@ class KnowledgeBaseService:
         kb_id: str,
         file_bytes: bytes,
         filename: str,
+        mime_type: Optional[str] = None,
     ) -> dict:
         """
         Ingest an Excel or CSV file by parsing it, discovering relationships,
@@ -404,7 +405,7 @@ class KnowledgeBaseService:
             # 2. Invoke ExcelIngestionService
             from .services.excel_ingestion_service import ExcelIngestionService
             ingestor = ExcelIngestionService(self.db, str(self.tenant_id))
-            result = await ingestor.ingest_file(kb_id, file_bytes, filename)
+            result = await ingestor.ingest_file(kb_id, file_bytes, filename, mime_type)
 
             if not result.get("success"):
                 return format_error(result.get("error", "Failed to ingest Excel/CSV"))
@@ -869,7 +870,8 @@ class KnowledgeBaseService:
                         ingest_res = await self.ingest_excel_or_csv(
                             kb_id=kb_id,
                             file_bytes=file_bytes,
-                            filename=filename
+                            filename=filename,
+                            mime_type=mime_type
                         )
                         if ingest_res.get("success"):
                             files_synced += 1

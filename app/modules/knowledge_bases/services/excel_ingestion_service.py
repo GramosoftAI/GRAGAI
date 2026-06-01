@@ -104,6 +104,7 @@ class ExcelIngestionService:
         kb_id: str,
         file_bytes: bytes,
         filename: str,
+        mime_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Main entry point for Excel/CSV ingestion.
@@ -113,7 +114,15 @@ class ExcelIngestionService:
         
         # 1. Parse Excel or CSV into sheets dictionary
         sheets_data: Dict[str, pd.DataFrame] = {}
-        ext = filename.lower().split(".")[-1]
+        ext = filename.lower().split(".")[-1] if "." in filename else ""
+
+        # Fallback to mime_type if extension is empty or not standard
+        if ext not in ["csv", "xlsx", "xls"] and mime_type:
+            # Native Google Spreadsheets are exported as CSV bytes, so treat them as csv
+            if "csv" in mime_type.lower() or mime_type == "application/vnd.google-apps.spreadsheet":
+                ext = "csv"
+            elif "spreadsheet" in mime_type.lower() or "excel" in mime_type.lower():
+                ext = "xlsx"
 
         try:
             if ext == "csv":
@@ -124,7 +133,7 @@ class ExcelIngestionService:
                 for sheet_name in xl.sheet_names:
                     sheets_data[sheet_name] = xl.parse(sheet_name)
             else:
-                raise ValueError(f"Unsupported spreadsheet format: {ext}")
+                raise ValueError(f"Unsupported spreadsheet format: {ext or filename}")
         except Exception as parse_err:
             logger.error(f"Failed parsing spreadsheet file: {parse_err}")
             return {"success": False, "error": f"Failed to parse file: {str(parse_err)}"}
