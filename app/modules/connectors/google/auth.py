@@ -67,7 +67,7 @@ class GoogleAuthManager:
                 client_id=credentials.get("client_id"),
                 client_secret=credentials.get("client_secret"),
                 token_uri="https://oauth2.googleapis.com/token",
-                scopes=SCOPES,
+                scopes=None,
             )
 
         return self.creds_dict

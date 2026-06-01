@@ -56,8 +56,8 @@ class TextChunker:
     @staticmethod
     def split_into_chunks(
         text: str,
-        chunk_size: int = 2000,  # ~500 tokens
-        overlap_size: int = 400,  # ~100 tokens
+        chunk_size: int = 1000,  # ~250 tokens, safely within embedding model token limits (e.g. 512)
+        overlap_size: int = 200,  # ~50 tokens
     ) -> List[str]:
         """
         Split text into overlapping chunks.
