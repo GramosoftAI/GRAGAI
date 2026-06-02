@@ -238,6 +238,25 @@ class TripletExtractor:
         logger.info(f" Batch extracting triplets from {len(chunks)} chunks in parallel...")
         
         # Create tasks for all chunks
+        
+        # --- DYNAMIC SCHEMA DISCOVERY (Ontology-Aware Ingestion) ---
+        if self.tenant_id and chunks:
+            try:
+                from .schema_detector import SchemaDetector
+                from ..modules.ontology.service import OntologyService
+                
+                sample_text = "\n".join([c.get("text", "") for c in chunks[:3]])
+                if sample_text:
+                    detector = SchemaDetector()
+                    schema = await detector.discover_schema(sample_text)
+                    
+                    if schema.get("classes") or schema.get("relations"):
+                        ont_svc = OntologyService(self.tenant_id)
+                        await ont_svc.auto_register_schema(schema)
+            except Exception as e:
+                logger.warning(f"Dynamic schema detection failed: {e}")
+                
+        # --- TRIPLET EXTRACTION ---
         tasks = [
             self.extract_from_chunk(
                 chunk_id=chunk["chunk_id"],

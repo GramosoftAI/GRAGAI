@@ -181,6 +181,27 @@ class ExcelIngestionService:
 
             # 3. Ground entity and relationship types against Active Ontology
             grounded_mapping = await self._ground_schema_mapping(mapping)
+            
+            # --- DYNAMIC SCHEMA REGISTRATION (Phase 4B Enhancement) ---
+            schema_to_register = {"classes": [], "relations": []}
+            primary_type = grounded_mapping.get("primary_entity", {}).get("type")
+            if primary_type:
+                schema_to_register["classes"].append({"name": primary_type, "description": f"Auto-discovered class from sheet {sheet_name}"})
+                
+            for rel in grounded_mapping.get("relationships", []):
+                tgt_type = rel.get("target_type")
+                if tgt_type:
+                    schema_to_register["classes"].append({"name": tgt_type, "description": f"Auto-discovered target class from sheet {sheet_name}"})
+                pred = rel.get("relation")
+                if pred:
+                    schema_to_register["relations"].append({"name": pred, "description": f"Auto-discovered relation from sheet {sheet_name}"})
+                    
+            if schema_to_register["classes"] or schema_to_register["relations"]:
+                try:
+                    await self.ontology_service.auto_register_schema(schema_to_register)
+                except Exception as e:
+                    logger.warning(f"Failed to auto-register schema from excel: {e}")
+            # -----------------------------------------------------------
 
             # 4. Ingest and write sheet rows
             sheet_stats = await self._ingest_sheet_rows(
