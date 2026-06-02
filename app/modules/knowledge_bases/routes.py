@@ -51,7 +51,7 @@ def get_tenant_and_user(request: Request) -> tuple[str, str]:
 @router.post(
     "",
     response_model=dict,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
     summary="Create Knowledge Base",
     description="Create a new knowledge base for an agent",
 )
