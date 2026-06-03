@@ -39,7 +39,7 @@ async def register(
         tokens=schemas.TokenResponse(**result["tokens"]),
     )
 
-    return format_success(data=login_response, meta={"action": "registered"})
+    return format_success(data=login_response, meta={"action": "registered","message":"User registered successfully"})
 
 
 @router.post("/login")
@@ -68,7 +68,7 @@ async def login(
         tokens=schemas.TokenResponse(**result["tokens"]),
     )
 
-    return format_success(data=login_response, meta={"action": "authenticated"})
+    return format_success(data=login_response, meta={"action": "authenticated","message":"User logged in successfully"})
 
 
 @router.post("/refresh")

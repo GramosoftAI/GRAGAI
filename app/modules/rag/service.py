@@ -1,450 +1,922 @@
-"""
-RAG Service - Orchestrates RAG pipeline and LLM generation
-Phase 2 Step 4: Transforms retrieved context into generated answers
-"""
-
-import logging
-from typing import Optional
-from uuid import UUID
-import asyncio
-import hashlib
-import json
-import random
-from datetime import datetime, timedelta
-from dataclasses import dataclass, asdict
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from .pipeline import RAGPipeline, RAGContext
-from ..knowledge_bases.repository import KnowledgeBaseRepository
-from ..agents.repository import AgentRepository
-from ..personalities.models import Personality
-from ...core.database import AsyncSessionLocal
-from ...core.embeddings import EmbeddingGenerator
-from ...core.llm.deepinfra_llm import DeepInfraLLMClient, LLMResponse
-from ...core.billing.utils import is_billing_enabled
-
-# Analytics Integration
-from ..analytics.repository import AnalyticsRepository
-from ..analytics.schemas import AnalyticsQueryLogCreate
-from ..analytics.models import ResponseStatus
-
-
-logger = logging.getLogger(__name__)
-
-
-# Simple in-memory cache for RAG results
-# Format: (query_hash, agent_id) -> (response, timestamp)
-# TTL: 300 seconds (5 minutes) - configurable
-_rag_cache = {}  # Dict[cache_key] -> (response, timestamp, insertion_order)
-_CACHE_TTL_SECONDS = 300
-_MAX_CACHE_SIZE = 1000  # Evict oldest entries if exceeded
-_CACHE_INSERTION_ORDER = []  # Track insertion order for LRU eviction
-_RAG_TIMEOUT_SECONDS = 30.0  # Professional timeout for remote AI calls + graph compute
-
-
-# Metrics tracking (optional, for analytics)
-@dataclass
-class RAGMetrics:
-    """Track RAG pipeline performance metrics"""
-
-    retrieval_latency_ms: float  # Time to retrieve context (seed + expansion)
-    ranking_latency_ms: float  # Time to score and rank
-    total_latency_ms: float  # Total pipeline time
-    cache_hit: bool  # Whether result came from cache
-    seed_chunks_count: int  # Number of seed chunks retrieved
-    expanded_chunks_count: int  # Number of chunks from graph expansion
-    final_chunks_count: int  # Number of chunks in final context
-    timeout_occurred: bool  # Whether timeout occurred
-    partial_result: bool  # Whether result is partial (timeout fallback)
-
-    def __post_init__(self):
-        """Validate metrics"""
-        if self.total_latency_ms < 0:
-            raise ValueError("Latency cannot be negative")
-
-
-_rag_metrics = []  # List of metrics for analytics
-
-
-class RAGService:
-    """
-    High-level RAG orchestration service.
-
-    Responsible for:
-    1. Validating query + KB ownership
-    2. Orchestrating RAG pipeline (retrieval)
-    3. Formatting context for LLM
-    4. Generating answers via LLM
-
-    MULTI-TENANCY:
-    - tenant_id passed at init (from middleware)
-    - KB ownership validated before retrieval
-    - All Neo4j queries validated against tenant_id
-    """
-
-    def __init__(self, db: AsyncSession, tenant_id: str):
-        """
-        Initialize RAG service for tenant.
-
-        Args:
-            db: Database session (for PostgreSQL KB retrieval)
-            tenant_id: Tenant UUID (from middleware, never from request)
-        """
-        self.db = db
-        self.tenant_id = str(tenant_id)
-
-        # Initialize core components
-        self.pipeline = RAGPipeline(self.tenant_id, db=self.db)
-        self.kb_repo = KnowledgeBaseRepository(db, self.tenant_id)
-        self.agent_repo = AgentRepository(db, self.tenant_id)
-        self.llm_client = DeepInfraLLMClient()
-
-    async def stream_rag_answer(
-        self,
-        query: str,
-        agent_id: str,
-        kb_id: str | list[str],
-        user_id: Optional[str] = None,
-        top_k: int = 10,
-        max_depth: int = 2,
-    ):
-        """
-        Stream answer using RAG pipeline (for WebSockets).
-        Yields chunks of text.
-        """
-        logger.info(f" RAG Service: Streaming answer for agent={agent_id}, kb={kb_id}")
-
-        # 1. Validate KB ownership
-        kb_ids = [kb_id] if isinstance(kb_id, str) else kb_id
-        
-        # We'll just verify the first one exists and belongs to the agent for security
-        # (The pipeline will filter by these IDs anyway)
-        kb = await self.kb_repo.get_by_id(kb_ids[0])
-        if not kb:
-            yield json.dumps({"error": f"Knowledge Base {kb_ids[0]} not found"})
-            return
-        if str(kb.agent_id) != str(agent_id):
-            yield json.dumps({"error": "Unauthorized: Agent does not own this Knowledge Base"})
-            return
-            
-        # Optional: Log if multiple KBs are being used
-        if len(kb_ids) > 1:
-            logger.info(f" Querying across {len(kb_ids)} Knowledge Bases for agent {agent_id}")
-
-        # Fetch Agent details for persona branding (system_prompt, description)
-        agent = await self.agent_repo.get_by_id(agent_id)
-        if not agent:
-            yield json.dumps({"error": f"Agent {agent_id} not found or inactive under the current tenant"})
-            return
-        
-        base_prompt = agent.system_prompt or ""
-        personality_description = agent.personality or "You are a warm, approachable, and supportive assistant." # Fallback
-
-        if agent.personality_id:
-            personality = await self.db.get(Personality, agent.personality_id)
-            if personality:
-                personality_description = personality.description or personality.name
-
-        injected_system_prompt = f"""
-[PERSONALITY MODE: STRICT]
-
-You MUST strictly follow the personality defined below.
-Every response MUST reflect this personality strongly in tone, wording, and structure.
-Deviation is NOT allowed.
-
-Personality Definition:
-{personality_description}
-
-Base Instruction:
-{base_prompt}
-""".strip()
-
-        agent_persona = {
-            "name": agent.name if agent else "Assistant",
-            "personality": personality_description,
-            "system_prompt": injected_system_prompt
-        }
-
-        # 2. Retrieve Context (No cache for streaming for simplicity in Phase 1)
-        try:
-            context = await asyncio.wait_for(
-                self.pipeline.query(
-                    query=query,
-                    agent_id=agent_id,
-                    kb_id=kb_ids,
-                    user_id=user_id,
-                    top_k=top_k,
-                    max_depth=max_depth,
-                ),
-                timeout=_RAG_TIMEOUT_SECONDS,
-            )
-        except Exception as e:
-            logger.error(f"RAG Retrieval failed for stream: {e}")
-            yield json.dumps({"error": f"Retrieval failed: {str(e)}"})
-            return
-
-        # 3. Yield metadata first (sources)
-        metadata = {
-            "type": "metadata",
-            "sources": [
-                {"chunk_id": c.chunk_id, "score": c.hybrid_score, "reason": c.reason}
-                for c in context.chunks
-            ],
-            "triplets": [
-                {"subject": t["subject"], "predicate": t["predicate"], "object": t["object"]}
-                for t in (context.triplets or [])
-            ],
-            "kb_name": kb.name if len(kb_ids) == 1 else f"Multi-KB ({len(kb_ids)})",
-            "augmented_query": query
-        }
-        yield json.dumps(metadata)
-
-        # 3.5 Check for empty context
-        if not context or not context.chunks:
-            logger.info("Empty context retrieved for stream, returning fallback message.")
-            yield "Im sorry, but the requested information is not available within my current knowledge base. Please try a related query or provide additional context."
-            return
-
-        # 4. Stream chunks
-        formatted_context = self._format_context(context)
-        
-        # Track start time for latency
-        start_time = datetime.now()
-        full_answer = []
-        
-        async for chunk in self.llm_client.stream_answer(
-            query, 
-            formatted_context, 
-            agent_persona=agent_persona
-        ):
-            full_answer.append(chunk)
-            yield chunk
-
-        # 5. ASYNC LOGGING (Background)
-        # Log to analytics in background to avoid blocking the stream completion
-        latency_ms = (datetime.now() - start_time).total_seconds() * 1000
-        confidence = sum(c.hybrid_score for c in context.chunks) / len(context.chunks) if context.chunks else 0.0
-        status = ResponseStatus.SUCCESS if context.chunks else ResponseStatus.UNANSWERED
-        
-        try:
-            analytics_repo = AnalyticsRepository(self.db, UUID(self.tenant_id))
-            await analytics_repo.create_query_log({
-                "query": query,
-                "response_status": status,
-                "confidence_score": confidence,
-                "latency_ms": latency_ms
-            })
-            await self.db.commit()
-        except Exception as ae:
-            logger.warning(f" Failed to log analytics for stream: {ae}")
-
-    async def generate_answer(
-        self,
-        query: str,
-        agent_id: str,
-        kb_id: str | list[str],
-        user_id: Optional[str] = None,
-        top_k: int = 10,
-        max_depth: int = 2,
-        reasoning_enabled: bool = True,
-        memory_enabled: bool = True,
-    ) -> dict:
-        """
-        Generate answer to query using RAG pipeline.
-
-        FLOW:
-        1. Check result cache (query, agent_id)  if hit, return cached
-        2. Validate KB ownership (agent_id owns KB)
-        3. Execute RAG pipeline with timeout (max 2 seconds)
-        4. Format context for LLM
-        5. Generate answer
-        6. Cache result before return
-        7. Return answer + source annotations
-
-        IMPROVEMENTS (Phase 2 Step 4 optimizations):
-        -  Result caching: Avoid recomputing identical queries
-        -  Timeout guard: Prevent slow queries from blocking
-        -  Source attribution: Show why each chunk was retrieved
-
-        Args:
-            query: User query string
-            agent_id: Agent UUID (ownership verification)
-            kb_id: Knowledge Base UUID
-            user_id: User UUID (for personalized memory retrieval)
-            top_k: Initial seed chunks
-            max_depth: Graph expansion depth
-
-        Returns:
-            Dict with:
-            - answer (str): Generated answer
-            - sources (list): [{"chunk_id": str, "score": float, "position": int, "reason": str}, ...]
-            - context (dict): Retrieved context metadata
-            - stats (dict): Pipeline statistics
-        """
-        logger.info(
-            f" RAG Service: Generating answer for agent={agent_id}, kb={kb_id}"
-        )
-        start_time_total = datetime.now()
-
-        # ============= STEP 1: VALIDATION: KB ownership (required for cache key with version) =============
-        kb_ids = [kb_id] if isinstance(kb_id, str) else kb_id
-        
-        logger.debug("Validating KB ownership...")
-        kb = await self.kb_repo.get_by_id(kb_ids[0])
-        if not kb:
-            logger.error(f" KB {kb_ids[0]} not found")
-            return {
-                "error": f"Knowledge Base {kb_ids[0]} not found",
-                "answer": None,
-                "sources": [],
-            }
-
-        if str(kb.agent_id) != str(agent_id):
-            logger.error(f" Agent {agent_id} does not own KB {kb_ids[0]}")
-            return {
-                "error": "Unauthorized: Agent does not own this Knowledge Base",
-                "answer": None,
-                "sources": [],
-            }
-
-        logger.info(f" KB ownership verified: {kb.name}")
-
-        # Fetch Agent details for persona branding (system_prompt, description)
-        agent = await self.agent_repo.get_by_id(agent_id)
-        if not agent:
-            logger.error(f" Agent {agent_id} not found or inactive under the current tenant")
-            return {
-                "error": f"Agent {agent_id} not found or inactive under the current tenant",
-                "answer": None,
-                "sources": [],
-            }
-        
-        base_prompt = agent.system_prompt or ""
-        personality_description = agent.personality or "You are a warm, approachable, and supportive assistant." # Fallback
-
-        if agent.personality_id:
-            personality = await self.db.get(Personality, agent.personality_id)
-            if personality:
-                personality_description = personality.description or personality.name
-
-        injected_system_prompt = f"""
-[PERSONALITY MODE: STRICT]
-
-You MUST strictly follow the personality defined below.
-Every response MUST reflect this personality strongly in tone, wording, and structure.
-Deviation is NOT allowed.
-
-Personality Definition:
-{personality_description}
-
-Base Instruction:
-{base_prompt}
-""".strip()
-
-        agent_persona = {
-            "name": agent.name if agent else "Assistant",
-            "personality": personality_description,
-            "system_prompt": injected_system_prompt
-        }
-
-        # ============= STEP 2: CHECK CACHE (with KB version for auto-invalidation) =============
-        logger.debug("Checking result cache...")
-        cache_key = self._make_cache_key(
-            query, agent_id, "|".join(kb_ids), kb_version=kb.total_chunks
-        )
-        cached_response = self._get_cached_response(cache_key)
-        if cached_response:
-            logger.info(
-                f" Cache HIT: Returning cached result (KB version: {kb.total_chunks})"
-            )
-            # Track cache hit metric
-            self._track_metrics(
-                cache_hit=True,
-                seed_chunks_count=len(cached_response.get("sources", [])),
-            )
-            return cached_response
-
-        # ============= STEP 3: RETRIEVE CONTEXT VIA RAG PIPELINE (WITH TIMEOUT) =============
-        logger.debug("Executing RAG pipeline (timeout=2.0s)...")
-        context = None
-        partial_result = False
-        try:
-            # TIMEOUT GUARD: Prevent slow queries from blocking
-            # If query takes >RAG_TIMEOUT_SECONDS, timeout and return partial result (seed chunks only)
-            context = await asyncio.wait_for(
-                self.pipeline.query(
-                    query=query,
-                    agent_id=agent_id,
-                    kb_id=kb_id,
-                    user_id=user_id,
-                    top_k=top_k,
-                    max_depth=max_depth,
-                ),
-                timeout=_RAG_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f" RAG pipeline timed out (>{_RAG_TIMEOUT_SECONDS}s). Returning seed chunks only (partial fallback)..."
-            )
-
-            # PARTIAL FALLBACK: Return seed chunks to avoid complete error
-            # Seed retrieval should be fast (<100ms), so this should succeed
-            try:
-                query_embedding = await EmbeddingGenerator.generate_embedding(query)
-                seed_chunks = await self.pipeline._retrieve_seed_chunks(
-                    kb_ids=kb_ids,
-                    query_embedding=query_embedding,
-                    top_k=top_k,
-                )
-
-                if seed_chunks:
-                    # Build minimal context from seed chunks only
-                    retrieved_chunks = [
-                        self.pipeline.RetrievedChunk(
-                            chunk_id=chunk["chunk_id"],
-                            text=chunk["text"],
-                            kb_id=chunk["kb_id"],
-                            position=chunk["position"],
-                            embedding_similarity=chunk["similarity"],
-                            graph_score=1.0,
-                            hybrid_score=chunk["similarity"],
-                            reason="Seed chunk (timeout fallback - no expansion)",
-                        )
-                        for chunk in seed_chunks
-                    ]
-
-                    context = RAGContext(
-                        query=query,
-                        chunks=retrieved_chunks,
-                        entity_mentions={},
-                        total_tokens=sum(
-                            len(c.text.split()) * 1.3 for c in retrieved_chunks
-                        ),
-                    )
-                    partial_result = True
-                    logger.info(
-                        f" Fallback: Returning {len(retrieved_chunks)} seed chunks (partial result)"
-                    )
-                else:
-                    # Even seed retrieval failed, return error
-                    logger.error(
-                        f" Seed retrieval also failed during timeout fallback"
-                    )
-                    return {
-                        "error": "RAG retrieval timed out (query too complex, seed retrieval also failed)",
-                        "answer": None,
-                        "sources": [],
-                    }
-            except Exception as fallback_e:
-                logger.error(f" Timeout fallback failed: {fallback_e}")
-                return {
-                    "error": "RAG retrieval timed out and fallback failed",
-                    "answer": None,
-                    "sources": [],
-                }
-        except Exception as e:
-            logger.error(f" RAG pipeline failed: {e}")
+"""
+
+RAG Service - Orchestrates RAG pipeline and LLM generation
+
+Phase 2 Step 4: Transforms retrieved context into generated answers
+
+"""
+
+
+
+import logging
+
+from typing import Optional
+
+from uuid import UUID
+
+import asyncio
+
+import hashlib
+
+import json
+
+import random
+
+from datetime import datetime, timedelta
+
+from dataclasses import dataclass, asdict
+
+
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+
+from .pipeline import RAGPipeline, RAGContext
+
+from ..knowledge_bases.repository import KnowledgeBaseRepository
+
+from ..agents.repository import AgentRepository
+
+from ..personalities.models import Personality
+
+from ...core.database import AsyncSessionLocal
+
+from ...core.embeddings import EmbeddingGenerator
+
+from ...core.llm.deepinfra_llm import DeepInfraLLMClient, LLMResponse
+
+from ...core.billing.utils import is_billing_enabled
+
+
+
+# Analytics Integration
+
+from ..analytics.repository import AnalyticsRepository
+
+from ..analytics.schemas import AnalyticsQueryLogCreate
+
+from ..analytics.models import ResponseStatus
+
+
+
+
+
+logger = logging.getLogger(__name__)
+
+
+
+
+
+# Simple in-memory cache for RAG results
+
+# Format: (query_hash, agent_id) -> (response, timestamp)
+
+# TTL: 300 seconds (5 minutes) - configurable
+
+_rag_cache = {}  # Dict[cache_key] -> (response, timestamp, insertion_order)
+
+_CACHE_TTL_SECONDS = 300
+
+_MAX_CACHE_SIZE = 1000  # Evict oldest entries if exceeded
+
+_CACHE_INSERTION_ORDER = []  # Track insertion order for LRU eviction
+
+_RAG_TIMEOUT_SECONDS = 30.0  # Professional timeout for remote AI calls + graph compute
+
+
+
+
+
+# Metrics tracking (optional, for analytics)
+
+@dataclass
+
+class RAGMetrics:
+
+    """Track RAG pipeline performance metrics"""
+
+
+
+    retrieval_latency_ms: float  # Time to retrieve context (seed + expansion)
+
+    ranking_latency_ms: float  # Time to score and rank
+
+    total_latency_ms: float  # Total pipeline time
+
+    cache_hit: bool  # Whether result came from cache
+
+    seed_chunks_count: int  # Number of seed chunks retrieved
+
+    expanded_chunks_count: int  # Number of chunks from graph expansion
+
+    final_chunks_count: int  # Number of chunks in final context
+
+    timeout_occurred: bool  # Whether timeout occurred
+
+    partial_result: bool  # Whether result is partial (timeout fallback)
+
+
+
+    def __post_init__(self):
+
+        """Validate metrics"""
+
+        if self.total_latency_ms < 0:
+
+            raise ValueError("Latency cannot be negative")
+
+
+
+
+
+_rag_metrics = []  # List of metrics for analytics
+
+
+
+
+
+class RAGService:
+
+    """
+
+    High-level RAG orchestration service.
+
+
+
+    Responsible for:
+
+    1. Validating query + KB ownership
+
+    2. Orchestrating RAG pipeline (retrieval)
+
+    3. Formatting context for LLM
+
+    4. Generating answers via LLM
+
+
+
+    MULTI-TENANCY:
+
+    - tenant_id passed at init (from middleware)
+
+    - KB ownership validated before retrieval
+
+    - All Neo4j queries validated against tenant_id
+
+    """
+
+
+
+    def __init__(self, db: AsyncSession, tenant_id: str):
+
+        """
+
+        Initialize RAG service for tenant.
+
+
+
+        Args:
+
+            db: Database session (for PostgreSQL KB retrieval)
+
+            tenant_id: Tenant UUID (from middleware, never from request)
+
+        """
+
+        self.db = db
+
+        self.tenant_id = str(tenant_id)
+
+
+
+        # Initialize core components
+
+        self.pipeline = RAGPipeline(self.tenant_id, db=self.db)
+
+        self.kb_repo = KnowledgeBaseRepository(db, self.tenant_id)
+
+        self.agent_repo = AgentRepository(db, self.tenant_id)
+
+        self.llm_client = DeepInfraLLMClient()
+
+
+
+    async def stream_rag_answer(
+
+        self,
+
+        query: str,
+
+        agent_id: str,
+
+        kb_id: str | list[str],
+
+        user_id: Optional[str] = None,
+
+        top_k: int = 10,
+
+        max_depth: int = 2,
+
+    ):
+
+        """
+
+        Stream answer using RAG pipeline (for WebSockets).
+
+        Yields chunks of text.
+
+        """
+
+        logger.info(f" RAG Service: Streaming answer for agent={agent_id}, kb={kb_id}")
+
+
+
+        # 1. Validate KB ownership
+
+        kb_ids = [kb_id] if isinstance(kb_id, str) else kb_id
+
+        
+
+        # We'll just verify the first one exists and belongs to the agent for security
+
+        # (The pipeline will filter by these IDs anyway)
+
+        kb = await self.kb_repo.get_by_id(kb_ids[0])
+
+        if not kb:
+
+            yield json.dumps({"error": f"Knowledge Base {kb_ids[0]} not found"})
+
+            return
+
+        if str(kb.agent_id) != str(agent_id):
+
+            yield json.dumps({"error": "Unauthorized: Agent does not own this Knowledge Base"})
+
+            return
+
+            
+
+        # Optional: Log if multiple KBs are being used
+
+        if len(kb_ids) > 1:
+
+            logger.info(f" Querying across {len(kb_ids)} Knowledge Bases for agent {agent_id}")
+
+
+
+        # Fetch Agent details for persona branding (system_prompt, description)
+
+        agent = await self.agent_repo.get_by_id(agent_id)
+
+        if not agent:
+
+            yield json.dumps({"error": f"Agent {agent_id} not found or inactive under the current tenant"})
+
+            return
+
+        
+
+        base_prompt = agent.system_prompt or ""
+
+        personality_description = agent.personality or "You are a warm, approachable, and supportive assistant." # Fallback
+
+
+
+        if agent.personality_id:
+
+            personality = await self.db.get(Personality, agent.personality_id)
+
+            if personality:
+
+                personality_description = personality.description or personality.name
+
+
+
+        injected_system_prompt = f"""
+
+[PERSONALITY MODE: STRICT]
+
+
+
+You MUST strictly follow the personality defined below.
+
+Every response MUST reflect this personality strongly in tone, wording, and structure.
+
+Deviation is NOT allowed.
+
+
+
+Personality Definition:
+
+{personality_description}
+
+
+
+Base Instruction:
+
+{base_prompt}
+
+
+
+Source Attribution & Citation Guidelines:
+When answering the user query, you MUST provide precise in-text citations attributing your statements to the specific source(s) from which the information was retrieved.
+- Each chunk in the context indicates its Source (e.g., "Source: Resume_Vishnu.pdf" or "Source: https://example.com").
+- Cite the source next to the information you present using in-text citations like "[Source: <source_name>]" (e.g., "[Source: Resume_Vishnu.pdf]").
+- Do not make up sources. Only cite sources explicitly listed in the context. If a fact comes from multiple sources, cite all of them.
+- If no source is mentioned or the information doesn't come from the knowledge base chunks, do not attribute any source.
+
+""".strip()
+
+
+
+        agent_persona = {
+
+            "name": agent.name if agent else "Assistant",
+
+            "personality": personality_description,
+
+            "system_prompt": injected_system_prompt
+
+        }
+
+
+
+        # 2. Retrieve Context (No cache for streaming for simplicity in Phase 1)
+
+        try:
+
+            context = await asyncio.wait_for(
+
+                self.pipeline.query(
+
+                    query=query,
+
+                    agent_id=agent_id,
+
+                    kb_id=kb_ids,
+
+                    user_id=user_id,
+
+                    top_k=top_k,
+
+                    max_depth=max_depth,
+
+                ),
+
+                timeout=_RAG_TIMEOUT_SECONDS,
+
+            )
+
+        except Exception as e:
+
+            logger.error(f"RAG Retrieval failed for stream: {e}")
+
+            yield json.dumps({"error": f"Retrieval failed: {str(e)}"})
+
+            return
+
+
+
+        # 3. Yield metadata first (sources)
+        for c in context.chunks:
+            logger.info(
+        f"Chunk={c.chunk_id} Source={c.source} Score={c.hybrid_score}"
+    )
+        metadata = {
+
+            "type": "metadata",
+
+            "sources": [
+
+                {  "chunk_id": c.chunk_id,
+            "source": c.source,
+            "score": round(c.hybrid_score, 3),
+            "position": c.position,
+            "reason": c.reason }
+
+                for c in context.chunks
+
+            ],
+
+            "triplets": [
+
+                {"subject": t["subject"], "predicate": t["predicate"], "object": t["object"]}
+
+                for t in (context.triplets or [])
+
+            ],
+
+            "kb_name": kb.name if len(kb_ids) == 1 else f"Multi-KB ({len(kb_ids)})",
+
+            "augmented_query": query
+
+        }
+
+        yield json.dumps(metadata)
+
+
+
+        # 3.5 Check for empty context
+
+        if not context or not context.chunks:
+
+            logger.info("Empty context retrieved for stream, returning fallback message.")
+
+            yield "Im sorry, but the requested information is not available within my current knowledge base. Please try a related query or provide additional context."
+
+            return
+
+
+
+        # 4. Stream chunks
+
+        formatted_context = self._format_context(context)
+
+        
+
+        # Track start time for latency
+
+        start_time = datetime.now()
+
+        full_answer = []
+
+        
+
+        async for chunk in self.llm_client.stream_answer(
+
+            query, 
+
+            formatted_context, 
+
+            agent_persona=agent_persona
+
+        ):
+
+            full_answer.append(chunk)
+
+            yield chunk
+
+
+
+        # 5. ASYNC LOGGING (Background)
+
+        # Log to analytics in background to avoid blocking the stream completion
+
+        latency_ms = (datetime.now() - start_time).total_seconds() * 1000
+
+        confidence = sum(c.hybrid_score for c in context.chunks) / len(context.chunks) if context.chunks else 0.0
+
+        status = ResponseStatus.SUCCESS if context.chunks else ResponseStatus.UNANSWERED
+
+        
+
+        try:
+
+            analytics_repo = AnalyticsRepository(self.db, UUID(self.tenant_id))
+
+            await analytics_repo.create_query_log({
+
+                "query": query,
+
+                "response_status": status,
+
+                "confidence_score": confidence,
+
+                "latency_ms": latency_ms
+
+            })
+
+            await self.db.commit()
+
+        except Exception as ae:
+
+            logger.warning(f" Failed to log analytics for stream: {ae}")
+
+
+
+    async def generate_answer(
+
+        self,
+
+        query: str,
+
+        agent_id: str,
+
+        kb_id: str | list[str],
+
+        user_id: Optional[str] = None,
+
+        top_k: int = 10,
+
+        max_depth: int = 2,
+
+        reasoning_enabled: bool = True,
+
+        memory_enabled: bool = True,
+
+    ) -> dict:
+
+        """
+
+        Generate answer to query using RAG pipeline.
+
+
+
+        FLOW:
+
+        1. Check result cache (query, agent_id)  if hit, return cached
+
+        2. Validate KB ownership (agent_id owns KB)
+
+        3. Execute RAG pipeline with timeout (max 2 seconds)
+
+        4. Format context for LLM
+
+        5. Generate answer
+
+        6. Cache result before return
+
+        7. Return answer + source annotations
+
+
+
+        IMPROVEMENTS (Phase 2 Step 4 optimizations):
+
+        -  Result caching: Avoid recomputing identical queries
+
+        -  Timeout guard: Prevent slow queries from blocking
+
+        -  Source attribution: Show why each chunk was retrieved
+
+
+
+        Args:
+
+            query: User query string
+
+            agent_id: Agent UUID (ownership verification)
+
+            kb_id: Knowledge Base UUID
+
+            user_id: User UUID (for personalized memory retrieval)
+
+            top_k: Initial seed chunks
+
+            max_depth: Graph expansion depth
+
+
+
+        Returns:
+
+            Dict with:
+
+            - answer (str): Generated answer
+
+            - sources (list): [{"chunk_id": str, "score": float, "position": int, "reason": str}, ...]
+
+            - context (dict): Retrieved context metadata
+
+            - stats (dict): Pipeline statistics
+
+        """
+
+        logger.info(
+
+            f" RAG Service: Generating answer for agent={agent_id}, kb={kb_id}"
+
+        )
+
+        start_time_total = datetime.now()
+
+
+
+        # ============= STEP 1: VALIDATION: KB ownership (required for cache key with version) =============
+
+        kb_ids = [kb_id] if isinstance(kb_id, str) else kb_id
+
+        
+
+        logger.debug("Validating KB ownership...")
+
+        kb = await self.kb_repo.get_by_id(kb_ids[0])
+
+        if not kb:
+
+            logger.error(f" KB {kb_ids[0]} not found")
+
+            return {
+
+                "error": f"Knowledge Base {kb_ids[0]} not found",
+
+                "answer": None,
+
+                "sources": [],
+
+            }
+
+
+
+        if str(kb.agent_id) != str(agent_id):
+
+            logger.error(f" Agent {agent_id} does not own KB {kb_ids[0]}")
+
+            return {
+
+                "error": "Unauthorized: Agent does not own this Knowledge Base",
+
+                "answer": None,
+
+                "sources": [],
+
+            }
+
+
+
+        logger.info(f" KB ownership verified: {kb.name}")
+
+
+
+        # Fetch Agent details for persona branding (system_prompt, description)
+
+        agent = await self.agent_repo.get_by_id(agent_id)
+
+        if not agent:
+
+            logger.error(f" Agent {agent_id} not found or inactive under the current tenant")
+
+            return {
+
+                "error": f"Agent {agent_id} not found or inactive under the current tenant",
+
+                "answer": None,
+
+                "sources": [],
+
+            }
+
+        
+
+        base_prompt = agent.system_prompt or ""
+
+        personality_description = agent.personality or "You are a warm, approachable, and supportive assistant." # Fallback
+
+
+
+        if agent.personality_id:
+
+            personality = await self.db.get(Personality, agent.personality_id)
+
+            if personality:
+
+                personality_description = personality.description or personality.name
+
+
+
+        injected_system_prompt = f"""
+
+[PERSONALITY MODE: STRICT]
+
+
+
+You MUST strictly follow the personality defined below.
+
+Every response MUST reflect this personality strongly in tone, wording, and structure.
+
+Deviation is NOT allowed.
+
+
+
+Personality Definition:
+
+{personality_description}
+
+
+
+Base Instruction:
+
+{base_prompt}
+
+
+
+Source Attribution & Citation Guidelines:
+When answering the user query, you MUST provide precise in-text citations attributing your statements to the specific source(s) from which the information was retrieved.
+- Each chunk in the context indicates its Source (e.g., "Source: Resume_Vishnu.pdf" or "Source: https://example.com").
+- Cite the source next to the information you present using in-text citations like "[Source: <source_name>]" (e.g., "[Source: Resume_Vishnu.pdf]").
+- Do not make up sources. Only cite sources explicitly listed in the context. If a fact comes from multiple sources, cite all of them.
+- If no source is mentioned or the information doesn't come from the knowledge base chunks, do not attribute any source.
+
+""".strip()
+
+
+
+        agent_persona = {
+
+            "name": agent.name if agent else "Assistant",
+
+            "personality": personality_description,
+
+            "system_prompt": injected_system_prompt
+
+        }
+
+
+
+        # ============= STEP 2: CHECK CACHE (with KB version for auto-invalidation) =============
+
+        logger.debug("Checking result cache...")
+
+        cache_key = self._make_cache_key(
+
+            query, agent_id, "|".join(kb_ids), kb_version=kb.total_chunks
+
+        )
+
+        cached_response = self._get_cached_response(cache_key)
+
+        if cached_response:
+
+            logger.info(
+
+                f" Cache HIT: Returning cached result (KB version: {kb.total_chunks})"
+
+            )
+
+            # Track cache hit metric
+
+            self._track_metrics(
+
+                cache_hit=True,
+
+                seed_chunks_count=len(cached_response.get("sources", [])),
+
+            )
+
+            return cached_response
+
+
+
+        # ============= STEP 3: RETRIEVE CONTEXT VIA RAG PIPELINE (WITH TIMEOUT) =============
+
+        logger.debug("Executing RAG pipeline (timeout=2.0s)...")
+
+        context = None
+
+        partial_result = False
+
+        try:
+
+            # TIMEOUT GUARD: Prevent slow queries from blocking
+
+            # If query takes >RAG_TIMEOUT_SECONDS, timeout and return partial result (seed chunks only)
+
+            context = await asyncio.wait_for(
+
+                self.pipeline.query(
+
+                    query=query,
+
+                    agent_id=agent_id,
+
+                    kb_id=kb_id,
+
+                    user_id=user_id,
+
+                    top_k=top_k,
+
+                    max_depth=max_depth,
+
+                ),
+
+                timeout=_RAG_TIMEOUT_SECONDS,
+
+            )
+
+        except asyncio.TimeoutError:
+
+            logger.warning(
+
+                f" RAG pipeline timed out (>{_RAG_TIMEOUT_SECONDS}s). Returning seed chunks only (partial fallback)..."
+
+            )
+
+
+
+            # PARTIAL FALLBACK: Return seed chunks to avoid complete error
+
+            # Seed retrieval should be fast (<100ms), so this should succeed
+
+            try:
+
+                query_embedding = await EmbeddingGenerator.generate_embedding(query)
+
+                seed_chunks = await self.pipeline._retrieve_seed_chunks(
+
+                    kb_ids=kb_ids,
+
+                    query_embedding=query_embedding,
+
+                    top_k=top_k,
+
+                )
+
+
+
+                if seed_chunks:
+
+                    # Build minimal context from seed chunks only
+
+                    retrieved_chunks = [
+
+                        self.pipeline.RetrievedChunk(
+
+                            chunk_id=chunk["chunk_id"],
+
+                            text=chunk["text"],
+
+                            kb_id=chunk["kb_id"],
+
+                            position=chunk["position"],
+
+                            embedding_similarity=chunk["similarity"],
+
+                            graph_score=1.0,
+
+                            hybrid_score=chunk["similarity"],
+
+                            reason="Seed chunk (timeout fallback - no expansion)",
+
+                        )
+
+                        for chunk in seed_chunks
+
+                    ]
+
+
+
+                    context = RAGContext(
+
+                        query=query,
+
+                        chunks=retrieved_chunks,
+
+                        entity_mentions={},
+
+                        total_tokens=sum(
+
+                            len(c.text.split()) * 1.3 for c in retrieved_chunks
+
+                        ),
+
+                    )
+
+                    partial_result = True
+
+                    logger.info(
+
+                        f" Fallback: Returning {len(retrieved_chunks)} seed chunks (partial result)"
+
+                    )
+
+                else:
+
+                    # Even seed retrieval failed, return error
+
+                    logger.error(
+
+                        f" Seed retrieval also failed during timeout fallback"
+
+                    )
+
+                    return {
+
+                        "error": "RAG retrieval timed out (query too complex, seed retrieval also failed)",
+
+                        "answer": None,
+
+                        "sources": [],
+
+                    }
+
+            except Exception as fallback_e:
+
+                logger.error(f" Timeout fallback failed: {fallback_e}")
+
+                return {
+
+                    "error": "RAG retrieval timed out and fallback failed",
+
+                    "answer": None,
+
+                    "sources": [],
+
+                }
+
+        except Exception as e:
+
+            logger.error(f" RAG pipeline failed: {e}")
+
             return {
                 "error": f"RAG retrieval failed: {str(e)}",
                 "answer": None,
@@ -540,538 +1012,1075 @@ Base Instruction:
             }
             
         if is_social and (not context or not context.chunks):
-            logger.info("Social query detected with empty context, proceeding to LLM for conversational response.")
-        # ============= STEP 4: FORMAT CONTEXT FOR LLM =============
-        logger.debug("Formatting context for LLM...")
-        formatted_context = self._format_context(context)
-        logger.info(
-            f" Context formatted: {len(context.chunks)} chunks, {context.total_tokens} tokens"
-        )
-
-        # ============= STEP 5: GENERATE ANSWER =============
-        logger.debug("Generating answer...")
-        llm_response = await self._generate_answer_llm(
-            query=query,
-            context=formatted_context,
-            tenant_id=self.tenant_id,
-            agent_id=agent_id,
-            agent_persona=agent_persona,
-        )
-        answer = llm_response.answer
-        logger.info(
-            f" Answer generated ({len(answer) // 4} words, {llm_response.total_tokens} tokens, ${llm_response.cost_estimate:.6f})"
-        )
-
-        # ============= STEP 6: BUILD RESPONSE WITH SOURCES (WITH ATTRIBUTION) =============
-        sources = [
-            {
-                "chunk_id": chunk.chunk_id,
-                "score": chunk.hybrid_score,
-                "position": chunk.position,
-                "reason": chunk.reason,  # Why this chunk was retrieved
-            }
-            for chunk in context.chunks
-        ]
-
-        # ============= STEP 6: CALCULATE PRODUCT DASHBOARD METRICS (confidence, nodes, reasoning) =============
-        nodes_used = len(context.chunks) + len(context.entity_mentions)
-        
-        # Confidence: average hybrid score of chunks (0 if none)
-        confidence = sum(c.hybrid_score for c in context.chunks) / len(context.chunks) if context.chunks else 0.0
-        
-        # Reasoning path: explain what just happened in plain english
-        seed_count = sum(1 for c in context.chunks if "seed" in c.reason.lower())
-        exp_count = sum(1 for c in context.chunks if "expanded" in c.reason.lower())
-        
-        if nodes_used == 0:
-            reasoning_path = "No relevant knowledge found in graph to answer this question."
-        else:
-            reasoning_path = f"Found {seed_count} semantic seed chunks. Expanded via graph relationships to find {exp_count} additional chunks and {len(context.entity_mentions)} relevant entities."
-
-        response = {
-            "answer": answer,
-            "sources": sources,
-            "context": {
-                "kb_id": kb_id,
-                "kb_name": kb.name if len(kb_ids) == 1 else "Multi-Source Context",
-                "chunks_used": len(context.chunks),
-                "entities_mentioned": list(context.entity_mentions.keys()),
-                "reasoning_path": reasoning_path,
-                "augmented_query": query,
-            },
-            "stats": {
-                "total_chunks": len(context.chunks),
-                "total_tokens": int(context.total_tokens),
-                "entity_count": len(context.entity_mentions),
-                "llm_tokens": llm_response.total_tokens,
-                "llm_source": llm_response.source,
-                "llm_prompt_version": llm_response.prompt_version,
-                "search_strategy": context.search_type,
-            },
-            "confidence": confidence,
-            "nodes_used": nodes_used,
-            "reasoning_path": reasoning_path if reasoning_enabled else "Reasoning path hidden by user request.",
-        }
-
-        # Add billing info only if billing is enabled (feature flag)
-        if is_billing_enabled():
-            response["stats"]["llm_cost_estimate"] = round(
-                llm_response.cost_estimate, 6
-            )
-
-        logger.info(f" RAG complete: {len(context.chunks)} chunks  answer")
-
-        # ============= STEP 6.5: LOG TO ANALYTICS (PERSISTENT) =============
-        try:
-            analytics_repo = AnalyticsRepository(self.db, UUID(self.tenant_id))
-            await analytics_repo.create_query_log({
-                "query": query,
-                "response_status": ResponseStatus.SUCCESS if context.chunks else ResponseStatus.UNANSWERED,
-                "confidence_score": confidence,
-                "latency_ms": (datetime.now() - start_time_total).total_seconds() * 1000
-            })
-            # Note: We don't commit here, we let the caller or Step 9 handle it
-            # Actually, RAGService should probably commit its own analytics if it's independent
-        except Exception as ae:
-            logger.warning(f" Failed to log query to analytics: {ae}")
-
-        # ============= STEP 7: CACHE RESULT (FOR REPEATED QUERIES) =============
-        self._cache_response(cache_key, response)
-        logger.debug(f" Cached result (TTL={_CACHE_TTL_SECONDS}s)")
-
-        # ============= STEP 8: SAMPLE LOGGING (1 in 50 QUERIES) =============
-        # Log query + result summary at low rate (~2%) for debugging
-        # Helps understand real user behavior & improve retrieval
-        if random.random() < 0.02:  # ~1 in 50 queries
-            logger.info(
-                f" SAMPLE: query={query[:60]}... | "
-                f"chunks={len(context.chunks)} | "
-                f"answer={answer[:80]}..."
-            )
-
-        return response
-
-    def _make_cache_key(
-        self, query: str, agent_id: str, kb_id: str, kb_version: int = 0
-    ) -> str:
-        """
-        Create cache key from query parameters with KB version for auto-invalidation.
-
-        Uses hash to keep key compact and avoid sensitive data exposure.
-
-        CACHE INVALIDATION ON KB UPDATE:
-         kb_version = KB.total_chunks (increases every ingestion)
-         When KB updated: cache key changes  cache miss
-         No stale responses after KB updates
-         Transparent invalidation (no manual cache clearing)
-
-        Args:
-            query: User query
-            agent_id: Agent UUID
-            kb_id: KB UUID
-            kb_version: KB version hint (typically total_chunks count)
-
-        Returns:
-            Cache key string
-        """
-        # Include kb_version to allow per-KB-version caching
-        # When KB is updated (chunks added), version changes  cache invalidates
-        key_str = f"{query}|{agent_id}|{kb_id}|v{kb_version}"
-        return hashlib.sha256(key_str.encode()).hexdigest()
-
-    def _get_cached_response(self, cache_key: str) -> Optional[dict]:
-        """
-        Retrieve cached response if not expired.
-
-        Args:
-            cache_key: Cache key from _make_cache_key()
-
-        Returns:
-            Cached response dict, or None if not found / expired
-        """
-        if cache_key not in _rag_cache:
-            return None
-
-        response, timestamp = _rag_cache[cache_key]
-
-        # Check TTL
-        age = (datetime.now() - timestamp).total_seconds()
-        if age > _CACHE_TTL_SECONDS:
-            logger.debug(f"  Cache expired (age={age:.0f}s)")
-            del _rag_cache[cache_key]
-            return None
-
-        logger.debug(f" Cache valid (age={age:.0f}s, TTL={_CACHE_TTL_SECONDS}s)")
-        return response
-
-    def _cache_response(self, cache_key: str, response: dict) -> None:
-        """
-        Store response in cache with LRU eviction.
-
-        MAX_CACHE_SIZE: Evict oldest entries if exceeded
-        Prevents memory creep in long-running service
-
-        Args:
-            cache_key: Cache key from _make_cache_key()
-            response: Response dict to cache
-        """
-        global _CACHE_INSERTION_ORDER
-
-        _rag_cache[cache_key] = (response, datetime.now())
-
-        # Track insertion order for LRU eviction
-        if cache_key not in _CACHE_INSERTION_ORDER:
-            _CACHE_INSERTION_ORDER.append(cache_key)
-
-        # Evict oldest if exceeded MAX_CACHE_SIZE
-        while len(_rag_cache) > _MAX_CACHE_SIZE:
-            oldest_key = _CACHE_INSERTION_ORDER.pop(0)
-            if oldest_key in _rag_cache:
-                del _rag_cache[oldest_key]
-                logger.debug(
-                    f"  Evicted oldest cache entry (cache size > {_MAX_CACHE_SIZE})"
-                )
-
-        # Log cache size (for monitoring)
-        if len(_rag_cache) % 50 == 0:
-            logger.info(f" Cache size: {len(_rag_cache)}/{_MAX_CACHE_SIZE} entries")
-
-    def _format_context(self, context: RAGContext) -> str:
-        """
-        Format retrieved context for LLM input.
-
-        Includes chunk text with position markers and entity mentions.
-
-        Args:
-            context: RAG context with chunks and entities
-
-        Returns:
-            Formatted context string
-        """
-        context_text = f"QUERY: {context.query}\n" + "=" * 60 + "\nCONTEXT (from Knowledge Base):\n"
-
-        # Add chunks with position
-        for i, chunk in enumerate(context.chunks, 1):
-            context_text += f"\n[Chunk {i}/{len(context.chunks)} - Position {chunk.position}]"
-            context_text += f"\nScore: {chunk.hybrid_score:.3f} (Semantic: {chunk.embedding_similarity:.3f}, Graph: {chunk.graph_score:.3f})"
-            context_text += f"\n{'-' * 40}\n{chunk.text}\n"
-
-        # Add entity mentions summary
-        if context.entity_mentions:
-            context_text += "\n" + "=" * 60 + "\nENTITIES MENTIONED:\n"
-            for entity, chunk_ids in context.entity_mentions.items():
-                context_text += f"- {entity} (mentioned in {len(chunk_ids)} chunks)\n"
-
-        # Phase 4A: Add triplet-derived knowledge graph relationships
-        if context.triplet_context:
-            context_text += f"\n[KNOWLEDGE GRAPH RELATIONSHIPS]:\n{context.triplet_context}\n"
-
-        if context.personal_memories:
-            pm_text = "\n".join([f"- {m}" for m in context.personal_memories])
-            context_text += f"\n[USER PERSONAL PREFERENCES & HABITS]:\n{pm_text}\n"
-
-        return context_text
-
-    async def process_feedback(self, chunk_ids: list[str], rating: int) -> None:
-        """
-        Process user feedback and update graph node weights.
-        Positive feedback (+1) increases weight by 0.1
-        Negative feedback (-1) decreases weight by 0.1
-        """
-        if not chunk_ids:
-            return
-            
-        weight_delta = 0.1 if rating > 0 else -0.1
-        
-        query = """
-        UNWIND $chunk_ids AS chunk_id
-        MATCH (c:Chunk {id: chunk_id, tenant_id: $tenant_id})
-        // Cap the weight between 0.1 and 2.0 to prevent runaway scoring
-        SET c.weight = CASE 
-            WHEN coalesce(c.weight, 1.0) + $delta > 2.0 THEN 2.0
-            WHEN coalesce(c.weight, 1.0) + $delta < 0.1 THEN 0.1
-            ELSE coalesce(c.weight, 1.0) + $delta 
-        END
-        """
-        
-        try:
-            await self.pipeline.neo4j_repo.execute_write(
-                query,
-                {
-                    "chunk_ids": chunk_ids,
-                    "tenant_id": self.tenant_id,
-                    "delta": weight_delta
-                }
-            )
-            logger.info(f" Updated feedback weight ({weight_delta}) for {len(chunk_ids)} chunks")
-        except Exception as e:
-            logger.error(f" Failed to update feedback weights: {e}")
-            raise
-
-    async def _generate_answer_llm(
-        self,
-        query: str,
-        context: str,
-        tenant_id: str,
-        agent_id: str,
-        agent_persona: Optional[dict] = None,
-    ) -> LLMResponse:
-        """
-        AI-driven answer generation (Phase 3).
-
-        1. Call DeepInfra API via specialized client
-        2. On success: Return AI-generated answer with metrics
-        3. On failure: Fallback to template-based answer (graceful degradation)
-        4. Track costs per tenant/agent for multi-tenant billing
-
-        MULTI-TENANCY:
-        - LLM client tracks costs per tenant (for billing)
-        - Context already filtered by tenant (from RAG pipeline)
-        - No data leakage possible
-
-        Args:
-            query: Original user query
-            context: Formatted context (already tenant-filtered)
-            tenant_id: Tenant UUID (for cost tracking)
-            agent_id: Agent UUID (for usage analytics)
-            agent_persona: Agent name, description, system_prompt (optional)
-
-        Returns:
-            LLMResponse: Response with answer + metrics (tokens, cost, version, source)
-        """
-        # Attempt Phase 3: Real LLM generation via DeepInfra
-        logger.debug("Attempting Phase 3: DeepInfra LLM generation...")
-        try:
-            llm_response = await self.llm_client.generate_answer(
-                query=query,
-                context=context,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                agent_persona=agent_persona,
-            )
-            logger.info(
-                f" Phase 3 SUCCESS: Generated answer via DeepInfra LLM (tokens={llm_response.total_tokens})"
-            )
-            return llm_response
-
-        except Exception as e:
-            # Fallback: If LLM generation fails, use template-based answer
-            logger.warning(
-                f"  Phase 3 failed ({e}). Falling back to Phase 2 template-based generation..."
-            )
-            return self._generate_answer_template(query, context, tenant_id, agent_id)
-
-    def _generate_answer_template(
-        self, query: str, context: str, tenant_id: str, agent_id: str
-    ) -> LLMResponse:
-        """
-        Generate answer using template (Phase 2 fallback).
-
-        Used when:
-        - LLM API is down
-        - Rate limited
-        - Timeout
-        - Any other failure
-
-        Provides graceful degradation (never fail without answer).
-        Tracks fallback usage per tenant/agent for billing.
-
-        Args:
-            query: User query
-            context: Formatted context
-            tenant_id: Tenant UUID (for cost tracking)
-            agent_id: Agent UUID (for usage analytics)
-
-        Returns:
-            LLMResponse: Template-based answer (source="Template", no token cost)
-        """
-        logger.debug("Using Phase 2: Template-based answer generation (FALLBACK)")
-
-        # Extract key information from context
-        lines = context.split("\n")
-        relevant_lines = [
-            line for line in lines if line.strip() and not line.startswith("[")
-        ]
-
-        # Build answer from context
-        answer_parts = [
-            f"Based on the knowledge base, here's what I found:\n\n",
-        ]
-
-        # Add first 2-3 chunks as main answer
-        chunk_count = 0
-        for line in relevant_lines:
-            if line.startswith("Chunk") or line.startswith("Score"):
-                chunk_count += 1
-                continue
-            if line.startswith("-"):
-                answer_parts.append(f" {line[1:].strip()}\n")
-            elif line.strip() and chunk_count < 3:
-                answer_parts.append(line + "\n")
-
-        answer = "".join(answer_parts)
-
-        return LLMResponse(
-            answer=answer or "No answer could be generated from the knowledge base.",
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            cost_estimate=0.0,
-            prompt_version="v1",
-            source="Template",
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-        )
-
-    def _track_metrics(
-        self,
-        cache_hit: bool = False,
-        seed_chunks_count: int = 0,
-        expanded_chunks_count: int = 0,
-        final_chunks_count: int = 0,
-        timeout_occurred: bool = False,
-        partial_result: bool = False,
-        retrieval_latency_ms: float = 0.0,
-        ranking_latency_ms: float = 0.0,
-        total_latency_ms: float = 0.0,
-    ) -> None:
-        """
-        Track RAG pipeline metrics for analytics.
-
-        METRICS FOR PRODUCT INSIGHTS:
-         retrieval_latency_ms: Time to retrieve seed + expand graph
-         cache_hit: Whether result came from cache (reduces latency)
-         seed_chunks_count: Number of semantic search results
-         expanded_chunks_count: Chunks added via graph expansion
-         timeout_occurred: If query exceeded 2s timeout
-         partial_result: If fallback seed-only result was returned
-         total_latency_ms: End-to-end time including formatting
-
-        INSIGHTS ENABLED:
-          Identify slow queries (outliers)
-          Cache effectiveness (hit rate)
-          Graph expansion value (expanded vs seed)
-          Timeout patterns (which KBs/queries timeout)
-          Optimization opportunities
-          Usage patterns & trends
-
-        Args:
-            cache_hit: Whether cache returned result
-            seed_chunks_count: Number of seed chunks
-            expanded_chunks_count: Number of expanded chunks
-            final_chunks_count: Number of chunks in context
-            timeout_occurred: If timeout happened
-            partial_result: If fallback fallback was used
-            retrieval_latency_ms: Retrieval time
-            ranking_latency_ms: Scoring/ranking time
-            total_latency_ms: Total end-to-end time
-        """
-        try:
-            metric = RAGMetrics(
-                retrieval_latency_ms=retrieval_latency_ms,
-                ranking_latency_ms=ranking_latency_ms,
-                total_latency_ms=total_latency_ms,
-                cache_hit=cache_hit,
-                seed_chunks_count=seed_chunks_count,
-                expanded_chunks_count=expanded_chunks_count,
-                final_chunks_count=final_chunks_count,
-                timeout_occurred=timeout_occurred,
-                partial_result=partial_result,
-            )
-
-            _rag_metrics.append(metric)
-
-            # Log every 10 metrics
-            if len(_rag_metrics) % 10 == 0:
-                self._log_metrics_summary()
-        except Exception as e:
-            logger.warning(f" Failed to track metrics: {e}")
-
-    def _log_metrics_summary(self) -> None:
-        """
-        Log summary of recent metrics for monitoring.
-
-        Used for:
-         Performance dashboards
-         Alerting on slow queries
-         Cache effectiveness tracking
-         Product insights
-        """
-        if not _rag_metrics or len(_rag_metrics) < 10:
-            return
-
-        recent = _rag_metrics[-10:]
-
-        # Calculate averages
-        avg_latency = sum(m.total_latency_ms for m in recent) / len(recent)
-        cache_hit_rate = sum(1 for m in recent if m.cache_hit) / len(recent)
-        timeout_count = sum(1 for m in recent if m.timeout_occurred)
-        partial_count = sum(1 for m in recent if m.partial_result)
-        avg_expanded = sum(m.expanded_chunks_count for m in recent) / len(recent)
-
-        logger.info(
-            f" RAG Metrics (last 10): "
-            f"latency={avg_latency:.0f}ms, "
-            f"cache_hit_rate={cache_hit_rate:.0%}, "
-            f"timeouts={timeout_count}, "
-            f"partial_results={partial_count}, "
-            f"avg_expanded_chunks={avg_expanded:.1f}"
-        )
-
-    def get_metrics(self) -> list:
-        """
-        Retrieve all tracked metrics.
-
-        Returns:
-            List of RAGMetrics objects (for external analytics)
-        """
-        return _rag_metrics.copy()
-
-    def clear_metrics(self) -> None:
-        """Clear metrics (for testing or periodic cleanup)"""
-        global _rag_metrics
-        _rag_metrics.clear()
-        logger.info(" Metrics cleared")
-
-    def get_health_metrics(self) -> dict:
-        """
-        Get health metrics for monitoring endpoint.
-
-        Returns metrics useful for /rag/health endpoint:
-        - avg_latency: Average total latency in milliseconds
-        - cache_hit_rate: Percentage of cache hits
-        - total_queries: Total number of queries tracked
-        - cache_size: Current cache size
-        - timeout_rate: Percentage of queries that timed out
-        - partial_result_rate: Percentage using fallback
-
-        Returns:
-            Dict with health metrics
-        """
-        if not _rag_metrics:
-            return {
-                "avg_latency_ms": 0.0,
-                "cache_hit_rate": 0.0,
-                "total_queries": 0,
-                "cache_size": len(_rag_cache),
-                "timeout_rate": 0.0,
-                "partial_result_rate": 0.0,
-            }
-
-        total = len(_rag_metrics)
-        avg_latency = sum(m.total_latency_ms for m in _rag_metrics) / total
-        cache_hits = sum(1 for m in _rag_metrics if m.cache_hit)
-        cache_hit_rate = cache_hits / total if total > 0 else 0.0
-        timeouts = sum(1 for m in _rag_metrics if m.timeout_occurred)
-        timeout_rate = timeouts / total if total > 0 else 0.0
-        partials = sum(1 for m in _rag_metrics if m.partial_result)
-        partial_rate = partials / total if total > 0 else 0.0
-
-        return {
-            "avg_latency_ms": round(avg_latency, 2),
-            "cache_hit_rate": f"{cache_hit_rate:.0%}",
-            "total_queries": total,
-            "cache_size": len(_rag_cache),
-            "timeout_rate": f"{timeout_rate:.1%}",
-            "partial_result_rate": f"{partial_rate:.1%}",
-        }
+            logger.info("Social query detected with empty context, proceeding to LLM for conversational response.")
+
+        # ============= STEP 4: FORMAT CONTEXT FOR LLM =============
+
+        logger.debug("Formatting context for LLM...")
+
+        formatted_context = self._format_context(context)
+
+        logger.info(
+
+            f" Context formatted: {len(context.chunks)} chunks, {context.total_tokens} tokens"
+
+        )
+
+
+
+        # ============= STEP 5: GENERATE ANSWER =============
+
+        logger.debug("Generating answer...")
+
+        llm_response = await self._generate_answer_llm(
+
+            query=query,
+
+            context=formatted_context,
+
+            tenant_id=self.tenant_id,
+
+            agent_id=agent_id,
+
+            agent_persona=agent_persona,
+
+        )
+
+        answer = llm_response.answer
+
+        logger.info(
+
+            f" Answer generated ({len(answer) // 4} words, {llm_response.total_tokens} tokens, ${llm_response.cost_estimate:.6f})"
+
+        )
+
+
+
+        # ============= STEP 6: BUILD RESPONSE WITH SOURCES (WITH ATTRIBUTION) =============
+
+        sources = [
+
+            {
+
+                "chunk_id": chunk.chunk_id,
+
+                "score": chunk.hybrid_score,
+
+                "position": chunk.position,
+
+                "reason": chunk.reason,  # Why this chunk was retrieved
+                
+                "source": chunk.source,
+
+            }
+
+            for chunk in context.chunks
+
+        ]
+
+
+
+        # ============= STEP 6: CALCULATE PRODUCT DASHBOARD METRICS (confidence, nodes, reasoning) =============
+
+        nodes_used = len(context.chunks) + len(context.entity_mentions)
+
+        
+
+        # Confidence: average hybrid score of chunks (0 if none)
+
+        confidence = sum(c.hybrid_score for c in context.chunks) / len(context.chunks) if context.chunks else 0.0
+
+        
+
+        # Reasoning path: explain what just happened in plain english
+
+        seed_count = sum(1 for c in context.chunks if "seed" in c.reason.lower())
+
+        exp_count = sum(1 for c in context.chunks if "expanded" in c.reason.lower())
+
+        
+
+        if nodes_used == 0:
+
+            reasoning_path = "No relevant knowledge found in graph to answer this question."
+
+        else:
+
+            reasoning_path = f"Found {seed_count} semantic seed chunks. Expanded via graph relationships to find {exp_count} additional chunks and {len(context.entity_mentions)} relevant entities."
+
+
+
+        response = {
+
+            "answer": answer,
+
+            "sources": sources,
+
+            "context": {
+
+                "kb_id": kb_id,
+
+                "kb_name": kb.name if len(kb_ids) == 1 else "Multi-Source Context",
+
+                "chunks_used": len(context.chunks),
+
+                "entities_mentioned": list(context.entity_mentions.keys()),
+
+                "reasoning_path": reasoning_path,
+
+                "augmented_query": query,
+
+            },
+
+            "stats": {
+
+                "total_chunks": len(context.chunks),
+
+                "total_tokens": int(context.total_tokens),
+
+                "entity_count": len(context.entity_mentions),
+
+                "llm_tokens": llm_response.total_tokens,
+
+                "llm_source": llm_response.source,
+
+                "llm_prompt_version": llm_response.prompt_version,
+
+                "search_strategy": context.search_type,
+
+            },
+
+            "confidence": confidence,
+
+            "nodes_used": nodes_used,
+
+            "reasoning_path": reasoning_path if reasoning_enabled else "Reasoning path hidden by user request.",
+
+        }
+
+
+
+        # Add billing info only if billing is enabled (feature flag)
+
+        if is_billing_enabled():
+
+            response["stats"]["llm_cost_estimate"] = round(
+
+                llm_response.cost_estimate, 6
+
+            )
+
+
+
+        logger.info(f" RAG complete: {len(context.chunks)} chunks  answer")
+
+
+
+        # ============= STEP 6.5: LOG TO ANALYTICS (PERSISTENT) =============
+
+        try:
+
+            analytics_repo = AnalyticsRepository(self.db, UUID(self.tenant_id))
+
+            await analytics_repo.create_query_log({
+
+                "query": query,
+
+                "response_status": ResponseStatus.SUCCESS if context.chunks else ResponseStatus.UNANSWERED,
+
+                "confidence_score": confidence,
+
+                "latency_ms": (datetime.now() - start_time_total).total_seconds() * 1000
+
+            })
+
+            # Note: We don't commit here, we let the caller or Step 9 handle it
+
+            # Actually, RAGService should probably commit its own analytics if it's independent
+
+        except Exception as ae:
+
+            logger.warning(f" Failed to log query to analytics: {ae}")
+
+
+
+        # ============= STEP 7: CACHE RESULT (FOR REPEATED QUERIES) =============
+
+        self._cache_response(cache_key, response)
+
+        logger.debug(f" Cached result (TTL={_CACHE_TTL_SECONDS}s)")
+
+
+
+        # ============= STEP 8: SAMPLE LOGGING (1 in 50 QUERIES) =============
+
+        # Log query + result summary at low rate (~2%) for debugging
+
+        # Helps understand real user behavior & improve retrieval
+
+        if random.random() < 0.02:  # ~1 in 50 queries
+
+            logger.info(
+
+                f" SAMPLE: query={query[:60]}... | "
+
+                f"chunks={len(context.chunks)} | "
+
+                f"answer={answer[:80]}..."
+
+            )
+
+
+
+        return response
+
+
+
+    def _make_cache_key(
+
+        self, query: str, agent_id: str, kb_id: str, kb_version: int = 0
+
+    ) -> str:
+
+        """
+
+        Create cache key from query parameters with KB version for auto-invalidation.
+
+
+
+        Uses hash to keep key compact and avoid sensitive data exposure.
+
+
+
+        CACHE INVALIDATION ON KB UPDATE:
+
+         kb_version = KB.total_chunks (increases every ingestion)
+
+         When KB updated: cache key changes  cache miss
+
+         No stale responses after KB updates
+
+         Transparent invalidation (no manual cache clearing)
+
+
+
+        Args:
+
+            query: User query
+
+            agent_id: Agent UUID
+
+            kb_id: KB UUID
+
+            kb_version: KB version hint (typically total_chunks count)
+
+
+
+        Returns:
+
+            Cache key string
+
+        """
+
+        # Include kb_version to allow per-KB-version caching
+
+        # When KB is updated (chunks added), version changes  cache invalidates
+
+        key_str = f"{query}|{agent_id}|{kb_id}|v{kb_version}"
+
+        return hashlib.sha256(key_str.encode()).hexdigest()
+
+
+
+    def _get_cached_response(self, cache_key: str) -> Optional[dict]:
+
+        """
+
+        Retrieve cached response if not expired.
+
+
+
+        Args:
+
+            cache_key: Cache key from _make_cache_key()
+
+
+
+        Returns:
+
+            Cached response dict, or None if not found / expired
+
+        """
+
+        if cache_key not in _rag_cache:
+
+            return None
+
+
+
+        response, timestamp = _rag_cache[cache_key]
+
+
+
+        # Check TTL
+
+        age = (datetime.now() - timestamp).total_seconds()
+
+        if age > _CACHE_TTL_SECONDS:
+
+            logger.debug(f"  Cache expired (age={age:.0f}s)")
+
+            del _rag_cache[cache_key]
+
+            return None
+
+
+
+        logger.debug(f" Cache valid (age={age:.0f}s, TTL={_CACHE_TTL_SECONDS}s)")
+
+        return response
+
+
+
+    def _cache_response(self, cache_key: str, response: dict) -> None:
+
+        """
+
+        Store response in cache with LRU eviction.
+
+
+
+        MAX_CACHE_SIZE: Evict oldest entries if exceeded
+
+        Prevents memory creep in long-running service
+
+
+
+        Args:
+
+            cache_key: Cache key from _make_cache_key()
+
+            response: Response dict to cache
+
+        """
+
+        global _CACHE_INSERTION_ORDER
+
+
+
+        _rag_cache[cache_key] = (response, datetime.now())
+
+
+
+        # Track insertion order for LRU eviction
+
+        if cache_key not in _CACHE_INSERTION_ORDER:
+
+            _CACHE_INSERTION_ORDER.append(cache_key)
+
+
+
+        # Evict oldest if exceeded MAX_CACHE_SIZE
+
+        while len(_rag_cache) > _MAX_CACHE_SIZE:
+
+            oldest_key = _CACHE_INSERTION_ORDER.pop(0)
+
+            if oldest_key in _rag_cache:
+
+                del _rag_cache[oldest_key]
+
+                logger.debug(
+
+                    f"  Evicted oldest cache entry (cache size > {_MAX_CACHE_SIZE})"
+
+                )
+
+
+
+        # Log cache size (for monitoring)
+
+        if len(_rag_cache) % 50 == 0:
+
+            logger.info(f" Cache size: {len(_rag_cache)}/{_MAX_CACHE_SIZE} entries")
+
+
+
+    def _format_context(self, context: RAGContext) -> str:
+
+        """
+
+        Format retrieved context for LLM input.
+
+
+
+        Includes chunk text with position markers and entity mentions.
+
+
+
+        Args:
+
+            context: RAG context with chunks and entities
+
+
+
+        Returns:
+
+            Formatted context string
+
+        """
+
+        context_text = f"QUERY: {context.query}\n" + "=" * 60 + "\nCONTEXT (from Knowledge Base):\n"
+
+
+
+        # Add chunks with position and source
+
+        for i, chunk in enumerate(context.chunks, 1):
+            source_info = chunk.source if chunk.source else "Unknown Source"
+            context_text += f"\n[Chunk {i}/{len(context.chunks)} - Source: {source_info} - Position {chunk.position}]"
+
+            context_text += f"\nScore: {chunk.hybrid_score:.3f} (Semantic: {chunk.embedding_similarity:.3f}, Graph: {chunk.graph_score:.3f})"
+
+            context_text += f"\n{'-' * 40}\n{chunk.text}\n"
+
+
+
+        # Add entity mentions summary
+
+        if context.entity_mentions:
+
+            context_text += "\n" + "=" * 60 + "\nENTITIES MENTIONED:\n"
+
+            for entity, chunk_ids in context.entity_mentions.items():
+
+                context_text += f"- {entity} (mentioned in {len(chunk_ids)} chunks)\n"
+
+
+
+        # Phase 4A: Add triplet-derived knowledge graph relationships
+
+        if context.triplet_context:
+
+            context_text += f"\n[KNOWLEDGE GRAPH RELATIONSHIPS]:\n{context.triplet_context}\n"
+
+
+
+        if context.personal_memories:
+
+            pm_text = "\n".join([f"- {m}" for m in context.personal_memories])
+
+            context_text += f"\n[USER PERSONAL PREFERENCES & HABITS]:\n{pm_text}\n"
+
+
+
+        return context_text
+
+
+
+    async def process_feedback(self, chunk_ids: list[str], rating: int) -> None:
+
+        """
+
+        Process user feedback and update graph node weights.
+
+        Positive feedback (+1) increases weight by 0.1
+
+        Negative feedback (-1) decreases weight by 0.1
+
+        """
+
+        if not chunk_ids:
+
+            return
+
+            
+
+        weight_delta = 0.1 if rating > 0 else -0.1
+
+        
+
+        query = """
+
+        UNWIND $chunk_ids AS chunk_id
+
+        MATCH (c:Chunk {id: chunk_id, tenant_id: $tenant_id})
+
+        // Cap the weight between 0.1 and 2.0 to prevent runaway scoring
+
+        SET c.weight = CASE 
+
+            WHEN coalesce(c.weight, 1.0) + $delta > 2.0 THEN 2.0
+
+            WHEN coalesce(c.weight, 1.0) + $delta < 0.1 THEN 0.1
+
+            ELSE coalesce(c.weight, 1.0) + $delta 
+
+        END
+
+        """
+
+        
+
+        try:
+
+            await self.pipeline.neo4j_repo.execute_write(
+
+                query,
+
+                {
+
+                    "chunk_ids": chunk_ids,
+
+                    "tenant_id": self.tenant_id,
+
+                    "delta": weight_delta
+
+                }
+
+            )
+
+            logger.info(f" Updated feedback weight ({weight_delta}) for {len(chunk_ids)} chunks")
+
+        except Exception as e:
+
+            logger.error(f" Failed to update feedback weights: {e}")
+
+            raise
+
+
+
+    async def _generate_answer_llm(
+
+        self,
+
+        query: str,
+
+        context: str,
+
+        tenant_id: str,
+
+        agent_id: str,
+
+        agent_persona: Optional[dict] = None,
+
+    ) -> LLMResponse:
+
+        """
+
+        AI-driven answer generation (Phase 3).
+
+
+
+        1. Call DeepInfra API via specialized client
+
+        2. On success: Return AI-generated answer with metrics
+
+        3. On failure: Fallback to template-based answer (graceful degradation)
+
+        4. Track costs per tenant/agent for multi-tenant billing
+
+
+
+        MULTI-TENANCY:
+
+        - LLM client tracks costs per tenant (for billing)
+
+        - Context already filtered by tenant (from RAG pipeline)
+
+        - No data leakage possible
+
+
+
+        Args:
+
+            query: Original user query
+
+            context: Formatted context (already tenant-filtered)
+
+            tenant_id: Tenant UUID (for cost tracking)
+
+            agent_id: Agent UUID (for usage analytics)
+
+            agent_persona: Agent name, description, system_prompt (optional)
+
+
+
+        Returns:
+
+            LLMResponse: Response with answer + metrics (tokens, cost, version, source)
+
+        """
+
+        # Attempt Phase 3: Real LLM generation via DeepInfra
+
+        logger.debug("Attempting Phase 3: DeepInfra LLM generation...")
+
+        try:
+
+            llm_response = await self.llm_client.generate_answer(
+
+                query=query,
+
+                context=context,
+
+                tenant_id=tenant_id,
+
+                agent_id=agent_id,
+
+                agent_persona=agent_persona,
+
+            )
+
+            logger.info(
+
+                f" Phase 3 SUCCESS: Generated answer via DeepInfra LLM (tokens={llm_response.total_tokens})"
+
+            )
+
+            return llm_response
+
+
+
+        except Exception as e:
+
+            # Fallback: If LLM generation fails, use template-based answer
+
+            logger.warning(
+
+                f"  Phase 3 failed ({e}). Falling back to Phase 2 template-based generation..."
+
+            )
+
+            return self._generate_answer_template(query, context, tenant_id, agent_id)
+
+
+
+    def _generate_answer_template(
+
+        self, query: str, context: str, tenant_id: str, agent_id: str
+
+    ) -> LLMResponse:
+
+        """
+
+        Generate answer using template (Phase 2 fallback).
+
+
+
+        Used when:
+
+        - LLM API is down
+
+        - Rate limited
+
+        - Timeout
+
+        - Any other failure
+
+
+
+        Provides graceful degradation (never fail without answer).
+
+        Tracks fallback usage per tenant/agent for billing.
+
+
+
+        Args:
+
+            query: User query
+
+            context: Formatted context
+
+            tenant_id: Tenant UUID (for cost tracking)
+
+            agent_id: Agent UUID (for usage analytics)
+
+
+
+        Returns:
+
+            LLMResponse: Template-based answer (source="Template", no token cost)
+
+        """
+
+        logger.debug("Using Phase 2: Template-based answer generation (FALLBACK)")
+
+
+
+        # Extract key information from context
+
+        lines = context.split("\n")
+
+        relevant_lines = [
+
+            line for line in lines if line.strip() and not line.startswith("[")
+
+        ]
+
+
+
+        # Build answer from context
+
+        answer_parts = [
+
+            f"Based on the knowledge base, here's what I found:\n\n",
+
+        ]
+
+
+
+        # Add first 2-3 chunks as main answer
+
+        chunk_count = 0
+
+        for line in relevant_lines:
+
+            if line.startswith("Chunk") or line.startswith("Score"):
+
+                chunk_count += 1
+
+                continue
+
+            if line.startswith("-"):
+
+                answer_parts.append(f" {line[1:].strip()}\n")
+
+            elif line.strip() and chunk_count < 3:
+
+                answer_parts.append(line + "\n")
+
+
+
+        answer = "".join(answer_parts)
+
+
+
+        return LLMResponse(
+
+            answer=answer or "No answer could be generated from the knowledge base.",
+
+            prompt_tokens=0,
+
+            completion_tokens=0,
+
+            total_tokens=0,
+
+            cost_estimate=0.0,
+
+            prompt_version="v1",
+
+            source="Template",
+
+            tenant_id=tenant_id,
+
+            agent_id=agent_id,
+
+        )
+
+
+
+    def _track_metrics(
+
+        self,
+
+        cache_hit: bool = False,
+
+        seed_chunks_count: int = 0,
+
+        expanded_chunks_count: int = 0,
+
+        final_chunks_count: int = 0,
+
+        timeout_occurred: bool = False,
+
+        partial_result: bool = False,
+
+        retrieval_latency_ms: float = 0.0,
+
+        ranking_latency_ms: float = 0.0,
+
+        total_latency_ms: float = 0.0,
+
+    ) -> None:
+
+        """
+
+        Track RAG pipeline metrics for analytics.
+
+
+
+        METRICS FOR PRODUCT INSIGHTS:
+
+         retrieval_latency_ms: Time to retrieve seed + expand graph
+
+         cache_hit: Whether result came from cache (reduces latency)
+
+         seed_chunks_count: Number of semantic search results
+
+         expanded_chunks_count: Chunks added via graph expansion
+
+         timeout_occurred: If query exceeded 2s timeout
+
+         partial_result: If fallback seed-only result was returned
+
+         total_latency_ms: End-to-end time including formatting
+
+
+
+        INSIGHTS ENABLED:
+
+          Identify slow queries (outliers)
+
+          Cache effectiveness (hit rate)
+
+          Graph expansion value (expanded vs seed)
+
+          Timeout patterns (which KBs/queries timeout)
+
+          Optimization opportunities
+
+          Usage patterns & trends
+
+
+
+        Args:
+
+            cache_hit: Whether cache returned result
+
+            seed_chunks_count: Number of seed chunks
+
+            expanded_chunks_count: Number of expanded chunks
+
+            final_chunks_count: Number of chunks in context
+
+            timeout_occurred: If timeout happened
+
+            partial_result: If fallback fallback was used
+
+            retrieval_latency_ms: Retrieval time
+
+            ranking_latency_ms: Scoring/ranking time
+
+            total_latency_ms: Total end-to-end time
+
+        """
+
+        try:
+
+            metric = RAGMetrics(
+
+                retrieval_latency_ms=retrieval_latency_ms,
+
+                ranking_latency_ms=ranking_latency_ms,
+
+                total_latency_ms=total_latency_ms,
+
+                cache_hit=cache_hit,
+
+                seed_chunks_count=seed_chunks_count,
+
+                expanded_chunks_count=expanded_chunks_count,
+
+                final_chunks_count=final_chunks_count,
+
+                timeout_occurred=timeout_occurred,
+
+                partial_result=partial_result,
+
+            )
+
+
+
+            _rag_metrics.append(metric)
+
+
+
+            # Log every 10 metrics
+
+            if len(_rag_metrics) % 10 == 0:
+
+                self._log_metrics_summary()
+
+        except Exception as e:
+
+            logger.warning(f" Failed to track metrics: {e}")
+
+
+
+    def _log_metrics_summary(self) -> None:
+
+        """
+
+        Log summary of recent metrics for monitoring.
+
+
+
+        Used for:
+
+         Performance dashboards
+
+         Alerting on slow queries
+
+         Cache effectiveness tracking
+
+         Product insights
+
+        """
+
+        if not _rag_metrics or len(_rag_metrics) < 10:
+
+            return
+
+
+
+        recent = _rag_metrics[-10:]
+
+
+
+        # Calculate averages
+
+        avg_latency = sum(m.total_latency_ms for m in recent) / len(recent)
+
+        cache_hit_rate = sum(1 for m in recent if m.cache_hit) / len(recent)
+
+        timeout_count = sum(1 for m in recent if m.timeout_occurred)
+
+        partial_count = sum(1 for m in recent if m.partial_result)
+
+        avg_expanded = sum(m.expanded_chunks_count for m in recent) / len(recent)
+
+
+
+        logger.info(
+
+            f" RAG Metrics (last 10): "
+
+            f"latency={avg_latency:.0f}ms, "
+
+            f"cache_hit_rate={cache_hit_rate:.0%}, "
+
+            f"timeouts={timeout_count}, "
+
+            f"partial_results={partial_count}, "
+
+            f"avg_expanded_chunks={avg_expanded:.1f}"
+
+        )
+
+
+
+    def get_metrics(self) -> list:
+
+        """
+
+        Retrieve all tracked metrics.
+
+
+
+        Returns:
+
+            List of RAGMetrics objects (for external analytics)
+
+        """
+
+        return _rag_metrics.copy()
+
+
+
+    def clear_metrics(self) -> None:
+
+        """Clear metrics (for testing or periodic cleanup)"""
+
+        global _rag_metrics
+
+        _rag_metrics.clear()
+
+        logger.info(" Metrics cleared")
+
+
+
+    def get_health_metrics(self) -> dict:
+
+        """
+
+        Get health metrics for monitoring endpoint.
+
+
+
+        Returns metrics useful for /rag/health endpoint:
+
+        - avg_latency: Average total latency in milliseconds
+
+        - cache_hit_rate: Percentage of cache hits
+
+        - total_queries: Total number of queries tracked
+
+        - cache_size: Current cache size
+
+        - timeout_rate: Percentage of queries that timed out
+
+        - partial_result_rate: Percentage using fallback
+
+
+
+        Returns:
+
+            Dict with health metrics
+
+        """
+
+        if not _rag_metrics:
+
+            return {
+
+                "avg_latency_ms": 0.0,
+
+                "cache_hit_rate": 0.0,
+
+                "total_queries": 0,
+
+                "cache_size": len(_rag_cache),
+
+                "timeout_rate": 0.0,
+
+                "partial_result_rate": 0.0,
+
+            }
+
+
+
+        total = len(_rag_metrics)
+
+        avg_latency = sum(m.total_latency_ms for m in _rag_metrics) / total
+
+        cache_hits = sum(1 for m in _rag_metrics if m.cache_hit)
+
+        cache_hit_rate = cache_hits / total if total > 0 else 0.0
+
+        timeouts = sum(1 for m in _rag_metrics if m.timeout_occurred)
+
+        timeout_rate = timeouts / total if total > 0 else 0.0
+
+        partials = sum(1 for m in _rag_metrics if m.partial_result)
+
+        partial_rate = partials / total if total > 0 else 0.0
+
+
+
+        return {
+
+            "avg_latency_ms": round(avg_latency, 2),
+
+            "cache_hit_rate": f"{cache_hit_rate:.0%}",
+
+            "total_queries": total,
+
+            "cache_size": len(_rag_cache),
+
+            "timeout_rate": f"{timeout_rate:.1%}",
+
+            "partial_result_rate": f"{partial_rate:.1%}",
+
+        }
+

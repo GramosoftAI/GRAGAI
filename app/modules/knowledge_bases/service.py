@@ -449,16 +449,40 @@ class KnowledgeBaseService:
         kbs, total = await self.repository.list_by_agent(agent_id, limit=limit, offset=offset)
         return format_success({"kbs": [schemas.KBResponse.model_validate(kb, from_attributes=True) for kb in kbs], "total": total})
 
-    async def delete_kb(self, kb_id: str) -> dict:
-        await retry_neo4j_operation(lambda: self.neo4j_repo.execute_write("MATCH (kb:KnowledgeBase {id: $id, tenant_id: $tenant_id}) OPTIONAL MATCH (kb)-[:HAS_CHUNK]->(c:Chunk) DETACH DELETE kb, c", {"id": kb_id}))
-        # Also clean up database connection details if present
-        query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
-        db_conn_res = await self.db.execute(query)
-        db_conn = db_conn_res.scalar_one_or_none()
-        if db_conn:
-            await self.db.delete(db_conn)
-        await self.repository.delete(kb_id)
-        await self.db.commit()
+    async def delete_kb(self, kb_id: str, user_id: Optional[str] = None) -> dict:
+        kb = await self.repository.get_by_id(kb_id)
+        if not kb:
+            res = format_error(f"KB not found: {kb_id}", meta={"status_code": 404})
+            res["status_code"] = 404
+            return res
+
+        await retry_neo4j_operation(
+            lambda: self.neo4j_repo.execute_write(
+                "MATCH (kb:KnowledgeBase {id: $id, tenant_id: $tenant_id}) OPTIONAL MATCH (kb)-[:HAS_CHUNK]->(c:Chunk) DETACH DELETE kb, c",
+                {"id": kb_id}
+            )
+        )
+
+        # Also clean up database connection details if present
+        query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
+        db_conn_res = await self.db.execute(query)
+        db_conn = db_conn_res.scalar_one_or_none()
+        if db_conn:
+            await self.db.delete(db_conn)
+
+        await self.repository.soft_delete(kb_id)
+        await self.db.commit()
+
+        # Log audit event
+        if user_id:
+            await KBauditLog.log_event(
+                tenant_id=str(self.tenant_id),
+                user_id=user_id,
+                kb_id=kb_id,
+                event_type=KBauditEventType.KB_DELETED,
+                details={"kb_id": kb_id, "name": kb.name}
+            )
+
         return format_success(meta={"message": "KB deleted successfully"})
 
     async def _validate_graph_integrity(self, kb_id: str) -> dict:
