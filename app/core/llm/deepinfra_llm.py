@@ -110,7 +110,7 @@ class DeepInfraLLMClient:
         """
         self.api_key = settings.deepinfra_api_key
         self.base_url = "https://api.deepinfra.com/v1/openai/chat/completions"
-        self.model = "Qwen/Qwen2.5-72B-Instruct"
+        self.model = settings.deepinfra_llm_model
         self.timeout = settings.ingestion_llm_timeout  # Request timeout from config
         self.max_retries = 3  # Number of retry attempts
         self.max_tokens = 1024  # Max output tokens (GUARD: prevent very long responses)

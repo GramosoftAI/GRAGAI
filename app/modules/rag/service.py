@@ -294,6 +294,21 @@ class RAGService:
 
 
 
+        # --- ONTOLOGY GROUNDING (Phase 4B Enhancement) ---
+        from ..ontology.service import OntologyService
+        try:
+            ont_svc = OntologyService(self.tenant_id)
+            ontology = await ont_svc.get_ontology()
+            ontology_rules_str = ""
+            if ontology and ontology.get("rules"):
+                rules_list = [f"({r['source_class']})-[:{r['relation']}]->({r['target_class']})" for r in ontology["rules"] if r.get("source_class")]
+                if rules_list:
+                    ontology_rules_str = "\n\n[ENTERPRISE ONTOLOGY RULES (STRICT GROUNDING)]\n" + "\n".join(rules_list) + "\nAlign your reasoning strictly with these established business relationships. Do not hallucinate relationships outside of this schema."
+        except Exception as e:
+            logger.warning(f"Failed fetching active ontology for RAG prompt: {e}")
+            ontology_rules_str = ""
+        # ------------------------------------------------
+
         injected_system_prompt = f"""
 
 [PERSONALITY MODE: STRICT]
@@ -673,6 +688,21 @@ When answering the user query, you MUST provide precise in-text citations attrib
                 personality_description = personality.description or personality.name
 
 
+
+        # --- ONTOLOGY GROUNDING (Phase 4B Enhancement) ---
+        from ..ontology.service import OntologyService
+        try:
+            ont_svc = OntologyService(self.tenant_id)
+            ontology = await ont_svc.get_ontology()
+            ontology_rules_str = ""
+            if ontology and ontology.get("rules"):
+                rules_list = [f"({r['source_class']})-[:{r['relation']}]->({r['target_class']})" for r in ontology["rules"] if r.get("source_class")]
+                if rules_list:
+                    ontology_rules_str = "\n\n[ENTERPRISE ONTOLOGY RULES (STRICT GROUNDING)]\n" + "\n".join(rules_list) + "\nAlign your reasoning strictly with these established business relationships. Do not hallucinate relationships outside of this schema."
+        except Exception as e:
+            logger.warning(f"Failed fetching active ontology for RAG prompt: {e}")
+            ontology_rules_str = ""
+        # ------------------------------------------------
 
         injected_system_prompt = f"""
 

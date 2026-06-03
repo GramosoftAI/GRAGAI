@@ -71,14 +71,14 @@ def get_tenant_and_user(request: Request) -> tuple[str, str]:
 @router.post(
     "",
     response_model=dict,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
     summary="Create Agent",
     description="Create a new agent for the current tenant",
 )
 @router.post(
     "/",
     response_model=dict,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
     include_in_schema=False,
 )
 async def create_agent(
@@ -429,7 +429,7 @@ async def delete_agent(
 @router.post(
     "/{agent_id}/sources",
     response_model=dict,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
     summary="Generic Source Ingestion",
     description="Automatically detect and ingest a source (File, URL, or Text) for the given agent.",
 )
@@ -467,7 +467,7 @@ async def generic_ingest_source(
 @router.post(
     "/{agent_id}/sources/pdf",
     response_model=dict,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
     summary="Instant File Ingestion",
     description="Automatically create a knowledge base data source and parse the uploaded PDF, Excel, or CSV directly for the given agent.",
 )
@@ -629,7 +629,7 @@ async def instant_ingest_pdf(
 @router.post(
     "/{agent_id}/sources/text",
     response_model=dict,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
     summary="Instant Raw Text Ingestion",
     description="Automatically create a knowledge base data source from provided raw text for the given agent.",
 )
@@ -714,7 +714,7 @@ async def crawl_url(url: str, mode: str = "single", proxy_mode: str = "basic") -
 @router.post(
     "/{agent_id}/sources/url",
     response_model=dict,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
     summary="Instant URL Ingestion",
     description="Automatically crawl a URL and ingest its content into the graph for the given agent.",
 )

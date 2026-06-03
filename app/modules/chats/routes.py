@@ -141,7 +141,7 @@ def _format_message(message) -> dict:
 
 @router.post(
     "/{agent_id}/sessions",
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
     summary="Create a new chat session",
     description="Creates a new conversation session with an agent.",
 )

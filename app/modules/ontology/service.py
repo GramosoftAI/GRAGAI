@@ -152,3 +152,33 @@ class OntologyService:
             return fuzzy[0]["name"]
             
         return None
+
+    async def auto_register_schema(self, schema: Dict[str, List[Dict]]) -> None:
+        """
+        Dynamically register discovered classes and relations.
+        Uses exact name matching (MERGE) to prevent duplicates.
+        """
+        classes = schema.get("classes", [])
+        relations = schema.get("relations", [])
+        
+        logger.info(f"Auto-registering schema: {len(classes)} classes, {len(relations)} relations for tenant {self.tenant_id}")
+        
+        for c in classes:
+            try:
+                query = "MATCH (n:OntologyClass {tenant_id: $tenant_id, name: $name}) RETURN n"
+                existing = await self.neo4j_repo.execute_read(query, {"tenant_id": self.tenant_id, "name": c["name"]})
+                if not existing:
+                    req = schemas.OntologyClassCreate(name=c["name"], description=c.get("description", ""))
+                    await self.create_class(req)
+            except Exception as e:
+                logger.warning(f"Failed to auto-register class {c['name']}: {e}")
+                
+        for r in relations:
+            try:
+                query = "MATCH (n:OntologyRelation {tenant_id: $tenant_id, name: $name}) RETURN n"
+                existing = await self.neo4j_repo.execute_read(query, {"tenant_id": self.tenant_id, "name": r["name"]})
+                if not existing:
+                    req = schemas.OntologyRelationCreate(name=r["name"], description=r.get("description", ""))
+                    await self.create_relation(req)
+            except Exception as e:
+                logger.warning(f"Failed to auto-register relation {r['name']}: {e}")

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
-@router.post("/register", status_code=status.HTTP_201_CREATED)
+@router.post("/register", status_code=status.HTTP_200_OK)
 async def register(
     request: schemas.RegisterRequest, db: AsyncSession = Depends(get_db_public)
 ):

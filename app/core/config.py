@@ -195,6 +195,8 @@ class Settings(BaseSettings):
     deepinfra_api_key: Optional[str] = None  # For LLM inference
 
     deepinfra_api_url: str = "https://api.deepinfra.com/v1/openai"
+    
+    deepinfra_llm_model: str = "Qwen3-32B"
 
     gdocz_api_key: Optional[str] = None  # For PDF  Markdown extraction (primary)
 
