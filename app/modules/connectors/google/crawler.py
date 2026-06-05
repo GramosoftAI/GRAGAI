@@ -134,6 +134,50 @@ class GoogleDriveConnector(CheckpointedConnector[ConnectorCheckpoint]):
 
         return " and ".join(queries)
 
+    async def list_directory(self, parent_id: Optional[str] = None, impersonate_email: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List files and folders directly within a specific parent (or root)."""
+        email = impersonate_email or self.auth_manager.primary_admin_email
+        async with self.auth_manager.get_client(email) as client:
+            queries = ["trashed = false"]
+            if parent_id:
+                queries.append(f"'{parent_id}' in parents")
+            else:
+                queries.append("'root' in parents")
+
+            params = {
+                "q": " and ".join(queries),
+                "pageSize": 1000,
+                "fields": "files(id, name, mimeType)",
+                "supportsAllDrives": self.include_shared_drives,
+                "includeItemsFromAllDrives": self.include_shared_drives,
+            }
+            try:
+                res = await execute_google_request(client, "GET", "/drive/v3/files", params=params)
+                return res.get("files", [])
+            except Exception as e:
+                logger.error(f"Failed to list directory for {email}: {e}")
+                return []
+
+    async def get_files_metadata(self, file_ids: List[str], impersonate_email: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch metadata for specific file IDs."""
+        if not file_ids:
+            return []
+        email = impersonate_email or self.auth_manager.primary_admin_email
+        async with self.auth_manager.get_client(email) as client:
+            files_meta = []
+            for fid in file_ids:
+                params = {
+                    "fields": "id, name, mimeType, parents, size, webViewLink, trashed",
+                    "supportsAllDrives": self.include_shared_drives,
+                }
+                try:
+                    res = await execute_google_request(client, "GET", f"/drive/v3/files/{fid}", params=params)
+                    if res and not res.get("trashed"):
+                        files_meta.append(res)
+                except Exception as e:
+                    logger.error(f"Failed to get file metadata for {fid} ({email}): {e}")
+            return files_meta
+
     async def load_from_checkpoint(
         self,
         start: float,

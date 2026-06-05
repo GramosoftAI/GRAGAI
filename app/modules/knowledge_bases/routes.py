@@ -1,3 +1,4 @@
+from typing import Optional, List, Dict, Any
 """REST routes for Knowledge Base CRUD and document ingestion"""
 
 
@@ -1415,6 +1416,26 @@ async def register_google_drive(
 
 
 
+
+@router.get(
+    "/{kb_id}/google-drive/files",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="List Google Drive Files",
+    description="List files and folders from the connected Google Drive for selective ingestion."
+)
+async def list_google_drive_files(request: Request, kb_id: str, parent_id: Optional[str] = None) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        async with AsyncSessionLocal() as db:
+            service = KnowledgeBaseService(db, tenant_id)
+            return await service.list_google_drive_directory(kb_id=kb_id, parent_id=parent_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_google_drive_files: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 @router.post(
 
     "/{kb_id}/google-drive/sync",
@@ -1429,7 +1450,7 @@ async def register_google_drive(
 
 )
 
-async def sync_google_drive_to_graph(request: Request, kb_id: str) -> dict:
+async def sync_google_drive_to_graph(request: Request, kb_id: str, sync_req: Optional[schemas.GoogleDriveSyncRequest] = None) -> dict:
 
     try:
 
@@ -1479,14 +1500,14 @@ async def sync_google_drive_to_graph(request: Request, kb_id: str) -> dict:
 
             service = KnowledgeBaseService(db, tenant_id)
 
+            file_ids = sync_req.file_ids if sync_req else None
+            folder_ids = sync_req.folder_ids if sync_req else None
             result = await service.sync_google_drive_source(
-
                 kb_id=kb_id,
-
                 credentials_dict=credentials,
-
-                folder_urls=folder_urls
-
+                folder_urls=folder_urls,
+                file_ids=file_ids,
+                folder_ids=folder_ids
             )
 
 
@@ -1517,3 +1538,136 @@ async def sync_google_drive_to_graph(request: Request, kb_id: str) -> dict:
 
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+
+# ============================================================================
+# SHAREPOINT CONNECTOR ENDPOINTS
+# ============================================================================
+
+@router.post(
+    "/{kb_id}/sharepoint/register",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Register SharePoint Connection",
+    description="Register SharePoint credentials for this KB"
+)
+async def register_sharepoint(
+    request: Request,
+    kb_id: str,
+    sp_request: schemas.SharePointRegister
+) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            from .models import DatabaseConnection
+            import uuid
+            
+            query = select(DatabaseConnection).where(
+                DatabaseConnection.kb_id == uuid.UUID(kb_id),
+                DatabaseConnection.tenant_id == uuid.UUID(tenant_id)
+            )
+            db_conn_res = await db.execute(query)
+            db_conn = db_conn_res.scalar_one_or_none()
+
+            connection_params = {
+                "credentials": sp_request.credentials,
+                "site_urls": sp_request.site_urls or []
+            }
+
+            if db_conn:
+                db_conn.db_type = "sharepoint"
+                db_conn.connection_params = connection_params
+            else:
+                db_conn = DatabaseConnection(
+                    tenant_id=uuid.UUID(tenant_id),
+                    kb_id=uuid.UUID(kb_id),
+                    db_type="sharepoint",
+                    connection_params=connection_params
+                )
+                db.add(db_conn)
+
+            await db.commit()
+            return format_success(
+                {"success": True},
+                meta={"message": "SharePoint connection registered successfully"}
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in register_sharepoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@router.get(
+    "/{kb_id}/sharepoint/files",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="List SharePoint Files",
+    description="List files and folders from the connected SharePoint for selective ingestion."
+)
+async def list_sharepoint_files(request: Request, kb_id: str, parent_id: Optional[str] = None) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        async with AsyncSessionLocal() as db:
+            service = KnowledgeBaseService(db, tenant_id)
+            return await service.list_sharepoint_directory(kb_id=kb_id, parent_id=parent_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_sharepoint_files: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@router.post(
+    "/{kb_id}/sharepoint/sync",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Synchronize SharePoint to Graph",
+    description="Crawl SharePoint, download files, generate embeddings, and load them into Neo4j graph"
+)
+async def sync_sharepoint_to_graph(request: Request, kb_id: str, sync_req: Optional[schemas.SharePointSyncRequest] = None) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            from .models import DatabaseConnection
+            from datetime import datetime
+            import uuid
+            
+            query = select(DatabaseConnection).where(
+                DatabaseConnection.kb_id == uuid.UUID(kb_id),
+                DatabaseConnection.tenant_id == uuid.UUID(tenant_id),
+                DatabaseConnection.db_type == "sharepoint"
+            )
+            res = await db.execute(query)
+            db_conn = res.scalar_one_or_none()
+            if not db_conn:
+                raise HTTPException(status_code=404, detail="No registered SharePoint connection found for this KB")
+
+            connection_params = db_conn.connection_params
+            credentials = connection_params.get("credentials", {})
+            site_urls = connection_params.get("site_urls", [])
+
+            service = KnowledgeBaseService(db, tenant_id)
+            file_ids = sync_req.file_ids if sync_req else None
+            folder_ids = sync_req.folder_ids if sync_req else None
+            result = await service.sync_sharepoint_source(
+                kb_id=kb_id,
+                credentials_dict=credentials,
+                site_urls=site_urls,
+                file_ids=file_ids,
+                folder_ids=folder_ids
+            )
+
+            if not result.get("success"):
+                raise HTTPException(status_code=400, detail=result.get("error"))
+
+            # Update sync status timestamp
+            db_conn.last_synced_at = datetime.now()
+            await db.commit()
+
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in sync_sharepoint_to_graph: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")

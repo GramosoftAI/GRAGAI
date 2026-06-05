@@ -60,22 +60,65 @@ class ScraperService:
     @staticmethod
     async def call_gcrawl_api(url: str, crawl_type: str, proxy_mode: str) -> Optional[Dict[str, Any]]:
         """
-        Call the Gcrawl Scrape API with retries.
-        
-        API: POST https://gcrawl.gramopro.ai/scrape
-        Body: { "url": "...", "type": "single|all", "proxymode": "basic|stealth|enhanced" }
+        Call the Gcrawl Scrape API with retries and advanced payload.
         """
+        # Read from settings
+        crawler_api_key = getattr(settings, "crawler_api_key", None)
+        crawler_mode = getattr(settings, "crawler_mode", crawl_type)
+        enable_md = getattr(settings, "crawler_enable_md", True)
+        
+        is_all = (crawler_mode == "all")
+
         payload = {
             "url": url,
-            "type": crawl_type,
-            "proxymode": proxy_mode
+            "crawl": {
+                "max_pages": 10 if is_all else 1,
+                "same_domain_only": True,
+                "include_subdomains": False
+            },
+            "proxy": {
+                "geo": proxy_mode if proxy_mode in ["us", "eu", "as"] else "string"
+            },
+            "markdown": {
+                "enabled": enable_md,
+                "clean": True
+            },
+            "html": {
+                "enabled": True,
+                "clean": True,
+                "remove_external_links": False,
+                "relative_to_absolute_links": True,
+                "remove_data_images": False,
+                "ignore_tags": []
+            },
+            "screenshot": {
+                "enabled": False, # Disabled by default to save bandwidth, unless requested
+                "full_page": False,
+                "format": "png",
+                "quality": 90,
+                "js_render": False,
+                "render_timeout": 30000,
+                "auto_scroll": True,
+                "scroll_delay": 500,
+                "max_scrolls": 2
+            },
+            "seo": {
+                "enabled": True
+            },
+            "images": {
+                "enabled": True
+            }
         }
         
-        base_url = getattr(settings, "crawler_api_url", "https://gcrawlai.com").rstrip("/") + "/scrape"
+        base_url = getattr(settings, "crawler_api_url", "https://gcrawl.gramopro.ai").rstrip("/") + "/crawl"
+        
         headers = {
             "accept": "application/json",
             "Content-Type": "application/json"
         }
+        
+        if crawler_api_key:
+            headers["X-API-Key"] = crawler_api_key
 
         async with httpx.AsyncClient(timeout=settings.gcrawl_timeout) as client:
             for attempt in range(settings.gcrawl_retry + 1):

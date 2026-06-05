@@ -241,3 +241,83 @@ class GoogleDriveRegister(BaseModel):
                 ]
             }
         }
+
+
+class GoogleDriveItem(BaseModel):
+    """Schema representing a single file or folder from Google Drive."""
+    id: str
+    name: str
+    mime_type: str
+    is_folder: bool
+
+
+class GoogleDriveListResponse(BaseModel):
+    """Schema for returning a directory listing from Google Drive."""
+    items: list[GoogleDriveItem] = []
+
+
+class GoogleDriveSyncRequest(BaseModel):
+    """
+    Schema for selectively syncing files or folders from Google Drive.
+    """
+    file_ids: Optional[list[str]] = Field(default_factory=list, description="Specific file IDs to ingest")
+    folder_ids: Optional[list[str]] = Field(default_factory=list, description="Specific folder IDs to ingest (recursive)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "file_ids": ["1A2B3C4D5E6F7G8H9I", "9Z8Y7X6W5V4U3T2S1R"],
+                "folder_ids": ["folder1_id", "folder2_id"]
+            }
+        }
+
+
+class SharePointRegister(BaseModel):
+    """
+    Schema to register/associate a SharePoint connection with an Agent KB.
+    """
+    credentials: dict = Field(..., description="Credentials for Microsoft Graph (client_id, client_secret, tenant_id)")
+    site_urls: Optional[list[str]] = Field(None, description="Optional SharePoint Site URLs to isolate indexing")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "credentials": {
+                    "client_id": "00000000-0000-0000-0000-000000000000",
+                    "client_secret": "supersecret",
+                    "tenant_id": "11111111-1111-1111-1111-111111111111"
+                },
+                "site_urls": [
+                    "https://graph.microsoft.com/v1.0/sites/root"
+                ]
+            }
+        }
+
+
+class SharePointItem(BaseModel):
+    """Schema representing a single file or folder from SharePoint."""
+    id: str
+    name: str
+    mime_type: str
+    is_folder: bool
+
+
+class SharePointListResponse(BaseModel):
+    """Schema for returning a directory listing from SharePoint."""
+    items: list[SharePointItem] = []
+
+
+class SharePointSyncRequest(BaseModel):
+    """
+    Schema for selectively syncing files or folders from SharePoint.
+    """
+    file_ids: Optional[list[str]] = Field(default_factory=list, description="Specific file IDs to ingest")
+    folder_ids: Optional[list[str]] = Field(default_factory=list, description="Specific folder IDs to ingest (recursive)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "file_ids": ["driveId:itemId"],
+                "folder_ids": ["driveId:folderId"]
+            }
+        }

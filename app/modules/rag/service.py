@@ -340,7 +340,7 @@ When answering the user query, you MUST provide precise in-text citations attrib
 - Each chunk in the context indicates its Source (e.g., "Source: Resume_Vishnu.pdf" or "Source: https://example.com").
 - Cite the source next to the information you present using in-text citations like "[Source: <source_name>]" (e.g., "[Source: Resume_Vishnu.pdf]").
 - Do not make up sources. Only cite sources explicitly listed in the context. If a fact comes from multiple sources, cite all of them.
-- If no source is mentioned or the information doesn't come from the knowledge base chunks, do not attribute any source.
+- CRITICAL INSTRUCTION: If the user's query is a general greeting or conversational pleasantry (e.g., "hi", "hello"), you MUST leave the source citation completely blank. DO NOT output ANY bracketed source tags like [Source: ...]. Doing so will cause a critical system error.
 
 """.strip()
 
@@ -735,7 +735,7 @@ When answering the user query, you MUST provide precise in-text citations attrib
 - Each chunk in the context indicates its Source (e.g., "Source: Resume_Vishnu.pdf" or "Source: https://example.com").
 - Cite the source next to the information you present using in-text citations like "[Source: <source_name>]" (e.g., "[Source: Resume_Vishnu.pdf]").
 - Do not make up sources. Only cite sources explicitly listed in the context. If a fact comes from multiple sources, cite all of them.
-- If no source is mentioned or the information doesn't come from the knowledge base chunks, do not attribute any source.
+- CRITICAL INSTRUCTION: If the user's query is a general greeting or conversational pleasantry (e.g., "hi", "hello"), you MUST leave the source citation completely blank. DO NOT output ANY bracketed source tags like [Source: ...]. Doing so will cause a critical system error.
 
 """.strip()
 
