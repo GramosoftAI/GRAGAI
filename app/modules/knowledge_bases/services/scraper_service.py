@@ -20,7 +20,7 @@ class ScraperService:
     @staticmethod
     async def extract_website_content(
         url: str, 
-        crawl_type: str = "single", 
+        crawl_type: str = "all", 
         proxy_mode: str = "basic"
     ) -> List[Dict[str, Any]]:
         """
@@ -44,6 +44,11 @@ class ScraperService:
         try:
             # 1. Try Gcrawl API
             response_data = await ScraperService.call_gcrawl_api(url, crawl_type, proxy_mode)
+            
+            if response_data and response_data.get("status") == "queued" and response_data.get("crawl_id"):
+                crawl_id = response_data.get("crawl_id")
+                logger.info(f" Gcrawl queued task {crawl_id} for {url}. Polling for results...")
+                response_data = await ScraperService.poll_gcrawl_data(crawl_id)
             
             if response_data and response_data.get("data"):
                 logger.info(f" Gcrawl success for {url}")
@@ -72,7 +77,7 @@ class ScraperService:
         payload = {
             "url": url,
             "crawl": {
-                "max_pages": 10 if is_all else 1,
+                "max_pages": 1000 if is_all else 1,
                 "same_domain_only": True,
                 "include_subdomains": False
             },
@@ -110,7 +115,11 @@ class ScraperService:
             }
         }
         
-        base_url = getattr(settings, "crawler_api_url", "https://gcrawl.gramopro.ai").rstrip("/") + "/crawl"
+        base_url = getattr(
+            settings,
+            "crawler_api_url",
+            "https://gcrawlai.com/gc/api/v1"
+        ).rstrip("/") + "/crawl"
         
         headers = {
             "accept": "application/json",
@@ -133,6 +142,53 @@ class ScraperService:
                     else:
                         raise e
         return None
+
+    @staticmethod
+    async def poll_gcrawl_data(crawl_id: str, timeout_seconds: int = 60) -> Optional[Dict[str, Any]]:
+        """
+        Poll the Gcrawl data endpoint until status is 'success' or timeout is reached.
+        """
+        crawler_api_key = getattr(settings, "crawler_api_key", None)
+        base_url = getattr(
+            settings,
+            "crawler_api_url",
+            "https://gcrawlai.com/gc/api/v1"
+        ).rstrip("/")
+        
+        poll_url = f"{base_url}/crawler/data/{crawl_id}"
+        
+        headers = {
+            "accept": "application/json"
+        }
+        if crawler_api_key:
+            headers["X-API-Key"] = crawler_api_key
+            
+        start_time = asyncio.get_event_loop().time()
+        
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            while True:
+                if asyncio.get_event_loop().time() - start_time > timeout_seconds:
+                    logger.warning(f"Gcrawl polling timed out after {timeout_seconds}s for task {crawl_id}")
+                    return None
+                    
+                try:
+                    response = await client.get(poll_url, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    status = data.get("status")
+                    if status == "success":
+                        logger.info(f"Gcrawl polling success for task {crawl_id}")
+                        return data
+                    elif status in ["failed", "error"]:
+                        logger.error(f"Gcrawl task {crawl_id} failed: {data}")
+                        return None
+                        
+                    # If still queued/processing, wait and poll again
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    logger.warning(f"Error while polling Gcrawl task {crawl_id}: {e}")
+                    await asyncio.sleep(3)
 
     @staticmethod
     def normalize_gcrawl_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:

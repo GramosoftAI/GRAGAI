@@ -55,7 +55,9 @@ BEHAVIOR CONTRACT:
                 max_tokens=256,
             )
             print(f"--------------------Original Query: '{query}' -> Enhanced Query: '{enhanced_query}'-------")
-            cleaned_query = enhanced_query.strip().strip('"').strip("'")
+            import re
+            cleaned_query = re.sub(r'<think>.*?</think>', '', enhanced_query, flags=re.DOTALL)
+            cleaned_query = cleaned_query.strip().strip('"').strip("'")
             if cleaned_query:
                 return cleaned_query
             return query

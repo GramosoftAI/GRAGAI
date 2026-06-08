@@ -7,10 +7,18 @@ import uuid
 
 
 # ============= REQUEST SCHEMAS =============
+class SendRegistrationOTPRequest(BaseModel):
+    """Request to send registration OTP"""
+    email: EmailStr = Field(..., description="User email address")
+    first_name: Optional[str] = Field(None, description="Optional user first name for personalized email greeting")
+    tenant_name: Optional[str] = Field(None, description="Optional tenant name to check availability before sending OTP")
+
+
 class RegisterRequest(BaseModel):
     """User registration request"""
 
     email: EmailStr = Field(..., description="User email address")
+    otp: str = Field(..., description="6-digit OTP sent to email", min_length=6, max_length=6)
     first_name: str = Field(..., min_length=1, max_length=255)
     last_name: str = Field(..., min_length=1, max_length=255)
     password: str = Field(..., min_length=8, max_length=128)

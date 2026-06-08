@@ -190,6 +190,20 @@ class Settings(BaseSettings):
 
 
 
+    # ============= EMAIL SMTP SETTINGS =============
+
+    email_host: str = ""
+
+    email_port: int = 587
+
+    email_username: str = ""
+
+    email_password: str = ""
+
+    email_from: str = ""
+
+
+
     # ============= EXTERNAL SERVICES =============
 
     deepinfra_api_key: Optional[str] = None  # For LLM inference
@@ -207,6 +221,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     log_format: str = "json"  # json or text
+
+
+
+    # ============= EMAIL SMTP =============
+    email_host: Optional[str] = None
+    email_port: int = 465
+    email_username: Optional[str] = None
+    email_password: Optional[str] = None
+    email_from: Optional[str] = None
 
 
 

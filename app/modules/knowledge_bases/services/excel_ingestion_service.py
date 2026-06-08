@@ -105,6 +105,7 @@ class ExcelIngestionService:
         file_bytes: bytes,
         filename: str,
         mime_type: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Main entry point for Excel/CSV ingestion.
@@ -208,7 +209,8 @@ class ExcelIngestionService:
                 kb_id=kb_id,
                 sheet_name=sheet_name,
                 df=df,
-                mapping=grounded_mapping
+                mapping=grounded_mapping,
+                source=source
             )
 
             total_chunks += sheet_stats.get("chunks_created", 0)
@@ -312,7 +314,8 @@ class ExcelIngestionService:
         kb_id: str,
         sheet_name: str,
         df: pd.DataFrame,
-        mapping: Dict
+        mapping: Dict,
+        source: Optional[str] = None
     ) -> Dict[str, int]:
         """Ingests rows of a dataframe, generates embeddings, stages pgvector & populates Neo4j."""
         primary_col = mapping["primary_entity"]["column"]
@@ -418,7 +421,8 @@ class ExcelIngestionService:
             "text": semantic_texts[i][:1500],  # Cap chunk text size in Neo4j
             "position": i,
             "embedding": embeddings[i],
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat(),
+            "source": source
         } for i in range(len(rows_list))]
 
         batch_create_query = """
@@ -427,7 +431,8 @@ class ExcelIngestionService:
         CREATE (c:Chunk {
             id: data.chunk_id, tenant_id: $tenant_id, kb_id: data.kb_id,
             text: data.text, position: data.position,
-            embedding: data.embedding, created_at: data.created_at
+            embedding: data.embedding, created_at: data.created_at,
+            source: data.source
         })
         WITH c, data
         MATCH (kb:KnowledgeBase {id: data.kb_id, tenant_id: $tenant_id})

@@ -784,6 +784,8 @@ class KnowledgeBaseService:
 
         mime_type: Optional[str] = None,
 
+        source: Optional[str] = None,
+
     ) -> dict:
 
         """
@@ -812,7 +814,7 @@ class KnowledgeBaseService:
 
             ingestor = ExcelIngestionService(self.db, str(self.tenant_id))
 
-            result = await ingestor.ingest_file(kb_id, file_bytes, filename, mime_type)
+            result = await ingestor.ingest_file(kb_id, file_bytes, filename, mime_type, source)
 
 
 
@@ -1853,7 +1855,9 @@ class KnowledgeBaseService:
 
                             filename=filename,
 
-                            mime_type=mime_type
+                            mime_type=mime_type,
+
+                            source="google_drive"
 
                         )
 
@@ -1941,7 +1945,9 @@ class KnowledgeBaseService:
 
                                 kb_id=kb_id,
 
-                                document_text=text
+                                document_text=text,
+
+                                source="google_drive"
 
                             )
 

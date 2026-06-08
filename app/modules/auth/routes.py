@@ -13,6 +13,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
+@router.post("/send-registration-otp", status_code=status.HTTP_200_OK)
+async def send_registration_otp(
+    request: schemas.SendRegistrationOTPRequest, db: AsyncSession = Depends(get_db_public)
+):
+    """
+    Send OTP for registration email verification.
+    """
+    result = await services.send_registration_otp(request, db)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error")
+        )
+    return format_success(meta={"message": result.get("message")})
+
+
 @router.post("/register", status_code=status.HTTP_200_OK)
 async def register(
     request: schemas.RegisterRequest, db: AsyncSession = Depends(get_db_public)

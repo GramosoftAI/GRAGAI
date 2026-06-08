@@ -40,6 +40,7 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         ("/api/v1/auth/register", "POST"),
         ("/api/v1/auth/login", "POST"),
         ("/api/v1/auth/refresh", "POST"),
+        ("/api/v1/auth/send-registration-otp", "POST"),
         ("/docs", "GET"),
         ("/openapi.json", "GET"),
         ("/redoc", "GET"),
