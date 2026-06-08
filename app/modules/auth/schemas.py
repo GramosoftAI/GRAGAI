@@ -12,6 +12,20 @@ class SendRegistrationOTPRequest(BaseModel):
     email: EmailStr = Field(..., description="User email address")
     first_name: Optional[str] = Field(None, description="Optional user first name for personalized email greeting")
     tenant_name: Optional[str] = Field(None, description="Optional tenant name to check availability before sending OTP")
+    password: Optional[str] = Field(None, description="Optional password to validate strength before sending OTP", min_length=8, max_length=128)
+
+    @validator("password")
+    def validate_password_strength(cls, v):
+        """Validate password meets security requirements"""
+        if v is None:
+            return v
+        if not any(c.isupper() for c in v):
+            raise ValueError("Password must contain uppercase letter")
+        if not any(c.islower() for c in v):
+            raise ValueError("Password must contain lowercase letter")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("Password must contain digit")
+        return v
 
 
 class RegisterRequest(BaseModel):
