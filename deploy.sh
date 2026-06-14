@@ -22,8 +22,11 @@ echo "Installing requirements..."
 pip install --upgrade pip
 pip install --default-timeout=1000 --retries 10 -r requirements.txt
 
+echo "Applying database migrations..."
+alembic upgrade head
+
 echo "Restarting application under PM2..."
-pm2 restart all || pm2 start "uvicorn app.main:app --host 0.0.0.0 --port 4915" --name "graphmind-backend"
+pm2 reload all || pm2 start "uvicorn app.main:app --host 0.0.0.0 --port 4915" --name "graphmind-backend"
 
 echo "=========================================="
 echo "✅ Auto-Deployment Completed Successfully!"

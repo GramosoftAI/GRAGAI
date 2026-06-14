@@ -470,7 +470,7 @@ class KnowledgeBaseService:
 
             if not chunks:
 
-                return format_error("Document produced no chunks", status_code=400)
+                return format_error("Document produced no chunks", meta={"status_code": 400})
 
             logger.info(f" Chunked document into {len(chunks)} chunks")
 
@@ -858,7 +858,7 @@ class KnowledgeBaseService:
 
         kb = await self.repository.get_by_id(kb_id)
 
-        if not kb: return format_error(f"KB not found", status_code=404)
+        if not kb: return format_error(f"KB not found", meta={"status_code": 404})
 
         return format_success({"kb": schemas.KBResponse.model_validate(kb, from_attributes=True)})
 
@@ -992,7 +992,7 @@ class KnowledgeBaseService:
 
             if not kb:
 
-                return format_error(f"Knowledge Base not found: {kb_id}", status_code=404)
+                return format_error(f"Knowledge Base not found: {kb_id}", meta={"status_code": 404})
 
 
 
@@ -1173,8 +1173,7 @@ class KnowledgeBaseService:
             db_conn = res.scalar_one_or_none()
 
             if not db_conn:
-
-                return format_error("No registered database connection found for this KB", status_code=404)
+                return format_error("No registered database connection found for this KB", meta={"status_code": 404})
 
 
 
@@ -1245,8 +1244,7 @@ class KnowledgeBaseService:
             db_conn = res.scalar_one_or_none()
 
             if not db_conn:
-
-                return format_error("No registered database connection found for this KB", status_code=404)
+                return format_error("No registered database connection found for this KB", meta={"status_code": 404})
 
 
 
@@ -1254,7 +1252,7 @@ class KnowledgeBaseService:
 
             if not kb:
 
-                return format_error("Parent Knowledge Base not found", status_code=404)
+                return format_error("Parent Knowledge Base not found", meta={"status_code": 404})
 
 
 
@@ -1594,7 +1592,7 @@ class KnowledgeBaseService:
             res = await self.db.execute(query)
             db_conn = res.scalar_one_or_none()
             if not db_conn:
-                return format_error("No registered Google Drive connection found for this KB", status_code=404)
+                return format_error("No registered Google Drive connection found for this KB", meta={"status_code": 404})
 
             credentials = db_conn.connection_params.get("credentials", {})
             
@@ -2043,7 +2041,7 @@ class KnowledgeBaseService:
             res = await self.db.execute(query)
             db_conn = res.scalar_one_or_none()
             if not db_conn:
-                return format_error("No registered SharePoint connection found for this KB", status_code=404)
+                return format_error("No registered SharePoint connection found for this KB", meta={"status_code": 404})
 
             credentials = db_conn.connection_params.get("credentials", {})
             site_urls = db_conn.connection_params.get("site_urls", [])
