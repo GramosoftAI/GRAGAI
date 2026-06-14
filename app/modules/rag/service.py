@@ -842,13 +842,10 @@ When answering the user query, you MUST provide precise in-text citations attrib
                 query_embedding = await EmbeddingGenerator.generate_embedding(query)
 
                 seed_chunks = await self.pipeline._retrieve_seed_chunks(
-
                     kb_ids=kb_ids,
-
                     query_embedding=query_embedding,
-
                     top_k=top_k,
-
+                    query=query,
                 )
 
 

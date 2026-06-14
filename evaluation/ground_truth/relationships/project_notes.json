@@ -1,0 +1,5 @@
+[
+  {"source": "Larry Page", "type": "FOUNDED", "target": "Google"},
+  {"source": "Sergey Brin", "type": "FOUNDED", "target": "Google"},
+  {"source": "Google", "type": "HEADQUARTERED_IN", "target": "Mountain View"}
+]

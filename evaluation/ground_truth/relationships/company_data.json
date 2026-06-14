@@ -1,0 +1,4 @@
+[
+  {"source": "Bill Gates", "type": "FOUNDED", "target": "Microsoft"},
+  {"source": "Steve Jobs", "type": "FOUNDED", "target": "Apple"}
+]
