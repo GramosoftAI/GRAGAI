@@ -57,7 +57,9 @@ settings = get_settings()
 
 
 
-async def send_registration_otp(request: schemas.SendRegistrationOTPRequest, db: AsyncSession) -> dict:
+from fastapi import BackgroundTasks
+
+async def send_registration_otp(request: schemas.SendRegistrationOTPRequest, background_tasks: BackgroundTasks, db: AsyncSession) -> dict:
     """Generate OTP, store hash, and send email."""
     email = request.email
     
@@ -101,10 +103,8 @@ async def send_registration_otp(request: schemas.SendRegistrationOTPRequest, db:
     db.add(registration_otp)
     await db.commit()
     
-    # Send Email
-    success = await EmailService.send_registration_otp_email(email, otp, request.first_name)
-    if not success:
-        return {"success": False, "error": "Failed to send OTP email"}
+    # Send Email asynchronously in background
+    background_tasks.add_task(EmailService.send_registration_otp_email, email, otp, request.first_name)
         
     return {"success": True, "message": "OTP sent successfully"}
 
@@ -465,7 +465,7 @@ async def refresh_access_token(refresh_token: str, db: AsyncSession) -> dict:
 
 
 
-async def request_password_reset(email: str, db: AsyncSession) -> dict:
+async def request_password_reset(email: str, background_tasks: BackgroundTasks, db: AsyncSession) -> dict:
 
     """
 
@@ -527,9 +527,9 @@ async def request_password_reset(email: str, db: AsyncSession) -> dict:
 
 
 
-    # 4. Send Email
+    # 4. Send Email asynchronously in background
 
-    await EmailService.send_password_reset_email(user.email, token)
+    background_tasks.add_task(EmailService.send_password_reset_email, user.email, token, user.first_name)
 
 
 

@@ -62,13 +62,37 @@ class EmailService:
             return False
 
     @staticmethod
-    async def send_password_reset_email(email: str, token: str) -> bool:
+    async def send_password_reset_email(email: str, token: str, first_name: str = None) -> bool:
         """Send password reset link to user"""
-        reset_link = f"https://graphmind.ai/reset-password?token={token}"
+        reset_link = f"{settings.FRONTEND_URL}/reset-password?token={token}"
+        greeting = f"Hello {first_name}," if first_name else "Hello,"
         
         subject = "GraphMind - Reset Your Password"
         body = f"Click the link below to reset your password. This link expires in 1 hour.\n\n{reset_link}"
-        html_body = f"<p>Click the link below to reset your password. This link expires in 1 hour.</p><p><a href='{reset_link}'>{reset_link}</a></p>"
+        html_body = f"""
+        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9f9fb; padding: 20px;">
+            <div style="background: linear-gradient(to right, #6b46c1, #805ad5); padding: 30px; border-radius: 10px 10px 0 0; text-align: center; color: white;">
+                <h1 style="margin: 0; font-size: 24px;">🔒 Password Reset Request</h1>
+            </div>
+            <div style="background-color: white; padding: 40px; border-radius: 0 0 10px 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                <h2 style="color: #2d3748; margin-top: 0;">{greeting}</h2>
+                <p style="color: #4a5568; line-height: 1.6;">We received a request to reset your password. Please click the button below to set a new password:</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="{reset_link}" style="background-color: #805ad5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">Reset Password</a>
+                </div>
+                <div style="background-color: #fefcbf; border-left: 4px solid #ecc94b; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
+                    <p style="margin: 0; color: #975a16; font-size: 14px;">⏰ <strong>Important:</strong> This link is valid for <strong>1 hour</strong> only.</p>
+                </div>
+                <p style="color: #4a5568; line-height: 1.6;">If the button doesn't work, you can copy and paste this link into your browser:</p>
+                <p style="color: #4a5568; line-height: 1.6; word-break: break-all; font-size: 14px;"><a href="{reset_link}" style="color: #6b46c1;">{reset_link}</a></p>
+                <p style="color: #4a5568; line-height: 1.6;">If you didn't request a password reset, you can safely ignore this email.</p>
+            </div>
+            <div style="text-align: center; margin-top: 30px; color: #a0aec0; font-size: 12px;">
+                <p>This is an automated email. Please do not reply.</p>
+                <p>© 2026 GRAG. All rights reserved.</p>
+            </div>
+        </div>
+        """
         
         return await EmailService.send_email(to_email=email, subject=subject, body=body, html_body=html_body)
 

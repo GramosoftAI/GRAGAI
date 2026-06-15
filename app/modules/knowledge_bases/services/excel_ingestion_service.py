@@ -328,6 +328,16 @@ class ExcelIngestionService:
             logger.warning(f"Primary column '{primary_col}' not found. Selecting first column as key.")
             primary_col = df.columns[0] if len(df.columns) > 0 else None
 
+        # Resilience: Ensure NO columns are lost even if the LLM hallucinated or skipped them
+        mapped_cols = {primary_col}
+        mapped_cols.update(attributes_map.keys())
+        mapped_cols.update([rc.get("column") for rc in relationships_config if rc.get("column")])
+
+        for col in df.columns:
+            if col not in mapped_cols:
+                logger.info(f"Adding unmapped column '{col}' as an attribute to prevent data loss.")
+                attributes_map[col] = str(col).lower().replace(" ", "_")
+
         chunks_created = 0
         entities_created = set()
         relationships_created = 0

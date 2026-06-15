@@ -318,7 +318,7 @@ class KnowledgeBaseRepository(BaseRepository):
         from sqlalchemy import func
         result = await self.db.execute(
             select(
-                KnowledgeBase.name.label("source"),
+                KnowledgeBase.source.label("source"),
                 func.min(KnowledgeBase.created_at).label("created_at")
             )
             .where(
@@ -328,7 +328,7 @@ class KnowledgeBaseRepository(BaseRepository):
                     KnowledgeBase.is_active == True,
                 )
             )
-            .group_by(KnowledgeBase.name)
+            .group_by(KnowledgeBase.source)
             .order_by(func.min(KnowledgeBase.created_at).asc())
         )
         rows = result.all()

@@ -82,6 +82,7 @@ class KBResponse(BaseModel):
     )
     created_at: datetime
     updated_at: datetime
+    connected_integration: Optional[str] = Field(None, description="The type of external integration connected to this KB (e.g., google_drive, sharepoint)")
 
     class Config:
         from_attributes = True  # SQLAlchemy ORM mode
@@ -262,6 +263,7 @@ class GoogleDriveSyncRequest(BaseModel):
     """
     file_ids: Optional[list[str]] = Field(default_factory=list, description="Specific file IDs to ingest")
     folder_ids: Optional[list[str]] = Field(default_factory=list, description="Specific folder IDs to ingest (recursive)")
+    user_email: Optional[str] = Field(None, description="Email of the user syncing the drive")
 
     class Config:
         json_schema_extra = {
@@ -319,5 +321,67 @@ class SharePointSyncRequest(BaseModel):
             "example": {
                 "file_ids": ["driveId:itemId"],
                 "folder_ids": ["driveId:folderId"]
+            }
+        }
+
+
+class GmailRegister(BaseModel):
+    """Schema to register Gmail connection."""
+    credentials: dict = Field(..., description="Service Account JSON payload or OAuth token data")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "credentials": {
+                    "type": "service_account",
+                    "client_email": "crawler@example.com"
+                }
+            }
+        }
+
+
+class GmailSyncRequest(BaseModel):
+    """Schema for syncing Gmail messages."""
+    user_email: str = Field(..., description="Email of the user to sync from")
+    max_results: Optional[int] = Field(100, description="Maximum number of emails to fetch")
+    query: Optional[str] = Field(None, description="Optional Gmail search query (e.g. 'in:inbox')")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "user_email": "user@example.com",
+                "max_results": 50,
+                "query": "in:inbox is:unread"
+            }
+        }
+
+
+class OutlookRegister(BaseModel):
+    """Schema to register Outlook connection."""
+    credentials: dict = Field(..., description="Credentials for Microsoft Graph")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "credentials": {
+                    "client_id": "00000000-0000-0000-0000-000000000000",
+                    "client_secret": "secret",
+                    "tenant_id": "common"
+                }
+            }
+        }
+
+
+class OutlookSyncRequest(BaseModel):
+    """Schema for syncing Outlook messages."""
+    user_email: str = Field(..., description="Email of the user to sync from")
+    max_results: Optional[int] = Field(100, description="Maximum number of emails to fetch")
+    folder_id: Optional[str] = Field(None, description="Specific folder to sync (default Inbox)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "user_email": "user@example.com",
+                "max_results": 50
             }
         }

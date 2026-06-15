@@ -11,31 +11,43 @@ class SharePointAuthManager:
         self.client_secret = None
         self.tenant_id = None
         self._access_token = None
+        self._refresh_token = None
         self._token_expires_at = 0
 
     def load_credentials(self, credentials: dict) -> dict:
         self.client_id = credentials.get("client_id")
         self.client_secret = credentials.get("client_secret")
         self.tenant_id = credentials.get("tenant_id")
+        self._access_token = credentials.get("access_token")
+        self._refresh_token = credentials.get("refresh_token")
         return credentials
 
     async def get_valid_token(self) -> str:
-        if not self.client_id or not self.client_secret or not self.tenant_id:
-            raise ValueError("SharePoint credentials are not fully loaded")
-
+        # If we have a token and it's not expired (giving a 60s buffer)
         if self._access_token and time.time() < self._token_expires_at - 60:
             return self._access_token
 
+        if not self.client_id or not self.client_secret or not self.tenant_id:
+            raise ValueError("SharePoint credentials are not fully loaded")
+
         token_url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
         
-        # We use the Client Credentials flow to obtain an app-only token.
-        # This requires Sites.Read.All and Files.Read.All application permissions in Entra ID.
-        data = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "scope": "https://graph.microsoft.com/.default",
-            "grant_type": "client_credentials"
-        }
+        if self._refresh_token:
+            # 3-legged OAuth refresh token flow
+            data = {
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "refresh_token": self._refresh_token,
+                "grant_type": "refresh_token"
+            }
+        else:
+            # 2-legged App-only flow
+            data = {
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "scope": "https://graph.microsoft.com/.default",
+                "grant_type": "client_credentials"
+            }
 
         async with httpx.AsyncClient() as client:
             response = await client.post(token_url, data=data)
@@ -45,6 +57,8 @@ class SharePointAuthManager:
             
             result = response.json()
             self._access_token = result["access_token"]
+            if "refresh_token" in result:
+                self._refresh_token = result["refresh_token"]
             self._token_expires_at = time.time() + result.get("expires_in", 3600)
             
             return self._access_token

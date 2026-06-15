@@ -225,6 +225,55 @@ class AgentService:
                 f"Failed to create agent: {str(e)}", meta={"error_code": "CREATION_ERROR"}
             )
 
+    async def _enrich_agents_with_connections(self, agents, schema_class) -> list[dict]:
+        if not agents:
+            return []
+            
+        agent_ids = [a.id for a in agents]
+        
+        from sqlalchemy import select
+        from app.modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection
+        
+        query = select(
+            KnowledgeBase.agent_id, 
+            DatabaseConnection.db_type,
+            KnowledgeBase.source
+        ).outerjoin(
+            DatabaseConnection, KnowledgeBase.id == DatabaseConnection.kb_id
+        ).where(
+            KnowledgeBase.agent_id.in_(agent_ids),
+            KnowledgeBase.is_active == True
+        )
+        res = await self.db.execute(query)
+        
+        connections_by_agent = {}
+        for row in res.all():
+            agent_id = row.agent_id
+            if agent_id not in connections_by_agent:
+                connections_by_agent[agent_id] = set()
+            if row.db_type:
+                connections_by_agent[agent_id].add(row.db_type)
+            if row.source:
+                if row.source.startswith('google_drive'):
+                    connections_by_agent[agent_id].add('google_drive')
+                elif row.source.startswith('sharepoint'):
+                    connections_by_agent[agent_id].add('sharepoint')
+                elif row.source.startswith('gmail'):
+                    connections_by_agent[agent_id].add('gmail')
+                elif row.source.startswith('outlook'):
+                    connections_by_agent[agent_id].add('outlook')
+                elif row.source == 'web_scraper':
+                    connections_by_agent[agent_id].add('web_scraper')
+            
+        responses = []
+        for agent in agents:
+            # We support both AgentResponse and AgentEnhancedResponse
+            agent_dict = schema_class.model_validate(agent, from_attributes=True).model_dump(mode="json")
+            agent_dict["connected_integrations"] = list(connections_by_agent.get(agent.id, set()))
+            responses.append(agent_dict)
+            
+        return responses
+
     async def get_agent(self, agent_id: str) -> dict:
         """
         Get agent by ID (PostgreSQL only, Neo4j not needed for read).
@@ -241,11 +290,11 @@ class AgentService:
             if not agent:
                 return format_error(f"Agent not found: {agent_id}", meta={"status_code": 404})
 
+            enriched = await self._enrich_agents_with_connections([agent], schemas.AgentResponse)
+
             return format_success(
                 {
-                    "agent": schemas.AgentResponse.model_validate(
-                        agent, from_attributes=True
-                    )
+                    "agent": enriched[0]
                 }
             )
 
@@ -262,12 +311,11 @@ class AgentService:
                 limit=limit, offset=offset
             )
 
+            enriched = await self._enrich_agents_with_connections(agents, schemas.AgentResponse)
+
             return format_success(
                 {
-                    "agents": [
-                        schemas.AgentResponse.model_validate(a, from_attributes=True)
-                        for a in agents
-                    ],
+                    "agents": enriched,
                     "count": len(agents),
                     "total": total,
                 }
@@ -289,12 +337,54 @@ class AgentService:
                 search=search, limit=limit, offset=offset
             )
 
+            # Enhanced agents are just raw objects/dicts based on the repository return type, 
+            # we need to be careful if they are objects with an ID or dictionaries.
+            # Usually they are mapped to models or are raw rows. Let's handle them assuming they behave like models.
+            # To be safe, we just use the schema class to dump them.
+            
+            # Since agents here might be named tuples returned by the enhanced query, 
+            # we adapt the enrichment for them.
+            agent_ids = [a.agent_id for a in agents]
+            
+            from sqlalchemy import select
+            query = select(
+                KnowledgeBase.agent_id, 
+                DatabaseConnection.db_type,
+                KnowledgeBase.source
+            ).outerjoin(
+                DatabaseConnection, KnowledgeBase.id == DatabaseConnection.kb_id
+            ).where(
+                KnowledgeBase.agent_id.in_(agent_ids),
+                KnowledgeBase.is_active == True
+            )
+            res = await self.db.execute(query)
+            connections_by_agent = {}
+            for row in res.all():
+                if row.agent_id not in connections_by_agent:
+                    connections_by_agent[row.agent_id] = set()
+                if row.db_type:
+                    connections_by_agent[row.agent_id].add(row.db_type)
+                if row.source:
+                    if row.source.startswith('google_drive'):
+                        connections_by_agent[row.agent_id].add('google_drive')
+                    elif row.source.startswith('sharepoint'):
+                        connections_by_agent[row.agent_id].add('sharepoint')
+                    elif row.source.startswith('gmail'):
+                        connections_by_agent[row.agent_id].add('gmail')
+                    elif row.source.startswith('outlook'):
+                        connections_by_agent[row.agent_id].add('outlook')
+                    elif row.source == 'web_scraper':
+                        connections_by_agent[row.agent_id].add('web_scraper')
+            
+            responses = []
+            for agent in agents:
+                agent_dict = schemas.AgentEnhancedResponse.model_validate(agent, from_attributes=True).model_dump(mode="json")
+                agent_dict["connected_integrations"] = list(connections_by_agent.get(agent.agent_id, set()))
+                responses.append(agent_dict)
+
             return format_success(
                 {
-                    "agents": [
-                        schemas.AgentEnhancedResponse.model_validate(a)
-                        for a in agents
-                    ],
+                    "agents": responses,
                     "count": len(agents),
                     "total": total,
                 }
@@ -323,12 +413,11 @@ class AgentService:
                 user_id, limit=limit, offset=offset
             )
 
+            enriched = await self._enrich_agents_with_connections(agents, schemas.AgentResponse)
+
             return format_success(
                 {
-                    "agents": [
-                        schemas.AgentResponse.model_validate(a, from_attributes=True)
-                        for a in agents
-                    ],
+                    "agents": enriched,
                     "count": len(agents),
                     "total": total,
                 }
@@ -367,12 +456,11 @@ class AgentService:
                 user_id=str(user.id), limit=limit, offset=offset
             )
 
+            enriched = await self._enrich_agents_with_connections(agents, schemas.AgentResponse)
+
             return format_success(
                 {
-                    "agents": [
-                        schemas.AgentResponse.model_validate(a, from_attributes=True)
-                        for a in agents
-                    ],
+                    "agents": enriched,
                     "count": len(agents),
                     "total": total,
                     "owner": {

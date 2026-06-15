@@ -106,6 +106,7 @@ class AgentResponse(BaseModel):
     )
     created_at: datetime
     updated_at: datetime
+    connected_integrations: list[str] = Field(default_factory=list, description="List of integrations connected to any KB of this agent")
 
     class Config:
         from_attributes = True  # SQLAlchemy ORM mode
@@ -148,6 +149,7 @@ class AgentEnhancedResponse(BaseModel):
     kb_id: Optional[UUID]
     is_active: bool
     created_at: datetime
+    connected_integrations: list[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

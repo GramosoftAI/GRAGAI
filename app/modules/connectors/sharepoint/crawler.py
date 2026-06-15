@@ -23,9 +23,28 @@ class SharePointConnector(CheckpointedConnector[ConnectorCheckpoint]):
         self.auth_manager = SharePointAuthManager()
         self.site_urls = site_urls or []
 
-    def load_credentials(self, credentials: Dict[str, Any]) -> Dict[str, Any] | None:
-        return self.auth_manager.load_credentials(credentials)
-
+    def load_credentials(self, credentials: dict) -> dict:
+        """Load OAuth tokens from database connection parameters"""
+        self.access_token = credentials.get("access_token")
+        self.refresh_token = credentials.get("refresh_token")
+        
+        # ACTUALLY pass them to the auth manager!
+        self.auth_manager.load_credentials(credentials)
+        
+        if not self.access_token:
+            logger.error("Missing SharePoint OAuth access token")
+            return None
+            
+        return credentials
+    def get_headers(self) -> dict:
+        """Use the delegated access token for Microsoft Graph"""
+        if not hasattr(self, 'access_token') or not self.access_token:
+            raise ValueError("Access token is missing. User must authenticate via OAuth.")
+            
+        return {
+            "Authorization": f"Bearer {self.access_token}",
+            "Accept": "application/json"
+        }
     def build_dummy_checkpoint(self) -> ConnectorCheckpoint:
         return ConnectorCheckpoint(
             has_more=True,
@@ -38,6 +57,32 @@ class SharePointConnector(CheckpointedConnector[ConnectorCheckpoint]):
         except Exception as e:
             logger.warning(f"Failed to validate checkpoint JSON: {e}, falling back to dummy")
             return self.build_dummy_checkpoint()
+
+    async def get_site_id_from_url(self, url: str) -> Optional[str]:
+        """Resolve a SharePoint URL to a Microsoft Graph Site ID."""
+        import urllib.parse
+        try:
+            parsed = urllib.parse.urlparse(url)
+            hostname = parsed.hostname
+            if not hostname:
+                return None
+            
+            path = parsed.path
+            
+            if path.startswith("/sites/"):
+                site_path = "/sites/" + path.split("/")[2]
+                endpoint = f"/sites/{hostname}:{site_path}"
+            elif path.startswith("/teams/"):
+                site_path = "/teams/" + path.split("/")[2]
+                endpoint = f"/sites/{hostname}:{site_path}"
+            else:
+                endpoint = f"/sites/{hostname}"
+                
+            res = await execute_graph_request(self.auth_manager, "GET", endpoint)
+            return res.get("id")
+        except Exception as e:
+            logger.error(f"Failed to resolve site ID for {url}: {e}")
+            return None
 
     async def list_directory(self, parent_id: str) -> List[Dict[str, Any]]:
         """List files and folders directly within a specific SharePoint item (or drive root)."""

@@ -1,7 +1,9 @@
 from typing import Optional, List, Dict, Any
 """REST routes for Knowledge Base CRUD and document ingestion"""
 
-
+import os
+import httpx
+import urllib.parse
 
 from fastapi import APIRouter, Request, HTTPException, status
 
@@ -11,7 +13,8 @@ import logging
 
 import uuid
 
-
+from fastapi.responses import RedirectResponse
+from .models import DatabaseConnection
 
 from .service import KnowledgeBaseService
 
@@ -1078,8 +1081,31 @@ async def delete_kb(request: Request, kb_id: str) -> dict:
 
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@router.delete(
+    "/agent/{agent_id}/integration/{integration_type}",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Disconnect Agent Integration",
+    description="Deletes all knowledge bases for a specific agent that match the integration type.",
+)
+async def disconnect_agent_integration(request: Request, agent_id: str, integration_type: str) -> dict:
+    try:
+        tenant_id, user_id = get_tenant_and_user(request)
+        
+        valid_integrations = ["google_drive", "sharepoint", "gmail", "outlook"]
+        if integration_type not in valid_integrations:
+            raise HTTPException(status_code=400, detail=f"Invalid integration type. Must be one of {valid_integrations}")
 
+        async with AsyncSessionLocal() as db:
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.disconnect_agent_integration(agent_id, integration_type, user_id=user_id)
+            return result
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Disconnect Integration endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -1502,12 +1528,14 @@ async def sync_google_drive_to_graph(request: Request, kb_id: str, sync_req: Opt
 
             file_ids = sync_req.file_ids if sync_req else None
             folder_ids = sync_req.folder_ids if sync_req else None
+            user_email = sync_req.user_email if sync_req else None
             result = await service.sync_google_drive_source(
                 kb_id=kb_id,
                 credentials_dict=credentials,
                 folder_urls=folder_urls,
                 file_ids=file_ids,
-                folder_ids=folder_ids
+                folder_ids=folder_ids,
+                user_email=user_email
             )
 
 
@@ -1569,12 +1597,25 @@ async def register_sharepoint(
             db_conn_res = await db.execute(query)
             db_conn = db_conn_res.scalar_one_or_none()
 
+            import os
+            # Always use the backend's secure environment variables instead of trusting the frontend payload
+            backend_credentials = {
+                "client_id": os.getenv("MS_CLIENT_ID"),
+                "client_secret": os.getenv("MS_CLIENT_SECRET"),
+                "tenant_id": "common"
+            }
+            
             connection_params = {
-                "credentials": sp_request.credentials,
+                "credentials": backend_credentials,
                 "site_urls": sp_request.site_urls or []
             }
 
             if db_conn:
+                # Merge with existing to preserve access tokens if they somehow exist
+                existing_creds = db_conn.connection_params.get("credentials", {})
+                existing_creds.update(backend_credentials)
+                connection_params["credentials"] = existing_creds
+                
                 db_conn.db_type = "sharepoint"
                 db_conn.connection_params = connection_params
             else:
@@ -1671,3 +1712,440 @@ async def sync_sharepoint_to_graph(request: Request, kb_id: str, sync_req: Optio
     except Exception as e:
         logger.error(f"Error in sync_sharepoint_to_graph: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+# ============================================================================
+# GMAIL CONNECTOR ENDPOINTS
+# ============================================================================
+
+@router.post(
+    "/{kb_id}/gmail/register",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Register Gmail Connection",
+    description="Register Gmail credentials for this KB"
+)
+async def register_gmail(
+    request: Request,
+    kb_id: str,
+    gm_request: schemas.GmailRegister
+) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            from .models import DatabaseConnection
+            import uuid
+            
+            query = select(DatabaseConnection).where(
+                DatabaseConnection.kb_id == uuid.UUID(kb_id),
+                DatabaseConnection.tenant_id == uuid.UUID(tenant_id)
+            )
+            db_conn_res = await db.execute(query)
+            db_conn = db_conn_res.scalar_one_or_none()
+
+            connection_params = gm_request.credentials
+
+            if db_conn:
+                db_conn.db_type = "gmail"
+                db_conn.connection_params = connection_params
+            else:
+                db_conn = DatabaseConnection(
+                    tenant_id=uuid.UUID(tenant_id),
+                    kb_id=uuid.UUID(kb_id),
+                    db_type="gmail",
+                    connection_params=connection_params
+                )
+                db.add(db_conn)
+
+            await db.commit()
+            return format_success(
+                {"success": True},
+                meta={"message": "Gmail connection registered successfully"}
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in register_gmail: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post(
+    "/{kb_id}/gmail/sync",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Synchronize Gmail to Graph",
+    description="Crawl Gmail, fetch messages, generate embeddings, and load them into Neo4j graph"
+)
+async def sync_gmail_to_graph(request: Request, kb_id: str, sync_req: schemas.GmailSyncRequest) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            from .models import DatabaseConnection
+            from datetime import datetime
+            import uuid
+            
+            query = select(DatabaseConnection).where(
+                DatabaseConnection.kb_id == uuid.UUID(kb_id),
+                DatabaseConnection.tenant_id == uuid.UUID(tenant_id),
+                DatabaseConnection.db_type == "gmail"
+            )
+            res = await db.execute(query)
+            db_conn = res.scalar_one_or_none()
+            if not db_conn:
+                raise HTTPException(status_code=404, detail="No registered Gmail connection found for this KB")
+
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.sync_gmail_source(
+                kb_id=kb_id,
+                sync_req=sync_req.model_dump()
+            )
+
+            if not result.get("success"):
+                raise HTTPException(status_code=400, detail=result.get("error"))
+
+            db_conn.last_synced_at = datetime.now()
+            await db.commit()
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in sync_gmail_to_graph: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+# ============================================================================
+# OUTLOOK CONNECTOR ENDPOINTS
+# ============================================================================
+
+@router.post(
+    "/{kb_id}/outlook/register",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Register Outlook Connection",
+    description="Register Outlook credentials for this KB"
+)
+async def register_outlook(
+    request: Request,
+    kb_id: str,
+    ol_request: schemas.OutlookRegister
+) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            from .models import DatabaseConnection
+            import uuid
+            
+            query = select(DatabaseConnection).where(
+                DatabaseConnection.kb_id == uuid.UUID(kb_id),
+                DatabaseConnection.tenant_id == uuid.UUID(tenant_id)
+            )
+            db_conn_res = await db.execute(query)
+            db_conn = db_conn_res.scalar_one_or_none()
+
+            connection_params = ol_request.credentials
+
+            if db_conn:
+                db_conn.db_type = "outlook"
+                db_conn.connection_params = connection_params
+            else:
+                db_conn = DatabaseConnection(
+                    tenant_id=uuid.UUID(tenant_id),
+                    kb_id=uuid.UUID(kb_id),
+                    db_type="outlook",
+                    connection_params=connection_params
+                )
+                db.add(db_conn)
+
+            await db.commit()
+            return format_success(
+                {"success": True},
+                meta={"message": "Outlook connection registered successfully"}
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in register_outlook: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post(
+    "/{kb_id}/outlook/sync",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Synchronize Outlook to Graph",
+    description="Crawl Outlook, fetch messages, generate embeddings, and load them into Neo4j graph"
+)
+async def sync_outlook_to_graph(request: Request, kb_id: str, sync_req: schemas.OutlookSyncRequest) -> dict:
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            from .models import DatabaseConnection
+            from datetime import datetime
+            import uuid
+            
+            query = select(DatabaseConnection).where(
+                DatabaseConnection.kb_id == uuid.UUID(kb_id),
+                DatabaseConnection.tenant_id == uuid.UUID(tenant_id),
+                DatabaseConnection.db_type == "outlook"
+            )
+            res = await db.execute(query)
+            db_conn = res.scalar_one_or_none()
+            if not db_conn:
+                raise HTTPException(status_code=404, detail="No registered Outlook connection found for this KB")
+
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.sync_outlook_source(
+                kb_id=kb_id,
+                sync_req=sync_req.model_dump()
+            )
+
+            if not result.get("success"):
+                raise HTTPException(status_code=400, detail=result.get("error"))
+
+            db_conn.last_synced_at = datetime.now()
+            await db.commit()
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in sync_outlook_to_graph: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+# Add to your existing router, or create a new one
+@router.get("/{kb_id}/sharepoint/login")
+async def sharepoint_login(kb_id: str):
+    """Step 1: Redirect user to Microsoft Login"""
+    tenant_id = "common"
+    client_id = os.getenv("MS_CLIENT_ID")
+    redirect_uri = "http://localhost:4915/api/v1/knowledge-bases/sharepoint/callback"
+    
+    # We pass the kb_id in the state parameter so we know which KB to save the token to
+    state = kb_id 
+    
+    auth_url = (
+        f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
+        f"?client_id={client_id}"
+        f"&response_type=code"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        f"&response_mode=query"
+        f"&scope=openid profile email offline_access Files.Read.All Sites.Read.All"
+        f"&state={kb_id}"
+        f"&prompt=select_account"
+    )
+    return RedirectResponse(auth_url)
+@router.get("/sharepoint/callback")
+async def sharepoint_callback(code: str, state: str):
+    """Step 2: Microsoft redirects here with the auth code. Exchange for tokens."""
+    kb_id = state
+    tenant_id = "common"
+    client_id = os.getenv("MS_CLIENT_ID")
+    client_secret = os.getenv("MS_CLIENT_SECRET")
+    redirect_uri = "http://localhost:4915/api/v1/knowledge-bases/sharepoint/callback"
+    
+    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    
+    data = {
+        "client_id": client_id,
+        "scope": "openid profile email offline_access Files.Read.All Sites.Read.All",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+        "client_secret": client_secret,
+    }
+    
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(token_url, data=data)
+        token_data = resp.json()
+        
+        if "error" in token_data:
+            raise HTTPException(status_code=400, detail=token_data.get("error_description"))
+            
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+        
+    # Save tokens to DatabaseConnection
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select
+        import uuid
+        
+        query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
+        res = await db.execute(query)
+        db_conn = res.scalar_one_or_none()
+        
+        if not db_conn:
+            db_conn = DatabaseConnection(
+                tenant_id=uuid.UUID("506a8be1-fa85-4441-99c7-5e3c1408e15e"),  # Replace with actual user tenant mapping if needed
+                kb_id=uuid.UUID(kb_id),
+                db_type="sharepoint",
+                connection_params={}
+            )
+            db.add(db_conn)
+            
+        # Update with new OAuth tokens while preserving existing config
+        current_params = db_conn.connection_params or {}
+        
+        # If 'credentials' doesn't exist, create it
+        if "credentials" not in current_params:
+            current_params["credentials"] = {}
+            
+        current_params["credentials"]["access_token"] = access_token
+        current_params["credentials"]["refresh_token"] = refresh_token
+        
+        # Fetch Microsoft User Info
+        import httpx
+        headers = {"Authorization": f"Bearer {access_token}"}
+        async with httpx.AsyncClient() as client:
+            me_res = await client.get("https://graph.microsoft.com/v1.0/me", headers=headers)
+            if me_res.status_code == 200:
+                me_data = me_res.json()
+                current_params["credentials"]["microsoft_user_id"] = me_data.get("id")
+                current_params["credentials"]["microsoft_email"] = me_data.get("userPrincipalName")
+                
+        # In case the service layer looks for it at the root too
+        current_params["access_token"] = access_token
+        current_params["refresh_token"] = refresh_token
+        
+        # Reassign to trigger SQLAlchemy JSONB update
+        from sqlalchemy.orm.attributes import flag_modified
+        db_conn.connection_params = current_params
+        flag_modified(db_conn, "connection_params")
+        
+        await db.commit()
+
+        
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(
+        content="<script>window.close();</script><h2>Successfully connected SharePoint! You can close this window.</h2>"
+    )
+
+
+@router.get("/{kb_id}/gmail/login")
+async def gmail_login(kb_id: str):
+    import os, urllib.parse
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    redirect_uri = "http://localhost:4915/api/v1/knowledge-bases/gmail/callback"
+    state = kb_id
+    auth_url = (
+        f"https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={client_id}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        f"&response_type=code"
+        f"&scope=https://www.googleapis.com/auth/gmail.readonly%20https://www.googleapis.com/auth/userinfo.email"
+        f"&access_type=offline"
+        f"&prompt=consent"
+        f"&state={state}"
+    )
+    return RedirectResponse(auth_url)
+
+@router.get("/gmail/callback")
+async def gmail_callback(code: str, state: str):
+    import os, httpx, uuid
+    kb_id = state
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    redirect_uri = "http://localhost:4915/api/v1/knowledge-bases/gmail/callback"
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(token_url, data=data)
+        token_data = resp.json()
+        if "error" in token_data:
+            raise HTTPException(status_code=400, detail=token_data.get("error_description"))
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select
+        query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
+        res = await db.execute(query)
+        db_conn = res.scalar_one_or_none()
+        if not db_conn:
+            db_conn = DatabaseConnection(
+                tenant_id=uuid.UUID("506a8be1-fa85-4441-99c7-5e3c1408e15e"),
+                kb_id=uuid.UUID(kb_id),
+                db_type="gmail",
+                connection_params={}
+            )
+            db.add(db_conn)
+        db_conn.connection_params = {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret
+        }
+        await db.commit()
+    return {"message": "Successfully connected Gmail! You can now close this window."}
+
+
+@router.get("/{kb_id}/outlook/login")
+async def outlook_login(kb_id: str):
+    import os, urllib.parse
+    tenant_id = os.getenv("MS_TENANT_ID")
+    client_id = os.getenv("MS_CLIENT_ID")
+    redirect_uri = "http://localhost:4915/api/v1/knowledge-bases/outlook/callback"
+    state = kb_id 
+    auth_url = (
+        f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
+        f"?client_id={client_id}"
+        f"&response_type=code"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        f"&response_mode=query"
+        f"&scope=offline_access%20User.Read%20Mail.Read"
+        f"&state={state}"
+    )
+    return RedirectResponse(auth_url)
+
+@router.get("/outlook/callback")
+async def outlook_callback(code: str, state: str):
+    import os, httpx, uuid
+    kb_id = state
+    tenant_id = os.getenv("MS_TENANT_ID")
+    client_id = os.getenv("MS_CLIENT_ID")
+    client_secret = os.getenv("MS_CLIENT_SECRET")
+    redirect_uri = "http://localhost:4915/api/v1/knowledge-bases/outlook/callback"
+    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    data = {
+        "client_id": client_id,
+        "scope": "offline_access User.Read Mail.Read",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+        "client_secret": client_secret,
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(token_url, data=data)
+        token_data = resp.json()
+        if "error" in token_data:
+            raise HTTPException(status_code=400, detail=token_data.get("error_description"))
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select
+        query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
+        res = await db.execute(query)
+        db_conn = res.scalar_one_or_none()
+        if not db_conn:
+            db_conn = DatabaseConnection(
+                tenant_id=uuid.UUID("506a8be1-fa85-4441-99c7-5e3c1408e15e"),
+                kb_id=uuid.UUID(kb_id),
+                db_type="outlook",
+                connection_params={}
+            )
+            db.add(db_conn)
+        db_conn.connection_params = {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "tenant_id": tenant_id
+        }
+        await db.commit()
+    return {"message": "Successfully connected Outlook! You can now close this window."}

@@ -470,7 +470,7 @@ class KnowledgeBaseService:
 
             if not chunks:
 
-                return format_error("Document produced no chunks", status_code=400)
+                return format_error("Document produced no chunks", meta={"status_code": 400})
 
             logger.info(f" Chunked document into {len(chunks)} chunks")
 
@@ -854,13 +854,44 @@ class KnowledgeBaseService:
 
 
 
+    async def _enrich_kbs_with_connections(self, kbs) -> list[dict]:
+        if not kbs:
+            return []
+        kb_ids = [kb.id for kb in kbs]
+        from sqlalchemy import select
+        from .models import DatabaseConnection
+        query = select(DatabaseConnection.kb_id, DatabaseConnection.db_type).where(
+            DatabaseConnection.kb_id.in_(kb_ids)
+        )
+        res = await self.db.execute(query)
+        connections = {row.kb_id: row.db_type for row in res.all()}
+        
+        responses = []
+        for kb in kbs:
+            kb_dict = schemas.KBResponse.model_validate(kb, from_attributes=True).model_dump(mode="json")
+            kb_dict["connected_integration"] = connections.get(kb.id)
+            if not kb_dict["connected_integration"] and kb.source:
+                if kb.source.startswith('google_drive'):
+                    kb_dict["connected_integration"] = 'google_drive'
+                elif kb.source.startswith('sharepoint'):
+                    kb_dict["connected_integration"] = 'sharepoint'
+                elif kb.source.startswith('gmail'):
+                    kb_dict["connected_integration"] = 'gmail'
+                elif kb.source.startswith('outlook'):
+                    kb_dict["connected_integration"] = 'outlook'
+                elif kb.source == 'web_scraper':
+                    kb_dict["connected_integration"] = 'web_scraper'
+            responses.append(kb_dict)
+        return responses
+
     async def get_kb(self, kb_id: str) -> dict:
 
         kb = await self.repository.get_by_id(kb_id)
 
-        if not kb: return format_error(f"KB not found", status_code=404)
+        if not kb: return format_error(f"KB not found", meta={"status_code": 404})
 
-        return format_success({"kb": schemas.KBResponse.model_validate(kb, from_attributes=True)})
+        enriched = await self._enrich_kbs_with_connections([kb])
+        return format_success({"kb": enriched[0]})
 
 
 
@@ -868,7 +899,8 @@ class KnowledgeBaseService:
 
         kbs, total = await self.repository.list_kbs(limit=limit, offset=offset)
 
-        return format_success({"kbs": [schemas.KBResponse.model_validate(kb, from_attributes=True) for kb in kbs], "total": total})
+        enriched = await self._enrich_kbs_with_connections(kbs)
+        return format_success({"kbs": enriched, "total": total})
 
 
 
@@ -898,7 +930,8 @@ class KnowledgeBaseService:
 
         kbs, total = await self.repository.list_by_agent(agent_id, limit=limit, offset=offset)
 
-        return format_success({"kbs": [schemas.KBResponse.model_validate(kb, from_attributes=True) for kb in kbs], "total": total})
+        enriched = await self._enrich_kbs_with_connections(kbs)
+        return format_success({"kbs": enriched, "total": total})
 
 
 
@@ -912,7 +945,7 @@ class KnowledgeBaseService:
         await retry_neo4j_operation(
             lambda: self.neo4j_repo.execute_write(
                 "MATCH (kb:KnowledgeBase {id: $id, tenant_id: $tenant_id}) OPTIONAL MATCH (kb)-[:HAS_CHUNK]->(c:Chunk) DETACH DELETE kb, c",
-                {"id": kb_id}
+                {"id": kb_id, "tenant_id": str(self.tenant_id)}
             )
         )
 
@@ -938,7 +971,39 @@ class KnowledgeBaseService:
 
         return format_success(meta={"message": "KB deleted successfully"})
 
+    async def disconnect_agent_integration(self, agent_id: str, integration_type: str, user_id: Optional[str] = None) -> dict:
+        """
+        Deletes all knowledge bases for a specific agent that match the integration type.
+        This provides a clean disconnect.
+        """
+        from sqlalchemy import select, or_
+        import uuid
+        from .models import KnowledgeBase, DatabaseConnection
 
+        query = select(KnowledgeBase).outerjoin(
+            DatabaseConnection, KnowledgeBase.id == DatabaseConnection.kb_id
+        ).where(
+            KnowledgeBase.tenant_id == self.tenant_id,
+            KnowledgeBase.agent_id == uuid.UUID(agent_id),
+            KnowledgeBase.deleted_at.is_(None),
+            or_(
+                KnowledgeBase.source.startswith(integration_type),
+                DatabaseConnection.db_type == integration_type
+            )
+        )
+        res = await self.db.execute(query)
+        kbs = res.scalars().unique().all()
+
+        deleted_count = 0
+        for kb in kbs:
+            del_res = await self.delete_kb(str(kb.id), user_id)
+            if del_res.get("success"):
+                deleted_count += 1
+                
+        return format_success(
+            {"deleted_count": deleted_count},
+            meta={"message": f"Successfully disconnected {integration_type} by deleting {deleted_count} related KBs."}
+        )
 
     async def _validate_graph_integrity(self, kb_id: str) -> dict:
 
@@ -992,7 +1057,7 @@ class KnowledgeBaseService:
 
             if not kb:
 
-                return format_error(f"Knowledge Base not found: {kb_id}", status_code=404)
+                return format_error(f"Knowledge Base not found: {kb_id}", meta={"status_code": 404})
 
 
 
@@ -1174,7 +1239,7 @@ class KnowledgeBaseService:
 
             if not db_conn:
 
-                return format_error("No registered database connection found for this KB", status_code=404)
+                return format_error("No registered database connection found for this KB", meta={"status_code": 404})
 
 
 
@@ -1246,7 +1311,7 @@ class KnowledgeBaseService:
 
             if not db_conn:
 
-                return format_error("No registered database connection found for this KB", status_code=404)
+                return format_error("No registered database connection found for this KB", meta={"status_code": 404})
 
 
 
@@ -1254,7 +1319,7 @@ class KnowledgeBaseService:
 
             if not kb:
 
-                return format_error("Parent Knowledge Base not found", status_code=404)
+                return format_error("Parent Knowledge Base not found", meta={"status_code": 404})
 
 
 
@@ -1594,7 +1659,7 @@ class KnowledgeBaseService:
             res = await self.db.execute(query)
             db_conn = res.scalar_one_or_none()
             if not db_conn:
-                return format_error("No registered Google Drive connection found for this KB", status_code=404)
+                return format_error("No registered Google Drive connection found for this KB", meta={"status_code": 404})
 
             credentials = db_conn.connection_params.get("credentials", {})
             
@@ -1633,7 +1698,7 @@ class KnowledgeBaseService:
         file_ids: Optional[List[str]] = None,
 
         folder_ids: Optional[List[str]] = None,
-
+        user_email: Optional[str] = None,
     ) -> dict:
 
         """
@@ -1661,13 +1726,36 @@ class KnowledgeBaseService:
             # 1. INITIALIZE CONNECTOR
 
             from app.modules.connectors.google.crawler import GoogleDriveConnector
-
             connector = GoogleDriveConnector(folder_urls=folder_urls)
-
             connector.load_credentials(credentials_dict)
-
             
-
+            # Update Knowledge Base source to reflect Google Drive connection
+            effective_email = user_email or connector.auth_manager.primary_admin_email or "unknown_email"
+            pg_kb = await self.repository.get_by_id(kb_id)
+            if pg_kb:
+                pg_kb.source = f"google_drive({effective_email})"
+                self.db.add(pg_kb)
+                await self.db.commit()
+                
+                # Also update Neo4j
+                try:
+                    from app.core.neo4j_retry import retry_neo4j_operation
+                    await retry_neo4j_operation(
+                        lambda: self.neo4j_repo.execute_write(
+                            """
+                            MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                            SET kb.source = $new_source
+                            """,
+                            {
+                                "kb_id": kb_id,
+                                "tenant_id": str(self.tenant_id),
+                                "new_source": f"google_drive({effective_email})"
+                            }
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update Neo4j KB source: {e}")
+            
             checkpoint = connector.build_dummy_checkpoint()
 
             
@@ -2043,7 +2131,7 @@ class KnowledgeBaseService:
             res = await self.db.execute(query)
             db_conn = res.scalar_one_or_none()
             if not db_conn:
-                return format_error("No registered SharePoint connection found for this KB", status_code=404)
+                return format_error("No registered SharePoint connection found for this KB", meta={"status_code": 404})
 
             credentials = db_conn.connection_params.get("credentials", {})
             site_urls = db_conn.connection_params.get("site_urls", [])
@@ -2055,9 +2143,12 @@ class KnowledgeBaseService:
             # If no parent_id is specified, we default to the first site root if available
             target_id = parent_id
             if not target_id and site_urls:
-                # Extract site id from site url as fallback or just pass "root"
-                # Simplification: use 'root'
-                target_id = "root"
+                first_url = site_urls[0]
+                site_id = await connector.get_site_id_from_url(first_url)
+                if site_id:
+                    target_id = site_id
+                else:
+                    target_id = "root"
 
             raw_items = await connector.list_directory(target_id or "root")
             items = []
@@ -2288,3 +2379,242 @@ class KnowledgeBaseService:
             return format_error(f"Failed to synchronize SharePoint: {str(e)}")
 
 
+
+    async def sync_gmail_source(self, kb_id: str, sync_req: dict) -> dict:
+        import time
+        import json
+        from uuid import uuid4
+        from sqlalchemy import select
+        from app.modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
+        from app.modules.connectors.google.gmail_crawler import GmailConnector
+        from app.core.connectors import ConnectorCheckpoint
+
+        sync_start_time = time.time()
+        
+        query = select(KnowledgeBase).where(KnowledgeBase.id == uuid.UUID(kb_id), KnowledgeBase.tenant_id == self.tenant_id)
+        res = await self.db.execute(query)
+        pg_kb = res.scalar_one_or_none()
+        if not pg_kb:
+            return format_error('Knowledge Base not found', meta={'error_code': 'KB_NOT_FOUND'})
+
+        conn_query = select(DatabaseConnection).where(
+            DatabaseConnection.kb_id == uuid.UUID(kb_id),
+            DatabaseConnection.tenant_id == self.tenant_id,
+            DatabaseConnection.db_type == 'gmail'
+        )
+        conn_res = await self.db.execute(conn_query)
+        db_conn = conn_res.scalar_one_or_none()
+        if not db_conn:
+            return format_error('Gmail connection not configured for this KB.')
+
+        credentials = db_conn.connection_params
+        user_email = sync_req.get('user_email')
+        if not user_email:
+            return format_error('user_email is required for Gmail sync.')
+
+        pg_kb.source = f'gmail({user_email})'
+        await self.db.commit()
+
+        neo_query = "MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id}) SET kb.source = $new_source"
+        try:
+            from app.core.neo4j import execute_write_query
+            await execute_write_query(neo_query, {'kb_id': str(kb_id), 'tenant_id': str(self.tenant_id), 'new_source': f'gmail({user_email})'})
+        except Exception as e:
+            logger.warning(f'Failed to update source string in Neo4j: {e}')
+
+        crawler = GmailConnector(query=sync_req.get('query'), max_results=sync_req.get('max_results', 100))
+        crawler.load_credentials(credentials)
+        checkpoint = ConnectorCheckpoint(user_emails=[user_email], has_more=True, completion_stage='start')
+
+        messages_synced = 0
+        neo4j_nodes = []
+
+        try:
+            async for doc in crawler.load_from_checkpoint(0, time.time(), checkpoint):
+                if hasattr(doc, 'node_type'):
+                    continue
+                
+                msg_data = await crawler.get_message_content(doc.id, user_email)
+                if not msg_data or not msg_data.get('body'):
+                    continue
+
+                chunk_id = str(uuid4())
+                chunk_text = f"Subject: {msg_data.get('subject')}\nFrom: {msg_data.get('sender')}\nDate: {msg_data.get('date')}\n\n{msg_data.get('body')}"
+
+                from app.core.entity_extraction import EntityExtractor
+                entities = await EntityExtractor.extract_entities(msg_data.get('body') or "")
+
+                neo4j_nodes.append({
+                    'chunk_id': chunk_id,
+                    'message_id': doc.id,
+                    'subject': msg_data.get('subject'),
+                    'sender': msg_data.get('sender'),
+                    'date': msg_data.get('date'),
+                    'entities': [{'text': e.text, 'type': e.entity_type} for e in entities[:50]]
+                })
+
+                from app.core.embeddings import get_embedding
+                emb = await get_embedding(chunk_text)
+                
+                pg_chunk = DocumentChunk(
+                    id=uuid.UUID(chunk_id),
+                    tenant_id=self.tenant_id,
+                    kb_id=uuid.UUID(kb_id),
+                    content=chunk_text,
+                    embedding=emb,
+                    metadata_json={
+                        'source': 'gmail',
+                        'message_id': doc.id
+                    }
+                )
+                self.db.add(pg_chunk)
+                messages_synced += 1
+
+            if neo4j_nodes:
+                neo_query_emails = """
+                MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                UNWIND $chunks AS chunk
+                MERGE (p:Person {text: chunk.sender, tenant_id: $tenant_id})
+                ON CREATE SET p.type = 'PERSON', p.id = randomUUID(), p.created_at = timestamp()
+                MERGE (e:Email {id: chunk.message_id, tenant_id: $tenant_id})
+                ON CREATE SET e.subject = chunk.subject, e.date = chunk.date, e.chunk_id = chunk.chunk_id, e.created_at = timestamp()
+                MERGE (p)-[:SENT]->(e)
+                MERGE (kb)-[:HAS_EMAIL]->(e)
+                WITH e, chunk, $tenant_id AS tenant_id
+                UNWIND chunk.entities AS ent
+                MERGE (ent_node:Entity {text: ent.text, type: ent.type, tenant_id: tenant_id})
+                ON CREATE SET ent_node.id = randomUUID(), ent_node.created_at = timestamp()
+                MERGE (e)-[:MENTIONS]->(ent_node)
+                """
+                await execute_write_query(neo_query_emails, {
+                    'kb_id': str(kb_id),
+                    'tenant_id': str(self.tenant_id),
+                    'chunks': neo4j_nodes
+                })
+                
+                pg_kb.total_chunks += messages_synced
+                await self.db.commit()
+
+            from app.utils.formatters import format_success, format_error
+            return format_success({'kb_id': kb_id, 'messages_synced': messages_synced, 'sync_duration_seconds': time.time() - sync_start_time}, meta={'message': 'Gmail synchronized successfully'})
+
+        except Exception as e:
+            logger.error(f'Gmail sync failed: {e}', exc_info=True)
+            from app.utils.formatters import format_error
+            return format_error(f'Failed to sync Gmail: {e}')
+
+    async def sync_outlook_source(self, kb_id: str, sync_req: dict) -> dict:
+        import time
+        import json
+        from uuid import uuid4
+        from sqlalchemy import select
+        from app.modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
+        from app.modules.connectors.sharepoint.outlook_crawler import OutlookConnector
+        from app.core.connectors import ConnectorCheckpoint
+
+        sync_start_time = time.time()
+        
+        query = select(KnowledgeBase).where(KnowledgeBase.id == uuid.UUID(kb_id), KnowledgeBase.tenant_id == self.tenant_id)
+        res = await self.db.execute(query)
+        pg_kb = res.scalar_one_or_none()
+        if not pg_kb:
+            return format_error('Knowledge Base not found', meta={'error_code': 'KB_NOT_FOUND'})
+
+        conn_query = select(DatabaseConnection).where(
+            DatabaseConnection.kb_id == uuid.UUID(kb_id),
+            DatabaseConnection.tenant_id == self.tenant_id,
+            DatabaseConnection.db_type == 'outlook'
+        )
+        conn_res = await self.db.execute(conn_query)
+        db_conn = conn_res.scalar_one_or_none()
+        if not db_conn:
+            return format_error('Outlook connection not configured for this KB.')
+
+        user_email = sync_req.get('user_email')
+        if not user_email:
+            return format_error('user_email is required for Outlook sync.')
+
+        pg_kb.source = f'outlook({user_email})'
+        await self.db.commit()
+
+        crawler = OutlookConnector(folder_id=sync_req.get('folder_id'), max_results=sync_req.get('max_results', 100))
+        crawler.load_credentials(db_conn.connection_params)
+        checkpoint = ConnectorCheckpoint(user_emails=[user_email], has_more=True, completion_stage='start')
+
+        messages_synced = 0
+        neo4j_nodes = []
+
+        try:
+            async for doc in crawler.load_from_checkpoint(0, time.time(), checkpoint):
+                if hasattr(doc, 'node_type'):
+                    continue
+                
+                msg_data = await crawler.get_message_content(user_email, doc.id)
+                if not msg_data or not msg_data.get('body'):
+                    continue
+
+                chunk_id = str(uuid4())
+                chunk_text = f"Subject: {msg_data.get('subject')}\nFrom: {msg_data.get('sender')}\nDate: {msg_data.get('date')}\n\n{msg_data.get('body')}"
+
+                from app.core.entity_extraction import EntityExtractor
+                entities = await EntityExtractor.extract_entities(msg_data.get('body') or "")
+
+                neo4j_nodes.append({
+                    'chunk_id': chunk_id,
+                    'message_id': doc.id,
+                    'subject': msg_data.get('subject'),
+                    'sender': msg_data.get('sender'),
+                    'date': msg_data.get('date'),
+                    'entities': [{'text': e.text, 'type': e.entity_type} for e in entities[:50]]
+                })
+
+                from app.core.embeddings import get_embedding
+                emb = await get_embedding(chunk_text)
+                
+                pg_chunk = DocumentChunk(
+                    id=uuid.UUID(chunk_id),
+                    tenant_id=self.tenant_id,
+                    kb_id=uuid.UUID(kb_id),
+                    content=chunk_text,
+                    embedding=emb,
+                    metadata_json={
+                        'source': 'outlook',
+                        'message_id': doc.id
+                    }
+                )
+                self.db.add(pg_chunk)
+                messages_synced += 1
+
+            if neo4j_nodes:
+                neo_query_emails = """
+                MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                UNWIND $chunks AS chunk
+                MERGE (p:Person {text: chunk.sender, tenant_id: $tenant_id})
+                ON CREATE SET p.type = 'PERSON', p.id = randomUUID(), p.created_at = timestamp()
+                MERGE (e:Email {id: chunk.message_id, tenant_id: $tenant_id})
+                ON CREATE SET e.subject = chunk.subject, e.date = chunk.date, e.chunk_id = chunk.chunk_id, e.created_at = timestamp()
+                MERGE (p)-[:SENT]->(e)
+                MERGE (kb)-[:HAS_EMAIL]->(e)
+                WITH e, chunk, $tenant_id AS tenant_id
+                UNWIND chunk.entities AS ent
+                MERGE (ent_node:Entity {text: ent.text, type: ent.type, tenant_id: tenant_id})
+                ON CREATE SET ent_node.id = randomUUID(), ent_node.created_at = timestamp()
+                MERGE (e)-[:MENTIONS]->(ent_node)
+                """
+                from app.core.neo4j import execute_write_query
+                await execute_write_query(neo_query_emails, {
+                    'kb_id': str(kb_id),
+                    'tenant_id': str(self.tenant_id),
+                    'chunks': neo4j_nodes
+                })
+                
+                pg_kb.total_chunks += messages_synced
+                await self.db.commit()
+
+            from app.utils.formatters import format_success, format_error
+            return format_success({'kb_id': kb_id, 'messages_synced': messages_synced, 'sync_duration_seconds': time.time() - sync_start_time}, meta={'message': 'Outlook synchronized successfully'})
+
+        except Exception as e:
+            logger.error(f'Outlook sync failed: {e}', exc_info=True)
+            from app.utils.formatters import format_error
+            return format_error(f'Failed to sync Outlook: {e}')
