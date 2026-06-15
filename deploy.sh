@@ -5,7 +5,7 @@ echo "=========================================="
 echo "🚀 Starting GraphMind Auto-Deployment"
 echo "=========================================="
 
-cd /home/deploy/graphmind
+cd /home/GRAG/backend
 
 echo "Fetching latest changes..."
 git fetch origin backdev
