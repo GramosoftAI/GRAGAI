@@ -691,21 +691,10 @@ class RAGPipeline:
 
 
         seed_chunks = await self._retrieve_seed_chunks(
-
-
-
             kb_ids=kb_ids,
-
-
-
             query_embedding=query_embedding,
-
-
-
             top_k=top_k,
-
-
-
+            query=query,
         )
 
 
@@ -1209,545 +1198,215 @@ class RAGPipeline:
 
 
     async def _retrieve_seed_chunks(
-
-
-
         self,
-
-
-
         kb_ids: List[str],
-
-
-
         query_embedding: List[float],
-
-
-
         top_k: int,
-
-
-
+        query: Optional[str] = None,
     ) -> List[Dict]:
-
-
-
         """
-
-
-
         Retrieve top-k chunks by embedding similarity.
-
-
-
         Uses PostgreSQL pgvector if available, with a resilient fallback to Neo4j.
-
-
-
-
-
-
-
-        Args:
-
-
-
-            kb_ids: List of Knowledge Base UUIDs
-
-
-
-            query_embedding: Query embedding vector
-
-
-
-            top_k: Number of chunks to retrieve
-
-
-
-
-
-
-
-        Returns:
-
-
-
-            List of chunks sorted by similarity (highest first)
-
-
-
         """
-
-
+        # Extract exact terms (numbers >= 4 digits, alphanumeric >= 5 chars) from query for hybrid search/boosting
+        exact_terms = []
+        if query:
+            import re
+            numbers = re.findall(r'\b\d{4,}\b', query)
+            exact_terms.extend(numbers)
+            alphanumeric = re.findall(r'\b[A-Za-z0-9\-\.]{5,}\b', query)
+            for item in alphanumeric:
+                if item not in exact_terms:
+                    exact_terms.append(item)
 
         # ============= STRATEGY 1: POSTGRESQL PGVECTOR =============
-
-
-
         if self.db:
-
-
-
             try:
-
-
-
-                from sqlalchemy import select, and_
-
-
-
+                from sqlalchemy import select, and_, or_
                 from app.modules.knowledge_bases.models import DocumentChunk
 
-
-
-                
-
-
-
                 # Query using pgvector cosine_distance operator
-
-
-
-                # similarity = 1.0 - cosine_distance
-
-
-
                 stmt = (
-
-
-
                     select(
-
-
-
                         DocumentChunk.id,
-
-
-
                         DocumentChunk.text,
-
-
-
                         DocumentChunk.chunk_index,
-
-
-
                         DocumentChunk.kb_id,
-
-
-
                         (1.0 - DocumentChunk.embedding.cosine_distance(query_embedding)).label("similarity")
-
-
-
                     )
-
-
-
                     .where(
-
-
-
                         and_(
-
-
-
                             DocumentChunk.tenant_id == UUID(self.tenant_id),
-
-
-
                             DocumentChunk.kb_id.in_([UUID(kb_id) for kb_id in kb_ids])
-
-
-
                         )
-
-
-
                     )
-
-
-
                     .order_by(DocumentChunk.embedding.cosine_distance(query_embedding).asc())
-
-
-
                     .limit(top_k)
-
-
-
                 )
-
-
-
-                
-
-
 
                 result = await self.db.execute(stmt)
-
-
-
                 rows = result.fetchall()
 
-
-
-                
-
-
-
                 pg_chunks = []
-
-
+                retrieved_ids = set()
 
                 for row in rows:
-
-
-
                     similarity = float(row.similarity)
-
-
-
                     if similarity >= self.settings.similarity_min_threshold:
-
-
+                        chunk_id = str(row.id)
+                        retrieved_ids.add(chunk_id)
+                        
+                        # Apply keyword boost if term matches
+                        weight = 1.0
+                        boosted_similarity = similarity
+                        if exact_terms:
+                            chunk_text = row.text or ""
+                            if any(term in chunk_text for term in exact_terms):
+                                boosted_similarity = max(similarity, 0.85)
+                                weight = 1.5
 
                         pg_chunks.append({
-
-
-
-                            "chunk_id": str(row.id),
-
-
-
+                            "chunk_id": chunk_id,
                             "text": row.text,
-
-
-
                             "position": row.chunk_index,
-
-
-
                             "kb_id": str(row.kb_id),
-
-
-
-                            "embedding": None,  # embedding vector itself not needed downstream
-
-
-
-                            "similarity": similarity,
-
-
-
-                            "weight": 1.0,
-
-
-
+                            "embedding": None,
+                            "similarity": boosted_similarity,
+                            "weight": weight,
                             "source": None
-
-
-
                         })
 
+                # --- KEYWORD EXACT MATCH SEARCH (HYBRID FALLBACK) ---
+                if exact_terms:
+                    conditions = []
+                    for term in exact_terms:
+                        conditions.append(DocumentChunk.text.like(f"%{term}%"))
+                    
+                    if conditions:
+                        stmt_kw = (
+                            select(
+                                DocumentChunk.id,
+                                DocumentChunk.text,
+                                DocumentChunk.chunk_index,
+                                DocumentChunk.kb_id,
+                                (1.0 - DocumentChunk.embedding.cosine_distance(query_embedding)).label("similarity")
+                            )
+                            .where(
+                                and_(
+                                    DocumentChunk.tenant_id == UUID(self.tenant_id),
+                                    DocumentChunk.kb_id.in_([UUID(kb_id) for kb_id in kb_ids]),
+                                    or_(*conditions)
+                                )
+                            )
+                            .limit(top_k)
+                        )
+                        
+                        res_kw = await self.db.execute(stmt_kw)
+                        rows_kw = res_kw.fetchall()
+                        
+                        added_count = 0
+                        for row in rows_kw:
+                            chunk_id = str(row.id)
+                            if chunk_id not in retrieved_ids:
+                                similarity = float(row.similarity)
+                                boosted_similarity = max(similarity, 0.85)
+                                
+                                pg_chunks.append({
+                                    "chunk_id": chunk_id,
+                                    "text": row.text,
+                                    "position": row.chunk_index,
+                                    "kb_id": str(row.kb_id),
+                                    "embedding": None,
+                                    "similarity": boosted_similarity,
+                                    "weight": 1.5,
+                                    "source": None
+                                })
+                                retrieved_ids.add(chunk_id)
+                                added_count += 1
+                        if added_count > 0:
+                            logger.info(f" Exact keyword search fetched {added_count} additional matching chunks")
 
-
-                
-
-
-
-                logger.info(f" PostgreSQL pgvector retrieved {len(pg_chunks)} seed chunks")
-
-
-
+                logger.info(f" PostgreSQL pgvector/keyword retrieved {len(pg_chunks)} seed chunks")
                 if pg_chunks:
-
-
-
-                    return pg_chunks
-
-
-
-                
-
-
+                    pg_chunks.sort(key=lambda x: x["similarity"], reverse=True)
+                    return pg_chunks[:top_k]
 
                 logger.warning(" No chunks met similarity threshold in PostgreSQL. Falling back to Neo4j...")
-
-
-
             except Exception as pg_err:
-
-
-
                 logger.error(f" PostgreSQL pgvector search failed: {pg_err}. Falling back to Neo4j...", exc_info=True)
 
-
-
-
-
-
-
         # ============= STRATEGY 2: NEO4J VECTOR FALLBACK =============
-
-
-
-        query = """
-
-
-
+        query_neo = """
         MATCH (kb:KnowledgeBase)
-
-
-
         WHERE kb.id IN $kb_ids AND kb.tenant_id = $tenant_id
-
-
-
         MATCH (kb)-[:HAS_CHUNK]->(c:Chunk)
-
-
-
         WHERE c.embedding IS NOT NULL AND size(c.embedding) = $dimension
-
-
-
         RETURN c.id as chunk_id, c.text as text, c.position as position, c.kb_id as kb_id, c.embedding as embedding, coalesce(c.weight, 1.0) as weight, c.source as source
-
-
-
         LIMIT 1000
-
-
-
         """
 
-
-
-
-
-
-
         try:
-
-
-
             results = await self.neo4j_repo.execute_read(
-
-
-
-                query,
-
-
-
+                query_neo,
                 {
-
-
-
                     "kb_ids": kb_ids, 
-
-
-
                     "tenant_id": self.tenant_id,
-
-
-
                     "dimension": EmbeddingGenerator.get_dimension()
-
-
-
                 },
-
-
-
             )
-
-
-
-
-
-
 
             if not results:
-
-
-
                 logger.warning(f" No chunks found for KBs {kb_ids} in Neo4j.")
-
-
-
                 return []
 
-
-
-
-
-
-
-            # LOG CHUNK TEXT (Verification)
-
-
-
             for res in results[:3]:
-
-
-
                 logger.info(f" Found chunk in Neo4j: {res['text'][:50]}... (Dim: {len(res['embedding'])})")
 
-
-
-
-
-
-
-            # Compute similarities (Phase 2: brute force)
-
-
-
+            # Compute similarities
             chunks_with_similarity = []
-
-
-
             for result in results:
-
-
-
                 similarity = EmbeddingGenerator.cosine_similarity(
-
-
-
                     query_embedding, result["embedding"]
-
-
-
                 )
-
-
+                
+                # Check for exact terms matching
+                weight = result.get("weight", 1.0)
+                if exact_terms:
+                    chunk_text = result["text"] or ""
+                    if any(term in chunk_text for term in exact_terms):
+                        similarity = max(similarity, 0.85)
+                        weight = 1.5
 
                 chunks_with_similarity.append(
-
-
-
                     {
-
-
-
                         "chunk_id": result["chunk_id"],
-
-
-
                         "text": result["text"],
-
-
-
                         "position": result["position"],
-
-
-
                         "kb_id": result["kb_id"],
-
-
-
                         "embedding": result["embedding"],
-
-
-
                         "similarity": similarity,
-
-
-
-                        "weight": result.get("weight", 1.0),
-
-
-
+                        "weight": weight,
                         "source": result.get("source"),
-
-
-
                     }
-
-
-
                 )
 
-
-
-
-
-
-
             # Sort by similarity, return top-k
-
-
-
-            # Only include chunks above the configured minimum threshold
-
-
-
             sorted_chunks = sorted(
-
-
-
                 [c for c in chunks_with_similarity if c["similarity"] >= self.settings.similarity_min_threshold],
-
-
-
                 key=lambda x: x["similarity"],
-
-
-
                 reverse=True
-
-
-
             )
-
-
-
             
-
-
-
             if chunks_with_similarity:
-
-
-
                 max_score = max(c["similarity"] for c in chunks_with_similarity)
-
-
-
                 logger.info(f" Max similarity score found in Neo4j: {max_score:.4f} (Threshold: {self.settings.similarity_min_threshold})")
-
-
-
             else:
-
-
-
                 logger.warning(" No chunks found in Neo4j (with embeddings) for this Knowledge Base.")
-
-
-
-
-
-
 
             return sorted_chunks[:top_k]
 
-
-
-
-
-
-
         except Exception as e:
-
-
-
             logger.error(f" Failed to retrieve seed chunks via Neo4j: {e}")
-
-
-
             return []
 
 

@@ -1,4 +1,4 @@
-name: Secure GraphMind Deployment
+name: Secure GRAG Deployment
 
 on:
   push:
@@ -15,8 +15,13 @@ jobs:
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_KEY }}
+          password: ${{ secrets.PASSWORD }}
+          port: ${{ secrets.PORT }}
+          command_timeout: 10m
           script: |
-            cd /home/deploy/graphmind
+            cd /home/GRAG/backend
+            git fetch origin backdev
+            git reset --hard origin/backdev
+            sed -i 's/\r$//' deploy.sh
             chmod +x deploy.sh
-            ./deploy.sh
+            bash deploy.sh
