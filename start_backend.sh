@@ -14,9 +14,12 @@ echo "Starting uvicorn with detailed output..."
 echo "=========================================="
 echo ""
 
+# Ensure we are in the correct directory
+cd /home/GRAG/backend
+
 # Use the virtual environment uvicorn if it exists, otherwise fallback to global
 if [ -f "venv/bin/uvicorn" ]; then
-    UVICORN_CMD="venv/bin/uvicorn"
+    UVICORN_CMD="./venv/bin/uvicorn"
 else
     UVICORN_CMD="uvicorn"
 fi
