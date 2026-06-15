@@ -20,5 +20,6 @@ jobs:
           command_timeout: 10m
           script: |
             cd /home/GRAG/backend
+            sed -i 's/\r$//' deploy.sh
             chmod +x deploy.sh
-            ./deploy.sh
+            bash deploy.sh
