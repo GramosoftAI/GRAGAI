@@ -20,6 +20,8 @@ jobs:
           command_timeout: 10m
           script: |
             cd /home/GRAG/backend
+            git fetch origin backdev
+            git reset --hard origin/backdev
             sed -i 's/\r$//' deploy.sh
             chmod +x deploy.sh
             bash deploy.sh
