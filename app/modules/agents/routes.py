@@ -1039,6 +1039,12 @@ async def instant_ingest_pdf(
 
             raise HTTPException(status_code=400, detail="File too large (max 10MB)")
 
+        # ----------------------------------------------------
+        # S3 STORAGE & DUPLICATE PREVENTION
+        # ----------------------------------------------------
+        from ...core.s3 import S3StorageService
+        s3_service = S3StorageService()
+        await s3_service.store_file_if_not_duplicate(str(tenant_id), filename, content)
 
 
         # ----------------------------------------------------
