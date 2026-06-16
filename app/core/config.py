@@ -216,6 +216,12 @@ class Settings(BaseSettings):
 
     gdocz_api_key: Optional[str] = None  # For PDF  Markdown extraction (primary)
 
+    # ============= AWS S3 =============
+    aws_region: Optional[str] = None
+    aws_access_key_id: Optional[str] = None
+    aws_secret_access_key: Optional[str] = None
+    aws_s3_bucket: Optional[str] = None
+
 
 
     # ============= LOGGING =============

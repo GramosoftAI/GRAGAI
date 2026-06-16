@@ -670,13 +670,16 @@ async def ingest_file(
 
         filename = file.filename.lower()
 
+        # Read file content
+        content = await file.read()
+        
+        # 1. Store in S3 and check for duplicates
+        from ...core.s3 import S3StorageService
+        s3_service = S3StorageService()
+        await s3_service.store_file_if_not_duplicate(str(tenant_id), file.filename, content)
 
-
-        # 1. Route based on file extension
-
+        # 2. Route based on file extension
         if filename.endswith(".pdf"):
-
-            content = await file.read()
 
             if len(content) > 10 * 1024 * 1024:  # 10MB limit
 
@@ -757,8 +760,6 @@ async def ingest_file(
 
 
         elif filename.endswith((".xlsx", ".xls", ".csv")):
-
-            content = await file.read()
 
             if len(content) > 20 * 1024 * 1024:  # 20MB limit
 
