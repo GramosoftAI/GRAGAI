@@ -45,15 +45,22 @@ class S3StorageService:
         # Compute SHA-256 hash of the file
         file_hash = hashlib.sha256(file_bytes).hexdigest()
         
-        # Construct S3 key: base_prefix + uploads/tenant_id/hash
-        s3_key = f"{self.base_prefix}uploads/{tenant_id}/{file_hash}"
+        # Construct S3 key using the original filename
+        s3_key = f"{self.base_prefix}uploads/{tenant_id}/{filename}"
         
-        # Check if the file already exists (duplicate detection)
+        # Check if the file already exists (duplicate detection based on exact filename)
         try:
-            self.client.head_object(Bucket=self.bucket_name, Key=s3_key)
-            # If we succeed, the object exists -> it's a duplicate
-            logger.info(f"Duplicate file detected for tenant {tenant_id}: {filename} (Hash: {file_hash})")
-            return True, None
+            response = self.client.head_object(Bucket=self.bucket_name, Key=s3_key)
+            # If we succeed, an object with this filename exists. 
+            # Let's check if it's the exact same content (duplicate)
+            existing_hash = response.get('Metadata', {}).get('content-hash')
+            if existing_hash == file_hash:
+                logger.info(f"Duplicate file detected for tenant {tenant_id}: {filename} (Hash: {file_hash})")
+                return True, None
+            else:
+                # Same filename, different content. We will overwrite it or append a timestamp.
+                # For simplicity, we'll allow it to be overwritten (which behaves like an update).
+                pass
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code')
             if error_code == '404':
@@ -70,7 +77,8 @@ class S3StorageService:
                 Key=s3_key,
                 Body=file_bytes,
                 Metadata={
-                    'original-filename': filename.encode('utf-8', 'ignore').decode('utf-8')
+                    'original-filename': filename.encode('utf-8', 'ignore').decode('utf-8'),
+                    'content-hash': file_hash
                 }
             )
             logger.info(f"Successfully uploaded {filename} to S3 bucket {self.bucket_name} at key {s3_key}")
