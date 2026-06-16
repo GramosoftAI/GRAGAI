@@ -1125,7 +1125,7 @@ async def instant_ingest_pdf(
 
 
 
-                agent_name = agent_result["data"]["agent"].name
+                agent_name = agent_result["data"]["agent"]["name"]
 
                 return {
 
@@ -1271,7 +1271,7 @@ async def instant_ingest_pdf(
 
             # Add agent name to response for better UI feedback
 
-            agent_name = agent_result["data"]["agent"].name
+            agent_name = agent_result["data"]["agent"]["name"]
 
             ingest_result["data"]["agent_name"] = agent_name
 
@@ -1391,7 +1391,7 @@ async def instant_ingest_text(
 
             # Add agent name to response
 
-            agent_name = agent_result["data"]["agent"].name
+            agent_name = agent_result["data"]["agent"]["name"]
 
             ingest_result["data"]["agent_name"] = agent_name
 
@@ -1577,7 +1577,7 @@ async def instant_ingest_url(
 
             # Add agent name to response
 
-            agent_name = agent_result["data"]["agent"].name
+            agent_name = agent_result["data"]["agent"]["name"]
 
             ingest_result["data"]["agent_name"] = agent_name
 
