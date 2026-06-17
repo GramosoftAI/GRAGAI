@@ -29,14 +29,18 @@ GRAG is engineered for teams building complex, data-dense AI applications for pr
 * **AI/ML Developers:** Dealing with LLM hallucinations during multi-hop reasoning tasks. *Solution:* GRAG extracts semantic triplets that strictly adhere to a predefined blueprint, anchoring LLM generation in factual graph traversals.
 * **Data Engineers:** Burdened by writing custom ingestion pipelines for disparate formats. *Solution:* GRAG provides an out-of-the-box multimodal ETL pipeline, automatically parsing PDFs, spreadsheets, and web pages into a unified graph structure.
 
-## ✨ Features & Advantages
+## ✨ Core Capabilities & Features
 
-| Feature | Technical Implementation | Why It Matters |
-| :--- | :--- | :--- |
-| **Dynamic Ontology Discovery** | Employs LLMs during the ingestion phase to automatically infer and register business schemas (Classes/Relations). | Stops graph rot before it starts. Ensures your Knowledge Graph scales cleanly without fragmented or hallucinated edge types. |
-| **Hybrid Graph Retrieval** | Unifies `pgvector` semantic similarity with Neo4j structural edge traversals (`MENTIONS`, `NEXT`, `REPORTS_TO`). | Enables true multi-hop reasoning. AI can definitively answer complex relationship queries that standard vector search fails on. |
-| **Multimodal ETL Pipeline** | Built-in smart chunking, table extraction, and Llama-3-Vision fallbacks for scanned PDFs. | Eliminates the need for external ingestion middleware. Drop in raw files and watch them transform into graph nodes. |
-| **Dynamic Module Loading** | Modular FastAPI architecture. Drop new features into `app/modules/` for auto-discovery. | Zero monolithic boilerplate. Extend the API instantly without touching core routing logic. |
+* **Multi-Hop Reasoning (Graph Expansion):** Enables AI to traverse semantic paths and definitively answer complex relationship queries.
+* **Explainable Retrieval (Attribution & Scoring):** Transparent sourcing and reasoning for every chunk injected into the LLM context.
+* **Hybrid Vector + Graph Search:** Unifies `pgvector` semantic similarity with Neo4j structural edge traversals.
+* **Dynamic Ontology Triplet Extraction:** Automatically infers and extracts `(Subject, Predicate, Object)` facts to build deterministic knowledge graphs.
+* **Context Token Budgeting:** Greedy selection algorithm ensuring LLM context windows are never flooded with irrelevant noise.
+* **Continuous Feedback Weighting:** Graph node and edge weights update dynamically based on user feedback for self-improving retrieval.
+* **Multimodal Ingestion (PDF/Excel):** Built-in smart chunking and table extraction eliminating the need for external ETL middleware.
+* **Multi-Tenant Isolation:** Zero-trust isolation enforced via PostgreSQL Row-Level Security (RLS) and strict Neo4j node constraints.
+* **Graph Traversal Depth Limiting:** Scoped queries capped at configurable hop limits (e.g., 2 hops) to prevent exponential latency bloat during real-time generation.
+* **Neo4j Composite Indexing:** Pre-indexed properties for `MERGE` operations drastically optimizing write performance and preventing full-graph scans.
 
 ## 🏗️ Architecture & Workflow
 
