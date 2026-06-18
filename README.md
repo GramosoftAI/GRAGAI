@@ -42,7 +42,7 @@ GRAG is engineered for teams building complex, data-dense AI applications for pr
 * **Graph Traversal Depth Limiting:** Scoped queries capped at configurable hop limits (e.g., 2 hops) to prevent exponential latency bloat during real-time generation.
 * **Neo4j Composite Indexing:** Pre-indexed properties for `MERGE` operations drastically optimizing write performance and preventing full-graph scans.
 
-### 🚧 Pending (To-Do List Roadmap)
+### (To-Do List Roadmap)
 * [ ] **Persistent Personal/Session Memory**
 * [ ] **Generative LLM Integration** (DeepInfra activation)
 * [ ] **True Semantic Vector Embeddings**
