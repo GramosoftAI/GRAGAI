@@ -5,6 +5,7 @@
 from fastapi import APIRouter, Request, HTTPException, status, UploadFile, File
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
 from typing import Optional, List, Dict, Any
 
@@ -973,28 +974,20 @@ async def generic_ingest_source(
 
 
 
+from fastapi import BackgroundTasks
+
 @router.post(
-
     "/{agent_id}/sources/pdf",
-
     response_model=dict,
-
     status_code=status.HTTP_200_OK,
-
     summary="Instant File Ingestion",
-
     description="Automatically create a knowledge base data source and parse the uploaded PDF, Excel, or CSV directly for the given agent.",
-
 )
-
 async def instant_ingest_pdf(
-
     request: Request,
-
     agent_id: str,
-
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-
 ) -> dict:
 
     """
@@ -1158,130 +1151,54 @@ async def instant_ingest_pdf(
 
 
         # ----------------------------------------------------
-
-        # PDF PIPELINE (EXISTING)
-
+        # PDF PIPELINE (BACKGROUND JOBS)
         # ----------------------------------------------------
-
+        from app.modules.jobs.service import JobService
+        from app.modules.jobs.schemas import JobCreate
+        from app.modules.jobs.worker import run_pdf_ingestion_job
+        from app.core.database import AsyncSessionLocal
         from ...core.pdf_extractor import PDFExtractor
 
-
-
-        try:
-
-            document_text = await PDFExtractor.extract(
-
-                pdf_bytes=content,
-
-                filename=filename,
-
-                tenant_id=tenant_id,
-
-                agent_id=agent_id,
-
-            )
-
-        except ValueError as e:
-
-            raise HTTPException(status_code=400, detail=str(e))
-
-        except Exception as e:
-
-            logger.error(f"PDF extraction failed: {e}")
-
-            raise HTTPException(
-
-                status_code=400,
-
-                detail=f"Failed to extract text from PDF: {str(e)}",
-
-            )
-
-
-
-        if not document_text.strip():
-
-            raise HTTPException(
-
-                status_code=400,
-
-                detail="PDF appears to be empty or contains no extractable text.",
-
-            )
-
-
-
         async with AsyncSessionLocal() as db:
-
-            # 2. Verify Agent belongs to User/Tenant
-
-            agent_service = AgentService(db, tenant_id)
-
-            agent_result = await agent_service.get_agent(agent_id)
-
-            if not agent_result.get("success"):
-
-                raise HTTPException(status_code=404, detail="Agent not found")
-
-
-
-            # 3. Create implicit Knowledge Base tracking row
-
-            kb_service = KnowledgeBaseService(db, tenant_id)
-
-            kb_request = KBCreate(
-
-                name=f"PDF: {filename}",
-
-                description=f"Automated PDF upload source (Gdocz extraction)",
-
-                agent_id=uuid.UUID(agent_id),
-
-                source="pdf_upload"
-
+            # Set context
+            await db.execute(
+                text("SELECT set_config('app.current_tenant', :tenant_id, false)"),
+                {"tenant_id": str(tenant_id)}
             )
-
             
-
-            kb_result = await kb_service.create_knowledge_base(user_id, kb_request)
-
-            if not kb_result.get("success"):
-
-                raise HTTPException(status_code=500, detail="Internal storage error")
-
+            # 1. Verify Agent belongs to User/Tenant
+            agent_service = AgentService(db, tenant_id)
+            agent_result = await agent_service.get_agent(agent_id)
+            if not agent_result.get("success"):
+                raise HTTPException(status_code=404, detail="Agent not found")
                 
+            # 2. Create Job in DB
+            job_service = JobService(db, tenant_id)
+            job_create = JobCreate(job_type="pdf_ingestion", file_name=filename)
+            job_result = await job_service.create_job(user_id, job_create)
+            
+            if not job_result.get("success"):
+                raise HTTPException(status_code=500, detail="Failed to create processing job")
+                
+            job_id = str(job_result["data"]["job"].id)
+            
+        # 3. Add task to background
+        background_tasks.add_task(
+            run_pdf_ingestion_job,
+            tenant_id=str(tenant_id),
+            user_id=str(user_id),
+            agent_id=str(agent_id),
+            job_id=job_id,
+            filename=filename,
+            content=content
+        )
 
-            kb_id = str(kb_result["data"]["kb"].id)
-
-
-
-            # 4. Instant Ingestion Pipeline
-
-            ingest_result = await kb_service.ingest_document(kb_id, document_text)
-
-
-
-            if not ingest_result.get("success"):
-
-                error_msg = ingest_result.get("error", "Unknown error")
-
-                status_code = ingest_result.get("status_code", 400)
-
-                raise HTTPException(status_code=status_code, detail=error_msg)
-
-
-
-            # Add agent name to response for better UI feedback
-
-            agent_name = agent_result["data"]["agent"]["name"]
-
-            ingest_result["data"]["agent_name"] = agent_name
-
-            ingest_result["meta"]["message"] = f"Knowledge successfully stored to agent: {agent_name}"
-
-
-
-            return ingest_result
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": "queued",
+            "meta": {"message": "Document ingestion has been queued in the background. Use the job_id to poll for status."}
+        }
 
 
 

@@ -178,8 +178,10 @@ class PDFExtractor:
                 logger.debug(f"Gdocz converting: {tmp_path}")
                 result = client.convert(tmp_path, options=options)
 
-                return result.markdown or ""
-
+                if isinstance(result, dict):
+                    return result.get("markdown", "")
+                else:
+                    return getattr(result, "markdown", "") or ""
             finally:
                 # Clean up temp file
                 if tmp_path and os.path.exists(tmp_path):
@@ -343,18 +345,9 @@ class PDFExtractor:
         # Inline code: `text`  text
         text = re.sub(r"`([^`]+)`", r"\1", text)
 
-        # ============= STEP 7: CLEAN TABLE FORMATTING =============
-        # Convert markdown table rows to readable text
-        # | Col1 | Col2 | Col3 |  Col1, Col2, Col3
-        text = re.sub(
-            r"\|([^|\n]+)\|",
-            lambda m: m.group(1).strip() + ". ",
-            text,
-        )
-        # Remove table separator lines (|---|---|)
-        text = re.sub(r"\|[-:]+\|[-:|\s]+", "", text)
-        # Clean remaining pipe characters
-        text = re.sub(r"\|", " ", text)
+        # ============= STEP 7: CLEAN TABLE FORMATTING (SKIPPED) =============
+        # We now preserve Markdown tables for Table-Aware chunking.
+        # Tables will remain as | Col1 | Col2 | formats.
 
         # ============= STEP 8: CLEAN LIST MARKERS =============
         # - item or * item or  item  item

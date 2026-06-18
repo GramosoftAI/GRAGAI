@@ -109,113 +109,137 @@ class TextChunker:
 
 
     @staticmethod
-
-    def split_into_chunks(
-
-        text: str,
-
-        chunk_size: int = 1000,  # ~250 tokens, safely within embedding model token limits (e.g. 512)
-
-        overlap_size: int = 200,  # ~50 tokens
-
-    ) -> List[str]:
-
+    def chunk_table(table_text: str, chunk_size: int) -> List[str]:
         """
-
-        Split text into overlapping chunks.
-
-
-
-        Args:
-
-            text: Text to chunk
-
-            chunk_size: Characters per chunk (default ~500 tokens)
-
-            overlap_size: Overlap between chunks (default ~100 tokens)
-
-
-
-        Returns:
-
-            List of text chunks
-
+        Table-aware chunking.
+        Isolates and preserves Markdown tables as single units.
+        If a table exceeds chunk_size, it splits it by row while repeating the header.
         """
-
+        if len(table_text) <= chunk_size:
+            return [table_text]
+            
+        # Split table into rows
+        rows = table_text.split('\n')
+        
+        # Extract header (usually first 2 rows: header + separator)
+        if len(rows) > 2 and '---' in rows[1]:
+            header = rows[0] + '\n' + rows[1]
+            data_rows = rows[2:]
+        else:
+            # No clear separator, just use row 0
+            header = rows[0]
+            data_rows = rows[1:]
+            
         chunks = []
+        current_chunk = header
+        
+        for row in data_rows:
+            test_chunk = current_chunk + '\n' + row
+            if len(test_chunk) <= chunk_size:
+                current_chunk = test_chunk
+            else:
+                # Save chunk and start new one with header
+                if current_chunk != header:
+                    chunks.append(current_chunk)
+                
+                # If a single row with header is larger than chunk_size, we MUST split it 
+                # to prevent crashing the 512-token limit API!
+                new_chunk = header + '\n' + row
+                while len(new_chunk) > chunk_size:
+                    chunks.append(new_chunk[:chunk_size])
+                    new_chunk = new_chunk[chunk_size:]
+                
+                current_chunk = new_chunk
+                
+        if current_chunk and current_chunk != header:
+            chunks.append(current_chunk)
+            
+        return chunks
 
-
-
+    @staticmethod
+    def chunk_text(text: str, chunk_size: int, overlap_size: int) -> List[str]:
+        """Helper to chunk normal text preserving sentences."""
+        chunks = []
         if len(text) <= chunk_size:
-
-            # Single chunk (smaller than min size)
-
             return [text.strip()]
 
-
-
-        # Split by sentences when possible (preserve context)
-
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-
+        # Split by sentences or double newlines when possible
+        sentences = re.split(r"(?<=[.!?])\s+|\n\n+", text)
         current_chunk = ""
 
-
-
         for sentence in sentences:
-
-            # Add sentence to current chunk
-
-            test_chunk = current_chunk + " " + sentence if current_chunk else sentence
-
-
-
-            if len(test_chunk) <= chunk_size:
-
-                current_chunk = test_chunk
-
-            else:
-
-                # Current chunk is full, save it
-
+            # Forcefully break massive sentences to avoid 400 Bad Request
+            while len(sentence) > chunk_size:
+                part = sentence[:chunk_size]
+                sentence = sentence[chunk_size:]
+                
+                test_chunk = current_chunk + " " + part if current_chunk else part
                 if current_chunk:
-
                     chunks.append(current_chunk.strip())
-
-
-
-                # Start new chunk with overlap
-
+                
                 if chunks and overlap_size > 0:
-
-                    # Keep last overlap_size chars from previous chunk
-
-                    overlap = (
-
-                        chunks[-1][-overlap_size:]
-
-                        if len(chunks[-1]) > overlap_size
-
-                        else chunks[-1]
-
-                    )
-
+                    overlap = chunks[-1][-overlap_size:] if len(chunks[-1]) > overlap_size else chunks[-1]
                     current_chunk = overlap + " " + sentence
-
                 else:
-
                     current_chunk = sentence
 
+            if not sentence:
+                continue
+                
+            test_chunk = current_chunk + " " + sentence if current_chunk else sentence
 
+            if len(test_chunk) <= chunk_size:
+                current_chunk = test_chunk
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
 
-        # Add final chunk
+                if chunks and overlap_size > 0:
+                    overlap = chunks[-1][-overlap_size:] if len(chunks[-1]) > overlap_size else chunks[-1]
+                    current_chunk = overlap + " " + sentence
+                else:
+                    current_chunk = sentence
 
         if current_chunk:
-
             chunks.append(current_chunk.strip())
 
+        return chunks
 
-
+    @staticmethod
+    def split_into_chunks(
+        text: str,
+        chunk_size: int = 500,  # Reduced from 1000 to 700 to safely stay under 512 tokens
+        overlap_size: int = 50,  # Reduced overlap proportionally
+    ) -> List[str]:
+        """
+        Split text into overlapping chunks, using Table-Aware chunking for Markdown tables.
+        """
+        chunks = []
+        
+        # Regex to detect Markdown table blocks (consecutive lines starting and ending with |)
+        table_pattern = re.compile(r'((?:^\|.*?\|[ \t]*(?:\n|$))+)', re.MULTILINE)
+        
+        last_idx = 0
+        for match in table_pattern.finditer(text):
+            table_start = match.start()
+            table_end = match.end()
+            
+            # 1. Chunk the text before the table
+            pre_text = text[last_idx:table_start].strip()
+            if pre_text:
+                chunks.extend(TextChunker.chunk_text(pre_text, chunk_size, overlap_size))
+                
+            # 2. Chunk the table using Table-Aware strategy
+            table_text = match.group(0).strip()
+            chunks.extend(TextChunker.chunk_table(table_text, chunk_size))
+            
+            last_idx = table_end
+            
+        # 3. Chunk any remaining text after the last table
+        post_text = text[last_idx:].strip()
+        if post_text:
+            chunks.extend(TextChunker.chunk_text(post_text, chunk_size, overlap_size))
+            
         return chunks
 
 
