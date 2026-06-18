@@ -22,6 +22,7 @@ class SearchType(Enum):
     KNOWLEDGE_BASE = "KNOWLEDGE_BASE"       # "Summarize this document"
     GENERAL_KNOWLEDGE = "GENERAL_KNOWLEDGE" # "What is diabetes"
     SUPPORT_INTENT = "SUPPORT_INTENT"       # Complaints, human assistance
+    TABLE_ANALYTICS = "TABLE_ANALYTICS"     # SQL-like database filtering on structured tables
 
 class QueryRouter:
     """
@@ -34,6 +35,10 @@ class QueryRouter:
     def __init__(self):
         # Pre-compile regex patterns for high performance
         self.patterns = {
+            SearchType.TABLE_ANALYTICS: re.compile(
+                r'\b(below|above|greater than|less than|between|top \d+|highest|lowest|average|count|sum|total of|cheapest|most expensive|all products where|price under|price over|mrp)\b',
+                re.IGNORECASE
+            ),
             SearchType.SUPPORT_INTENT: re.compile(
                 r'\b(help|support|complaint|human|call me|contact support|representative|agent|operator)\b',
                 re.IGNORECASE
@@ -108,6 +113,7 @@ CATEGORIES:
 - MEMORY_ONLY: Personal history/preferences (e.g., "What did we decide earlier?")
 - ENTITY_CONNECTION: Relationship between two things (e.g., "How is Amit linked to Sarah?")
 - SOCIAL: Greetings, thanks, or small talk (e.g., "Hi", "How are you?")
+- TABLE_ANALYTICS: Database-style filtering on tables or price lists (e.g., "Products below 5000", "Top 10 highest MRP", "Average cost")
 - GRAPH_COMPLETION: General knowledge questions.
 
 QUERY: {query}

@@ -338,6 +338,10 @@ async def init_rls_policies():
 
         "processing_jobs",
 
+        "document_table_rows",
+
+        "analytics_query_log",
+
     ]
 
 
@@ -588,6 +592,10 @@ async def verify_rls_enabled():
 
         "processing_jobs",
 
+        "document_table_rows",
+
+        "analytics_query_log",
+
      ]
 
 
@@ -714,7 +722,7 @@ async def init_db():
 
         from ..modules.agents.models import Agent
 
-        from ..modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
+        from ..modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk, DocumentTableRow
 
         from ..modules.chats.models import ChatSession, ChatMessage
 

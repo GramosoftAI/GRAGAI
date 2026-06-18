@@ -10,6 +10,7 @@ from app.modules.knowledge_bases.service import KnowledgeBaseService
 from app.modules.agents.service import AgentService
 from app.modules.knowledge_bases.schemas import KBCreate
 from app.core.pdf_extractor import PDFExtractor
+from app.core.llm.deepinfra_llm import DeepInfraLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,22 @@ async def run_pdf_ingestion_job(
                 await job_service.update_job_progress(job_id, status="failed", progress=5, current_step="PDF Extraction", error_message="PDF appears to be empty or contains no extractable text.")
                 return
                 
+            # Classify Document Type
+            await job_service.update_job_progress(job_id, status="processing", progress=15, current_step="Classifying Document Type")
+            llm_client = DeepInfraLLMClient()
+            prompt = f"Analyze the first 2000 characters of this document and classify its type. Valid types are: PRICE_LIST, INVOICE, QUOTATION, PURCHASE_ORDER, STOCK_REPORT, FINANCIAL_STATEMENT, GENERAL. Return ONLY the type string, nothing else.\n\nDOCUMENT START:\n{document_text[:2000]}"
+            document_type = await llm_client.generate(prompt=prompt, system_prompt="You are a document classifier. Return only the exact category string.", temperature=0.0, max_tokens=15)
+            document_type = document_type.strip()
+            if document_type not in ["PRICE_LIST", "INVOICE", "QUOTATION", "PURCHASE_ORDER", "STOCK_REPORT", "FINANCIAL_STATEMENT", "GENERAL"]:
+                document_type = "GENERAL"
+            logger.info(f"Classified document as: {document_type}")
+                
+            await job_service.update_job_progress(job_id, status="processing", progress=25, current_step="Extracting Structured Tables")
+            
+            # Step 1.5: Table Extraction
+            logger.info(f"Job {job_id}: Extracting structured tables")
+            table_rows = await PDFExtractor.extract_tables_to_json(pdf_bytes=content)
+            
             await job_service.update_job_progress(job_id, status="processing", progress=40, current_step="Creating Knowledge Base Entry")
 
             # Step 2: Create KB Entry
@@ -64,7 +81,8 @@ async def run_pdf_ingestion_job(
                 name=f"PDF: {filename}",
                 description=f"Automated PDF upload source (Gdocz extraction)",
                 agent_id=uuid.UUID(agent_id),
-                source="pdf_upload"
+                source="pdf_upload",
+                document_type=document_type
             )
             
             kb_result = await kb_service.create_knowledge_base(user_id, kb_request)
@@ -73,6 +91,10 @@ async def run_pdf_ingestion_job(
                 return
                 
             kb_id = str(kb_result["data"]["kb"].id)
+            
+            # Step 2.5: Save Table Rows
+            if table_rows:
+                await kb_service.save_table_rows(kb_id, table_rows)
             
             # Step 3: Ingest Document (Chunking + Embeddings + Neo4j)
             await job_service.update_job_progress(job_id, status="processing", progress=60, current_step="Chunking and Generating Embeddings")

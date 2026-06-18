@@ -29,6 +29,11 @@ class KBCreate(BaseModel):
         max_length=50,
         description="Source type (user_upload, api, database, etc.)",
     )
+    document_type: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Document type classification (e.g. PRICE_LIST, INVOICE)",
+    )
 
     class Config:
         json_schema_extra = {
