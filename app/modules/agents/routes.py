@@ -1035,10 +1035,6 @@ async def instant_ingest_pdf(
 
         content = await file.read()
 
-        if len(content) > 10 * 1024 * 1024:  # 10MB limit
-
-            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
-
         # ----------------------------------------------------
         # S3 STORAGE & DUPLICATE PREVENTION
         # ----------------------------------------------------

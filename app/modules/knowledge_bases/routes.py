@@ -590,10 +590,6 @@ async def ingest_document(
 
 
 
-        if len(document_text) > 1_000_000:  # 1MB limit
-
-            raise HTTPException(status_code=400, detail="Document too large (max 1MB)")
-
 
 
         async with AsyncSessionLocal() as db:
@@ -681,10 +677,6 @@ async def ingest_file(
         # 2. Route based on file extension
         if filename.endswith(".pdf"):
 
-            if len(content) > 10 * 1024 * 1024:  # 10MB limit
-
-                raise HTTPException(status_code=400, detail="PDF too large (max 10MB)")
-
 
 
             # Extract PDF using PDFExtractor (Gdocz primary + pdfplumber fallback)
@@ -760,10 +752,6 @@ async def ingest_file(
 
 
         elif filename.endswith((".xlsx", ".xls", ".csv")):
-
-            if len(content) > 20 * 1024 * 1024:  # 20MB limit
-
-                raise HTTPException(status_code=400, detail="Spreadsheet file too large (max 20MB)")
 
 
 
