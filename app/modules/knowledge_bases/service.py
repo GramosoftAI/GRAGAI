@@ -147,7 +147,7 @@ class TextChunker:
                 new_chunk = header + '\n' + row
                 while len(new_chunk) > chunk_size:
                     chunks.append(new_chunk[:chunk_size])
-                    new_chunk = new_chunk[chunk_size:]
+                    new_chunk = header + '\n' + new_chunk[chunk_size:]
                 
                 current_chunk = new_chunk
                 
@@ -168,20 +168,18 @@ class TextChunker:
         current_chunk = ""
 
         for sentence in sentences:
+            if not sentence:
+                continue
+
             # Forcefully break massive sentences to avoid 400 Bad Request
             while len(sentence) > chunk_size:
-                part = sentence[:chunk_size]
-                sentence = sentence[chunk_size:]
-                
-                test_chunk = current_chunk + " " + part if current_chunk else part
                 if current_chunk:
                     chunks.append(current_chunk.strip())
+                    current_chunk = ""
                 
-                if chunks and overlap_size > 0:
-                    overlap = chunks[-1][-overlap_size:] if len(chunks[-1]) > overlap_size else chunks[-1]
-                    current_chunk = overlap + " " + sentence
-                else:
-                    current_chunk = sentence
+                part = sentence[:chunk_size]
+                chunks.append(part.strip())
+                sentence = sentence[chunk_size:]
 
             if not sentence:
                 continue
@@ -197,13 +195,27 @@ class TextChunker:
                 if chunks and overlap_size > 0:
                     overlap = chunks[-1][-overlap_size:] if len(chunks[-1]) > overlap_size else chunks[-1]
                     current_chunk = overlap + " " + sentence
+                    
+                    # Safety check: if overlap + sentence still > chunk_size
+                    if len(current_chunk) > chunk_size:
+                        chunks.append(current_chunk[:chunk_size].strip())
+                        current_chunk = current_chunk[chunk_size:]
                 else:
                     current_chunk = sentence
 
         if current_chunk:
             chunks.append(current_chunk.strip())
 
-        return chunks
+        # Final safety pass to ensure ABSOLUTELY NO CHUNK exceeds chunk_size
+        safe_chunks = []
+        for c in chunks:
+            while len(c) > chunk_size:
+                safe_chunks.append(c[:chunk_size])
+                c = c[chunk_size:]
+            if c.strip():
+                safe_chunks.append(c)
+
+        return safe_chunks
 
     @staticmethod
     def split_into_chunks(
