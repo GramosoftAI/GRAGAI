@@ -336,6 +336,8 @@ async def init_rls_policies():
 
         "document_chunks",
 
+        "processing_jobs",
+
     ]
 
 
@@ -584,6 +586,8 @@ async def verify_rls_enabled():
 
         "document_chunks",
 
+        "processing_jobs",
+
      ]
 
 
@@ -715,6 +719,8 @@ async def init_db():
         from ..modules.chats.models import ChatSession, ChatMessage
 
         from ..modules.personalities.models import Personality
+
+        from ..modules.jobs.models import ProcessingJob
 
 
 
