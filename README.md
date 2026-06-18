@@ -42,6 +42,17 @@ GRAG is engineered for teams building complex, data-dense AI applications for pr
 * **Graph Traversal Depth Limiting:** Scoped queries capped at configurable hop limits (e.g., 2 hops) to prevent exponential latency bloat during real-time generation.
 * **Neo4j Composite Indexing:** Pre-indexed properties for `MERGE` operations drastically optimizing write performance and preventing full-graph scans.
 
+### 🚧 Pending (To-Do List Roadmap)
+* [ ] **Persistent Personal/Session Memory**
+* [ ] **Generative LLM Integration** (DeepInfra activation)
+* [ ] **True Semantic Vector Embeddings**
+* [ ] **ANN Vector Indexing (HNSW)** for large-scale scaling
+* [ ] **LLM-based high-accuracy Entity Extraction**
+* [ ] **Advanced Query Decomposition / Routing**
+* [ ] **In-Memory Graph Database Migration** (e.g., FalkorDB, Memgraph) to reduce write latency
+* [ ] **Graph Size Calculator & Concurrency Limiter** for production agent deployments
+
+
 ## 🏗️ Architecture & Workflow
 
 GRAG operates on a four-stage deterministic pipeline:
