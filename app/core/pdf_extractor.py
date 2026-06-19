@@ -416,9 +416,11 @@ class PDFExtractor:
         # Inline code: `text`  text
         text = re.sub(r"`([^`]+)`", r"\1", text)
 
-        # ============= STEP 7: CLEAN TABLE FORMATTING (SKIPPED) =============
-        # We now preserve Markdown tables for Table-Aware chunking.
-        # Tables will remain as | Col1 | Col2 | formats.
+        # ============= STEP 7: REMOVE MARKDOWN TABLES =============
+        # We now extract tables separately into structured rows. We do NOT want 
+        # flattened tables polluting the unstructured semantic vector space.
+        # Matches typical markdown tables like | Col1 | Col2 |
+        text = re.sub(r"^(?:\|[^\n]+\|\r?\n)+", "", text, flags=re.MULTILINE)
 
         # ============= STEP 8: CLEAN LIST MARKERS =============
         # - item or * item or  item  item

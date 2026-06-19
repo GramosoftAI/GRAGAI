@@ -2861,6 +2861,7 @@ class KnowledgeBaseService:
             
         try:
             db_rows = []
+            chunk_texts = []
             import re
             
             def parse_numeric(val):
@@ -2916,8 +2917,44 @@ class KnowledgeBaseService:
                         row_data=row_data
                     )
                 )
+
+                # ============= ROW-LEVEL EMBEDDING CHUNK =============
+                # Create highly structured semantic chunks avoiding SL.NO and metadata
+                # This prevents flattened table math hallucination (e.g., 1 + 2996 = 12996)
+                chunk_parts = []
+                if part_number: chunk_parts.append(f"Part Number: {part_number}")
+                if product_name: chunk_parts.append(f"Product Name: {product_name}")
+                if mrp is not None: chunk_parts.append(f"MRP: {mrp}")
+                if hsn_code: chunk_parts.append(f"HSN Code: {hsn_code}")
+                if gst is not None: chunk_parts.append(f"GST: {gst}%")
+                
+                if chunk_parts:
+                    chunk_texts.append("\n".join(chunk_parts))
                 
             self.db.add_all(db_rows)
+            
+            # Batch generate embeddings for semantic row chunks
+            if chunk_texts:
+                from app.core.embeddings import EmbeddingGenerator
+                from .models import DocumentChunk
+                
+                embeddings = await EmbeddingGenerator.generate_embeddings_batch(chunk_texts)
+                chunk_rows = []
+                
+                for idx, (text, emb) in enumerate(zip(chunk_texts, embeddings)):
+                    chunk_rows.append(
+                        DocumentChunk(
+                            tenant_id=self.tenant_id,
+                            kb_id=uuid.UUID(kb_id),
+                            text=text,
+                            # Offset index heavily so it doesn't conflict with normal chunks
+                            chunk_index=90000 + idx, 
+                            embedding=emb
+                        )
+                    )
+                self.db.add_all(chunk_rows)
+                logger.info(f" Saved {len(chunk_rows)} Row-Level Embeddings to DB for KB {kb_id}")
+            
             await self.db.commit()
             logger.info(f" Saved {len(db_rows)} structured table rows to DB for KB {kb_id}")
             
