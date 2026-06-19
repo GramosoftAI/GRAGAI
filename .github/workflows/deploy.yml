@@ -7,21 +7,14 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: Deploy Application
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          password: ${{ secrets.PASSWORD }}
-          port: ${{ secrets.PORT }}
-          command_timeout: 10m
-          script: |
-            cd /home/GRAG/backend
-            git fetch origin backdev
-            git reset --hard origin/backdev
-            sed -i 's/\r$//' deploy.sh
-            chmod +x deploy.sh
-            bash deploy.sh
+        run: |
+          cd /home/GRAG/backend
+          git fetch origin backdev
+          git reset --hard origin/backdev
+          sed -i 's/\r$//' deploy.sh
+          chmod +x deploy.sh
+          bash deploy.sh

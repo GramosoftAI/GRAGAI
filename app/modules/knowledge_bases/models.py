@@ -243,3 +243,107 @@ class DocumentChunk(Base):
         return f"<DocumentChunk id={self.id} kb_id={self.kb_id} index={self.chunk_index}>"
 
 
+class DocumentTableRow(Base):
+    """
+    Structured Table Row model - stores extracted tabular data as JSONB in PostgreSQL.
+    Provides a SQL engine target for data analytics routing (e.g. "Find products below 5000")
+    instead of relying on vector semantic search.
+    """
+
+    __tablename__ = "document_table_rows"
+
+    id = Column(
+        SQLAlchemyUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True,
+        nullable=False,
+    )
+    
+    tenant_id = Column(
+        SQLAlchemyUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    
+    kb_id = Column(
+        SQLAlchemyUUID(as_uuid=True),
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    page_number = Column(Integer, nullable=False, default=1)
+    table_index = Column(Integer, nullable=False, default=0)
+    row_index = Column(Integer, nullable=False, default=0)
+    
+    # Typed columns for deterministic SQL generation and indexing
+    from sqlalchemy import Numeric
+    part_number = Column(String(255), nullable=True, index=True)
+    product_name = Column(String(1000), nullable=True, index=True)
+    mrp = Column(Numeric(10, 2), nullable=True, index=True)
+    gst = Column(Numeric(5, 2), nullable=True)
+    hsn_code = Column(String(100), nullable=True)
+    extraction_confidence = Column(Numeric(4, 3), nullable=True, default=0.99)
+    
+    # Store the row's key-value pairs (Header -> Value) dynamically as a fallback
+    from sqlalchemy.dialects.postgresql import JSONB
+    row_data = Column(JSONB, nullable=False)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_tablerows_tenant_id", "tenant_id"),
+        Index("ix_tablerows_kb_id", "kb_id"),
+        Index("ix_tablerows_page_idx", "page_number"),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<DocumentTableRow id={self.id} kb_id={self.kb_id} table={self.table_index} row={self.row_index}>"
+
+
+class AnalyticsQueryLog(Base):
+    """
+    Audit trail for deterministic Table Analytics queries.
+    Stores the extracted intent, generated SQL, and performance metrics for transparency and debugging.
+    """
+    __tablename__ = "analytics_query_log"
+
+    id = Column(
+        SQLAlchemyUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True,
+        nullable=False,
+    )
+    
+    tenant_id = Column(
+        SQLAlchemyUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    
+    kb_id = Column(
+        SQLAlchemyUUID(as_uuid=True),
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    query_text = Column(Text, nullable=False)
+    intent_json = Column(JSON, nullable=False)
+    generated_sql = Column(Text, nullable=False)
+    rows_returned = Column(Integer, nullable=False, default=0)
+    execution_time_ms = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_analyticslog_tenant_id", "tenant_id"),
+        Index("ix_analyticslog_kb_id", "kb_id"),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<AnalyticsQueryLog id={self.id} kb_id={self.kb_id} rows={self.rows_returned}>"

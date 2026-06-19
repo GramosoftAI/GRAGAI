@@ -490,7 +490,28 @@ class RAGPipeline:
 
 
 
-        # (replaced above)
+
+
+        # STAGE 0.5: EARLY EXIT FOR TABLE ANALYTICS
+        if search_type == SearchType.TABLE_ANALYTICS:
+            logger.info("   -> Intercepting query for SQL Table Analytics engine!")
+            try:
+                table_results = await self._execute_table_analytics(query, kb_ids)
+                if table_results:
+                    return RAGContext(
+                        ranked_chunks=[],
+                        total_chunks=0,
+                        context_text=f"STRUCTURED TABLE ANALYTICS RESULTS:\n{table_results}",
+                        search_type=search_type.name,
+                        metadata={"sql_executed": True}
+                    )
+                else:
+                    logger.warning("   -> SQL Table Analytics returned no results. Falling back to vector search.")
+                    search_type = SearchType.CHUNK_SEARCH
+            except Exception as e:
+                logger.error(f"   -> SQL Table Analytics failed: {e}. Falling back to vector search.", exc_info=True)
+                search_type = SearchType.CHUNK_SEARCH
+
 
 
 
@@ -1460,9 +1481,82 @@ class RAGPipeline:
             logger.error(f" Failed to retrieve seed chunks via Neo4j: {e}")
             return []
 
+    async def _execute_table_analytics(self, query: str, kb_ids: list[str]) -> Optional[str]:
+        """
+        Text-to-SQL engine for JSONB tables.
+        Uses LLM to convert natural language query into PostgreSQL JSONB query, executes it (read-only), and returns results.
+        """
+        from sqlalchemy import text
+        import json
+        
+        # 1. First, retrieve 1 sample row to give the LLM the JSON schema
+        sample_query = "SELECT row_data FROM document_table_rows WHERE kb_id = ANY(:kb_ids) LIMIT 1;"
+        
+        async with self.db_session_maker() as db:
+            result = await db.execute(text(sample_query), {"kb_ids": kb_ids})
+            sample_row = result.scalar()
+            
+            if not sample_row:
+                return None  # No table data exists for this KB
+                
+        # 2. Ask LLM to generate SQL
+        schema_keys = list(sample_row.keys()) if isinstance(sample_row, dict) else []
+        
+        prompt = f"""You are a PostgreSQL expert. Convert the user's natural language query into a secure PostgreSQL query to filter a JSONB column.
 
+TABLE NAME: document_table_rows
+TARGET COLUMN: row_data (type JSONB)
 
+AVAILABLE JSON KEYS in row_data:
+{json.dumps(schema_keys, indent=2)}
 
+USER QUERY: {query}
+
+INSTRUCTIONS:
+1. Return ONLY the raw SQL query, no markdown blocks, no explanations.
+2. The query MUST be a SELECT statement.
+3. Query the `row_data` column.
+4. Use standard Postgres JSONB operators. E.g., `(row_data->>'price')::numeric < 5000`
+5. MUST include the clause: `kb_id = ANY(:kb_ids)` to filter by Knowledge Base.
+6. Limit the results to 50 rows maximum to prevent memory issues.
+
+EXAMPLE OUTPUT:
+SELECT row_data FROM document_table_rows WHERE kb_id = ANY(:kb_ids) AND (row_data->>'mrp')::numeric < 5000 LIMIT 50;
+"""
+
+        generated_sql = await self.llm_client.generate(
+            prompt=prompt,
+            system_prompt="You are a SQL engine. Return only SQL.",
+            temperature=0.0,
+            max_tokens=300
+        )
+        
+        clean_sql = generated_sql.strip().strip('`').removeprefix('sql\n')
+        
+        # Security checks
+        if not clean_sql.upper().startswith("SELECT") or "INSERT" in clean_sql.upper() or "UPDATE" in clean_sql.upper() or "DELETE" in clean_sql.upper() or "DROP" in clean_sql.upper():
+            logger.error(f" Unsafe SQL generated: {clean_sql}")
+            return None
+            
+        logger.info(f" Generated Text-to-SQL: {clean_sql}")
+        
+        # 3. Execute the generated SQL
+        async with self.db_session_maker() as db:
+            try:
+                # Use a read-only transaction implicitly by just executing SELECT
+                result = await db.execute(text(clean_sql), {"kb_ids": kb_ids})
+                rows = result.scalars().all()
+                
+                if not rows:
+                    return "No matching records found in the structured tables."
+                    
+                # 4. Format output
+                formatted = json.dumps([dict(r) if hasattr(r, 'keys') else r for r in rows], indent=2)
+                return formatted
+                
+            except Exception as e:
+                logger.error(f" SQL Execution Failed: {e}")
+                return None
 
 
 
@@ -2763,4 +2857,170 @@ class RAGPipeline:
 
 
             return {}
+
+    async def _execute_table_analytics(self, query: str, kb_ids: list[str]) -> Optional[str]:
+        """
+        Deterministic Table Analytics engine.
+        Uses LLM to extract JSON parameters, builds a safe SQLAlchemy query against typed columns,
+        enforces column whitelisting, supports deterministic aggregations, and maintains an audit trail.
+        """
+        from sqlalchemy import text
+        import json
+        import time
+        import uuid
+        
+        start_time = time.time()
+        
+        ALLOWED_COLUMNS = {"mrp", "gst", "part_number", "product_name", "hsn_code"}
+        
+        prompt = f"""Extract the search parameters from the user's query into JSON format.
+
+USER QUERY: {query}
+
+AVAILABLE COLUMNS:
+- mrp (numeric): price, cost, mrp, rate
+- gst (numeric): tax, gst
+- part_number (string): part number, item code
+- product_name (string): product, item description, name
+- hsn_code (string): hsn
+
+JSON SCHEMA:
+{{
+    "intent": "filter", // "filter" or "aggregate"
+    "metric": null, // If aggregate: "average", "max", "min", "sum", "count"
+    "column": "mrp", // Must be one of the AVAILABLE COLUMNS, or null
+    "operator": "<", // Valid operators for filter: <, >, <=, >=, =, or null
+    "value": 5000, // Numeric value or string, or null
+    "keyword": "alternator" // Any specific text search keyword, or null
+}}
+
+Return ONLY valid JSON. Do not invent column names.
+"""
+        generated_json = await self.llm_client.generate(
+            prompt=prompt,
+            system_prompt="You are a parameter extraction engine. Return only JSON.",
+            temperature=0.0,
+            max_tokens=150
+        )
+        
+        # Parse JSON intent
+        try:
+            clean_json = generated_json.strip().strip('`').removeprefix('json\n')
+            intent = json.loads(clean_json)
+        except json.JSONDecodeError:
+            logger.error(f" Failed to parse intent JSON: {generated_json}")
+            return None
+            
+        logger.info(f" Parsed Table Analytics Intent: {intent}")
+        
+        col = intent.get("column")
+        if col and col not in ALLOWED_COLUMNS:
+            logger.error(f" LLM Hallucinated column: {col}")
+            return f"Error: Cannot query unauthorized column '{col}'."
+            
+        intent_type = intent.get("intent", "filter")
+        metric = intent.get("metric")
+        op = intent.get("operator")
+        val = intent.get("value")
+        kw = intent.get("keyword")
+        
+        valid_ops = ["<", ">", "<=", ">=", "="]
+        
+        params = {"kb_ids": kb_ids}
+        where_clauses = ["kb_id = ANY(:kb_ids)"]
+        
+        if col and op in valid_ops and val is not None and intent_type == "filter":
+            where_clauses.append(f"{col} {op} :val")
+            params["val"] = val
+            
+        if kw:
+            where_clauses.append(f"(product_name ILIKE :kw OR row_data::text ILIKE :kw)")
+            params["kw"] = f"%{kw}%"
+            
+        where_sql = " AND ".join(where_clauses)
+        
+        # Build deterministic SQLAlchemy query
+        if intent_type == "aggregate" and metric and col:
+            agg_funcs = {
+                "average": f"AVG({col})",
+                "max": f"MAX({col})",
+                "min": f"MIN({col})",
+                "sum": f"SUM({col})",
+                "count": f"COUNT({col})"
+            }
+            if metric not in agg_funcs:
+                metric = "count"
+                col = "*"
+                agg_func_sql = "COUNT(*)"
+            else:
+                agg_func_sql = agg_funcs[metric]
+                
+            final_sql = f"SELECT {agg_func_sql} AS agg_result FROM document_table_rows WHERE {where_sql};"
+        else:
+            final_sql = f"SELECT part_number, product_name, mrp, gst, hsn_code, row_data FROM document_table_rows WHERE {where_sql} LIMIT 50;"
+        
+        logger.info(f" Executing Deterministic SQL: {final_sql} with params {params}")
+        
+        async with self.db_session_maker() as db:
+            try:
+                await db.execute(text("SET TRANSACTION READ ONLY;"))
+                result = await db.execute(text(final_sql), params)
+                rows = result.mappings().all()
+                
+                rows_returned = len(rows)
+                
+                if not rows:
+                    final_response = "No matching records found in the structured tables."
+                else:
+                    if intent_type == "aggregate":
+                        # Aggregations don't need constraint validation
+                        validated_rows = [dict(row) for row in rows]
+                        final_response = json.dumps(validated_rows, indent=2, default=str)
+                    else:
+                        # Validation Layer for filters
+                        validated_rows = []
+                        for row in rows:
+                            if col in ["mrp", "gst"] and op in valid_ops and val is not None:
+                                row_val = row.get(col)
+                                if row_val is None: continue
+                                
+                                v = float(row_val)
+                                target = float(val)
+                                if op == "<" and not (v < target): continue
+                                if op == ">" and not (v > target): continue
+                                if op == "<=" and not (v <= target): continue
+                                if op == ">=" and not (v >= target): continue
+                                if op == "=" and not (v == target): continue
+                                
+                            validated_rows.append(dict(row))
+                            
+                        if not validated_rows:
+                            final_response = f"Found rows, but they failed the validation constraint ({col} {op} {val})."
+                        else:
+                            final_response = json.dumps(validated_rows, indent=2, default=str)
+                            rows_returned = len(validated_rows)
+                
+                # Write to Analytics Query Log
+                execution_time_ms = int((time.time() - start_time) * 1000)
+                from app.modules.knowledge_bases.models import AnalyticsQueryLog
+                
+                log_entry = AnalyticsQueryLog(
+                    tenant_id=self.tenant_id,
+                    kb_id=uuid.UUID(kb_ids[0]) if kb_ids else uuid.uuid4(),
+                    query_text=query,
+                    intent_json=intent,
+                    generated_sql=final_sql,
+                    rows_returned=rows_returned,
+                    execution_time_ms=execution_time_ms
+                )
+                db.add(log_entry)
+                # Must end read only transaction and start new one for insert
+                await db.execute(text("COMMIT;"))
+                await db.commit()
+                
+                return final_response
+                
+            except Exception as e:
+                logger.error(f" SQL Execution Failed: {e}", exc_info=True)
+                return None
 

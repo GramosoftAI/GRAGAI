@@ -109,113 +109,149 @@ class TextChunker:
 
 
     @staticmethod
-
-    def split_into_chunks(
-
-        text: str,
-
-        chunk_size: int = 1000,  # ~250 tokens, safely within embedding model token limits (e.g. 512)
-
-        overlap_size: int = 200,  # ~50 tokens
-
-    ) -> List[str]:
-
+    def chunk_table(table_text: str, chunk_size: int) -> List[str]:
         """
-
-        Split text into overlapping chunks.
-
-
-
-        Args:
-
-            text: Text to chunk
-
-            chunk_size: Characters per chunk (default ~500 tokens)
-
-            overlap_size: Overlap between chunks (default ~100 tokens)
-
-
-
-        Returns:
-
-            List of text chunks
-
+        Table-aware chunking.
+        Isolates and preserves Markdown tables as single units.
+        If a table exceeds chunk_size, it splits it by row while repeating the header.
         """
-
+        if len(table_text) <= chunk_size:
+            return [table_text]
+            
+        # Split table into rows
+        rows = table_text.split('\n')
+        
+        # Extract header (usually first 2 rows: header + separator)
+        if len(rows) > 2 and '---' in rows[1]:
+            header = rows[0] + '\n' + rows[1]
+            data_rows = rows[2:]
+        else:
+            # No clear separator, just use row 0
+            header = rows[0]
+            data_rows = rows[1:]
+            
         chunks = []
+        current_chunk = header
+        
+        for row in data_rows:
+            test_chunk = current_chunk + '\n' + row
+            if len(test_chunk) <= chunk_size:
+                current_chunk = test_chunk
+            else:
+                # Save chunk and start new one with header
+                if current_chunk != header:
+                    chunks.append(current_chunk)
+                
+                # If a single row with header is larger than chunk_size, we MUST split it 
+                # to prevent crashing the 512-token limit API!
+                new_chunk = header + '\n' + row
+                while len(new_chunk) > chunk_size:
+                    chunks.append(new_chunk[:chunk_size])
+                    new_chunk = header + '\n' + new_chunk[chunk_size:]
+                
+                current_chunk = new_chunk
+                
+        if current_chunk and current_chunk != header:
+            chunks.append(current_chunk)
+            
+        return chunks
 
-
-
+    @staticmethod
+    def chunk_text(text: str, chunk_size: int, overlap_size: int) -> List[str]:
+        """Helper to chunk normal text preserving sentences."""
+        chunks = []
         if len(text) <= chunk_size:
-
-            # Single chunk (smaller than min size)
-
             return [text.strip()]
 
-
-
-        # Split by sentences when possible (preserve context)
-
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-
+        # Split by sentences or double newlines when possible
+        sentences = re.split(r"(?<=[.!?])\s+|\n\n+", text)
         current_chunk = ""
 
-
-
         for sentence in sentences:
+            if not sentence:
+                continue
 
-            # Add sentence to current chunk
+            # Forcefully break massive sentences to avoid 400 Bad Request
+            while len(sentence) > chunk_size:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+                
+                part = sentence[:chunk_size]
+                chunks.append(part.strip())
+                sentence = sentence[chunk_size:]
 
+            if not sentence:
+                continue
+                
             test_chunk = current_chunk + " " + sentence if current_chunk else sentence
 
-
-
             if len(test_chunk) <= chunk_size:
-
                 current_chunk = test_chunk
-
             else:
-
-                # Current chunk is full, save it
-
                 if current_chunk:
-
                     chunks.append(current_chunk.strip())
 
-
-
-                # Start new chunk with overlap
-
                 if chunks and overlap_size > 0:
-
-                    # Keep last overlap_size chars from previous chunk
-
-                    overlap = (
-
-                        chunks[-1][-overlap_size:]
-
-                        if len(chunks[-1]) > overlap_size
-
-                        else chunks[-1]
-
-                    )
-
+                    overlap = chunks[-1][-overlap_size:] if len(chunks[-1]) > overlap_size else chunks[-1]
                     current_chunk = overlap + " " + sentence
-
+                    
+                    # Safety check: if overlap + sentence still > chunk_size
+                    if len(current_chunk) > chunk_size:
+                        chunks.append(current_chunk[:chunk_size].strip())
+                        current_chunk = current_chunk[chunk_size:]
                 else:
-
                     current_chunk = sentence
 
-
-
-        # Add final chunk
-
         if current_chunk:
-
             chunks.append(current_chunk.strip())
 
+        # Final safety pass to ensure ABSOLUTELY NO CHUNK exceeds chunk_size
+        safe_chunks = []
+        for c in chunks:
+            while len(c) > chunk_size:
+                safe_chunks.append(c[:chunk_size])
+                c = c[chunk_size:]
+            if c.strip():
+                safe_chunks.append(c)
 
+        return safe_chunks
 
+    @staticmethod
+    def split_into_chunks(
+        text: str,
+        chunk_size: int = 500,  # Reduced from 1000 to 700 to safely stay under 512 tokens
+        overlap_size: int = 50,  # Reduced overlap proportionally
+    ) -> List[str]:
+        """
+        Split text into overlapping chunks, using Table-Aware chunking for Markdown tables.
+        """
+        chunks = []
+        
+        # Regex to detect Markdown table blocks (consecutive lines starting and ending with |)
+        table_pattern = re.compile(r'((?:^\|.*?\|[ \t]*(?:\n|$))+)', re.MULTILINE)
+        
+        last_idx = 0
+        for match in table_pattern.finditer(text):
+            table_start = match.start()
+            table_end = match.end()
+            
+            # 1. Chunk the text before the table
+            pre_text = text[last_idx:table_start].strip()
+            if pre_text:
+                chunks.extend(TextChunker.chunk_text(pre_text, chunk_size, overlap_size))
+                
+            # 2. Chunk the table using Table-Aware strategy
+            table_text = match.group(0).strip()
+            chunks.extend(TextChunker.chunk_table(table_text, chunk_size))
+            
+            last_idx = table_end
+            
+        # 3. Chunk any remaining text after the last table
+        post_text = text[last_idx:].strip()
+        if post_text:
+            chunks.extend(TextChunker.chunk_text(post_text, chunk_size, overlap_size))
+            
         return chunks
 
 
@@ -2571,3 +2607,310 @@ class KnowledgeBaseService:
         except Exception as e:
             logger.error(f'Outlook sync failed: {e}', exc_info=True)
             return format_error(f'Failed to sync Outlook: {e}')
+
+    async def save_table_rows(self, kb_id: str, table_rows: list):
+        """
+        Saves extracted structured tables directly to PostgreSQL (no Neo4j syncing required for tables).
+        """
+        try:
+            async for doc in crawler.load_from_checkpoint(0, time.time(), checkpoint):
+                if hasattr(doc, 'node_type'):
+                    continue
+                
+                msg_data = await crawler.get_message_content(doc.id, user_email)
+                if not msg_data or not msg_data.get('body'):
+                    continue
+
+                chunk_id = str(uuid4())
+                chunk_text = f"Subject: {msg_data.get('subject')}\nFrom: {msg_data.get('sender')}\nDate: {msg_data.get('date')}\n\n{msg_data.get('body')}"
+
+                from app.core.entity_extraction import EntityExtractor
+                entities = await EntityExtractor.extract_entities(msg_data.get('body') or "")
+
+                neo4j_nodes.append({
+                    'chunk_id': chunk_id,
+                    'message_id': doc.id,
+                    'subject': msg_data.get('subject'),
+                    'sender': msg_data.get('sender'),
+                    'date': msg_data.get('date'),
+                    'entities': [{'text': e.text, 'type': e.entity_type} for e in entities[:50]]
+                })
+
+                from app.core.embeddings import get_embedding
+                emb = await get_embedding(chunk_text)
+                
+                pg_chunk = DocumentChunk(
+                    id=uuid.UUID(chunk_id),
+                    tenant_id=self.tenant_id,
+                    kb_id=uuid.UUID(kb_id),
+                    content=chunk_text,
+                    embedding=emb,
+                    metadata_json={
+                        'source': 'gmail',
+                        'message_id': doc.id
+                    }
+                )
+                self.db.add(pg_chunk)
+                messages_synced += 1
+
+            if neo4j_nodes:
+                neo_query_emails = """
+                MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                UNWIND $chunks AS chunk
+                MERGE (p:Person {text: chunk.sender, tenant_id: $tenant_id})
+                ON CREATE SET p.type = 'PERSON', p.id = randomUUID(), p.created_at = timestamp()
+                MERGE (e:Email {id: chunk.message_id, tenant_id: $tenant_id})
+                ON CREATE SET e.subject = chunk.subject, e.date = chunk.date, e.chunk_id = chunk.chunk_id, e.created_at = timestamp()
+                MERGE (p)-[:SENT]->(e)
+                MERGE (kb)-[:HAS_EMAIL]->(e)
+                WITH e, chunk, $tenant_id AS tenant_id
+                UNWIND chunk.entities AS ent
+                MERGE (ent_node:Entity {text: ent.text, type: ent.type, tenant_id: tenant_id})
+                ON CREATE SET ent_node.id = randomUUID(), ent_node.created_at = timestamp()
+                MERGE (e)-[:MENTIONS]->(ent_node)
+                """
+                await execute_write_query(neo_query_emails, {
+                    'kb_id': str(kb_id),
+                    'tenant_id': str(self.tenant_id),
+                    'chunks': neo4j_nodes
+                })
+                
+                pg_kb.total_chunks += messages_synced
+                await self.db.commit()
+
+            from app.utils.formatters import format_success, format_error
+            return format_success({'kb_id': kb_id, 'messages_synced': messages_synced, 'sync_duration_seconds': time.time() - sync_start_time}, meta={'message': 'Gmail synchronized successfully'})
+
+        except Exception as e:
+            logger.error(f'Gmail sync failed: {e}', exc_info=True)
+            from app.utils.formatters import format_error
+            return format_error(f'Failed to sync Gmail: {e}')
+
+    async def sync_outlook_source(self, kb_id: str, sync_req: dict) -> dict:
+        import time
+        import json
+        from uuid import uuid4
+        from sqlalchemy import select
+        from app.modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
+        from app.modules.connectors.sharepoint.outlook_crawler import OutlookConnector
+        from app.core.connectors import ConnectorCheckpoint
+
+        sync_start_time = time.time()
+        
+        query = select(KnowledgeBase).where(KnowledgeBase.id == uuid.UUID(kb_id), KnowledgeBase.tenant_id == self.tenant_id)
+        res = await self.db.execute(query)
+        pg_kb = res.scalar_one_or_none()
+        if not pg_kb:
+            return format_error('Knowledge Base not found', meta={'error_code': 'KB_NOT_FOUND'})
+
+        conn_query = select(DatabaseConnection).where(
+            DatabaseConnection.kb_id == uuid.UUID(kb_id),
+            DatabaseConnection.tenant_id == self.tenant_id,
+            DatabaseConnection.db_type == 'outlook'
+        )
+        conn_res = await self.db.execute(conn_query)
+        db_conn = conn_res.scalar_one_or_none()
+        if not db_conn:
+            return format_error('Outlook connection not configured for this KB.')
+
+        user_email = sync_req.get('user_email')
+        if not user_email:
+            return format_error('user_email is required for Outlook sync.')
+
+        pg_kb.source = f'outlook({user_email})'
+        await self.db.commit()
+
+        crawler = OutlookConnector(folder_id=sync_req.get('folder_id'), max_results=sync_req.get('max_results', 100))
+        crawler.load_credentials(db_conn.connection_params)
+        checkpoint = ConnectorCheckpoint(user_emails=[user_email], has_more=True, completion_stage='start')
+
+        messages_synced = 0
+        neo4j_nodes = []
+
+        try:
+            async for doc in crawler.load_from_checkpoint(0, time.time(), checkpoint):
+                if hasattr(doc, 'node_type'):
+                    continue
+                
+                msg_data = await crawler.get_message_content(user_email, doc.id)
+                if not msg_data or not msg_data.get('body'):
+                    continue
+
+                chunk_id = str(uuid4())
+                chunk_text = f"Subject: {msg_data.get('subject')}\nFrom: {msg_data.get('sender')}\nDate: {msg_data.get('date')}\n\n{msg_data.get('body')}"
+
+                from app.core.entity_extraction import EntityExtractor
+                entities = await EntityExtractor.extract_entities(msg_data.get('body') or "")
+
+                neo4j_nodes.append({
+                    'chunk_id': chunk_id,
+                    'message_id': doc.id,
+                    'subject': msg_data.get('subject'),
+                    'sender': msg_data.get('sender'),
+                    'date': msg_data.get('date'),
+                    'entities': [{'text': e.text, 'type': e.entity_type} for e in entities[:50]]
+                })
+
+                from app.core.embeddings import get_embedding
+                emb = await get_embedding(chunk_text)
+                
+                pg_chunk = DocumentChunk(
+                    id=uuid.UUID(chunk_id),
+                    tenant_id=self.tenant_id,
+                    kb_id=uuid.UUID(kb_id),
+                    content=chunk_text,
+                    embedding=emb,
+                    metadata_json={
+                        'source': 'outlook',
+                        'message_id': doc.id
+                    }
+                )
+                self.db.add(pg_chunk)
+                messages_synced += 1
+
+            if neo4j_nodes:
+                neo_query_emails = """
+                MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                UNWIND $chunks AS chunk
+                MERGE (p:Person {text: chunk.sender, tenant_id: $tenant_id})
+                ON CREATE SET p.type = 'PERSON', p.id = randomUUID(), p.created_at = timestamp()
+                MERGE (e:Email {id: chunk.message_id, tenant_id: $tenant_id})
+                ON CREATE SET e.subject = chunk.subject, e.date = chunk.date, e.chunk_id = chunk.chunk_id, e.created_at = timestamp()
+                MERGE (p)-[:SENT]->(e)
+                MERGE (kb)-[:HAS_EMAIL]->(e)
+                WITH e, chunk, $tenant_id AS tenant_id
+                UNWIND chunk.entities AS ent
+                MERGE (ent_node:Entity {text: ent.text, type: ent.type, tenant_id: tenant_id})
+                ON CREATE SET ent_node.id = randomUUID(), ent_node.created_at = timestamp()
+                MERGE (e)-[:MENTIONS]->(ent_node)
+                """
+                from app.core.neo4j import execute_write_query
+                await execute_write_query(neo_query_emails, {
+                    'kb_id': str(kb_id),
+                    'tenant_id': str(self.tenant_id),
+                    'chunks': neo4j_nodes
+                })
+                
+                pg_kb.total_chunks += messages_synced
+                await self.db.commit()
+
+            from app.utils.formatters import format_success, format_error
+            return format_success({'kb_id': kb_id, 'messages_synced': messages_synced, 'sync_duration_seconds': time.time() - sync_start_time}, meta={'message': 'Outlook synchronized successfully'})
+
+        except Exception as e:
+            logger.error(f'Outlook sync failed: {e}', exc_info=True)
+            from app.utils.formatters import format_error
+            return format_error(f'Failed to sync Outlook: {e}')
+
+    async def save_table_rows(self, kb_id: str, table_rows: list):
+        """
+        Saves extracted structured tables directly to PostgreSQL (no Neo4j syncing required for tables).
+        """
+        from .models import DocumentTableRow
+        import uuid
+        
+        if not table_rows:
+            return
+            
+        try:
+            db_rows = []
+            chunk_texts = []
+            import re
+            
+            def parse_numeric(val):
+                if not val: return None
+                # Strip non-numeric characters except dot
+                cleaned = re.sub(r'[^\d.]', '', str(val))
+                try:
+                    return float(cleaned) if cleaned else None
+                except ValueError:
+                    return None
+
+            for row in table_rows:
+                row_data = row.get("row_data", {})
+                
+                # Column Mapping Registry
+                CANONICAL_COLUMNS = {
+                    "part_number": ["part number", "part no", "item code", "sku", "product id"],
+                    "product_name": ["product", "description", "item name", "product name", "item description"],
+                    "mrp": ["mrp", "price", "rate", "unit price", "retail price", "selling price", "cost"],
+                    "gst": ["gst", "tax", "gst %", "tax %", "igst", "cgst", "sgst"],
+                    "hsn_code": ["hsn", "hsn code", "sac code"]
+                }
+                
+                # Case-insensitive key matching for common columns
+                row_keys_lower = {k.lower().strip(): k for k in row_data.keys()}
+                
+                def find_mapped_value(canonical_name):
+                    for alias in CANONICAL_COLUMNS[canonical_name]:
+                        if alias in row_keys_lower:
+                            return row_data[row_keys_lower[alias]]
+                    return None
+                
+                # Extract typed columns
+                part_number = find_mapped_value("part_number")
+                product_name = find_mapped_value("product_name")
+                mrp = parse_numeric(find_mapped_value("mrp"))
+                gst = parse_numeric(find_mapped_value("gst"))
+                hsn_code = find_mapped_value("hsn_code")
+
+                db_rows.append(
+                    DocumentTableRow(
+                        tenant_id=self.tenant_id,
+                        kb_id=uuid.UUID(kb_id),
+                        page_number=row.get("page_number", 1),
+                        table_index=row.get("table_index", 0),
+                        row_index=row.get("row_index", 0),
+                        part_number=str(part_number)[:255] if part_number else None,
+                        product_name=str(product_name)[:1000] if product_name else None,
+                        mrp=mrp,
+                        gst=gst,
+                        hsn_code=str(hsn_code)[:100] if hsn_code else None,
+                        extraction_confidence=0.99, # Phase 3: Advanced Enterprise Feature
+                        row_data=row_data
+                    )
+                )
+
+                # ============= ROW-LEVEL EMBEDDING CHUNK =============
+                # Create highly structured semantic chunks avoiding SL.NO and metadata
+                # This prevents flattened table math hallucination (e.g., 1 + 2996 = 12996)
+                chunk_parts = []
+                if part_number: chunk_parts.append(f"Part Number: {part_number}")
+                if product_name: chunk_parts.append(f"Product Name: {product_name}")
+                if mrp is not None: chunk_parts.append(f"MRP: {mrp}")
+                if hsn_code: chunk_parts.append(f"HSN Code: {hsn_code}")
+                if gst is not None: chunk_parts.append(f"GST: {gst}%")
+                
+                if chunk_parts:
+                    chunk_texts.append("\n".join(chunk_parts))
+                
+            self.db.add_all(db_rows)
+            
+            # Batch generate embeddings for semantic row chunks
+            if chunk_texts:
+                from app.core.embeddings import EmbeddingGenerator
+                from .models import DocumentChunk
+                
+                embeddings = await EmbeddingGenerator.generate_embeddings_batch(chunk_texts)
+                chunk_rows = []
+                
+                for idx, (text, emb) in enumerate(zip(chunk_texts, embeddings)):
+                    chunk_rows.append(
+                        DocumentChunk(
+                            tenant_id=self.tenant_id,
+                            kb_id=uuid.UUID(kb_id),
+                            text=text,
+                            # Offset index heavily so it doesn't conflict with normal chunks
+                            chunk_index=90000 + idx, 
+                            embedding=emb
+                        )
+                    )
+                self.db.add_all(chunk_rows)
+                logger.info(f" Saved {len(chunk_rows)} Row-Level Embeddings to DB for KB {kb_id}")
+            
+            await self.db.commit()
+            logger.info(f" Saved {len(db_rows)} structured table rows to DB for KB {kb_id}")
+            
+        except Exception as e:
+            logger.error(f" Failed to save table rows to DB: {e}", exc_info=True)
+            await self.db.rollback()

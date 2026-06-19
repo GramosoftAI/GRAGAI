@@ -53,6 +53,77 @@ class PDFExtractor:
     """
 
     @staticmethod
+    async def extract_tables_to_json(pdf_bytes: bytes) -> list:
+        """
+        Extract structured tables from PDF using pdfplumber into JSONB friendly format.
+        Returns a list of dicts:
+        [{
+            "page_number": 1,
+            "table_index": 0,
+            "row_index": 0,
+            "row_data": {"Part Number": "123", "Price": "5000"}
+        }]
+        """
+        import pdfplumber
+        import io
+        
+        extracted_tables = []
+        try:
+            # Run blocking pdfplumber open and extraction in a thread pool
+            def _extract() -> list:
+                results = []
+                with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                    for page_idx, page in enumerate(pdf.pages):
+                        tables = page.extract_tables()
+                        for table_idx, table in enumerate(tables):
+                            if not table or len(table) < 2:
+                                continue
+                                
+                            # Extract headers
+                            headers = table[0]
+                            headers = [str(h).strip().replace('\n', ' ') if h else f"col_{i}" for i, h in enumerate(headers)]
+                            
+                            # Ensure unique headers if there are duplicates
+                            unique_headers = []
+                            for i, h in enumerate(headers):
+                                if h in unique_headers:
+                                    unique_headers.append(f"{h}_{i}")
+                                else:
+                                    unique_headers.append(h)
+                            headers = unique_headers
+
+                            # Extract rows
+                            for row_idx, row in enumerate(table[1:]):
+                                row_data = {}
+                                has_data = False
+                                for i, cell in enumerate(row):
+                                    if i < len(headers):
+                                        col_name = headers[i]
+                                        cell_val = str(cell).strip().replace('\n', ' ') if cell else ""
+                                        row_data[col_name] = cell_val
+                                        if cell_val:
+                                            has_data = True
+                                
+                                # Only append if the row has actual data
+                                if has_data:
+                                    results.append({
+                                        "page_number": page_idx + 1,
+                                        "table_index": table_idx,
+                                        "row_index": row_idx,
+                                        "row_data": row_data
+                                    })
+                return results
+
+            loop = asyncio.get_event_loop()
+            extracted_tables = await loop.run_in_executor(None, _extract)
+            logger.info(f" Extracted {len(extracted_tables)} structured table rows from PDF")
+            
+        except Exception as e:
+            logger.error(f" Failed to extract tables: {e}", exc_info=True)
+            
+        return extracted_tables
+
+    @staticmethod
     async def extract(
         pdf_bytes: bytes,
         filename: str = "document.pdf",
@@ -178,8 +249,10 @@ class PDFExtractor:
                 logger.debug(f"Gdocz converting: {tmp_path}")
                 result = client.convert(tmp_path, options=options)
 
-                return result.markdown or ""
-
+                if isinstance(result, dict):
+                    return result.get("markdown", "")
+                else:
+                    return getattr(result, "markdown", "") or ""
             finally:
                 # Clean up temp file
                 if tmp_path and os.path.exists(tmp_path):
@@ -343,18 +416,11 @@ class PDFExtractor:
         # Inline code: `text`  text
         text = re.sub(r"`([^`]+)`", r"\1", text)
 
-        # ============= STEP 7: CLEAN TABLE FORMATTING =============
-        # Convert markdown table rows to readable text
-        # | Col1 | Col2 | Col3 |  Col1, Col2, Col3
-        text = re.sub(
-            r"\|([^|\n]+)\|",
-            lambda m: m.group(1).strip() + ". ",
-            text,
-        )
-        # Remove table separator lines (|---|---|)
-        text = re.sub(r"\|[-:]+\|[-:|\s]+", "", text)
-        # Clean remaining pipe characters
-        text = re.sub(r"\|", " ", text)
+        # ============= STEP 7: REMOVE MARKDOWN TABLES =============
+        # We now extract tables separately into structured rows. We do NOT want 
+        # flattened tables polluting the unstructured semantic vector space.
+        # Matches typical markdown tables like | Col1 | Col2 |
+        text = re.sub(r"^(?:\|[^\n]+\|\r?\n)+", "", text, flags=re.MULTILINE)
 
         # ============= STEP 8: CLEAN LIST MARKERS =============
         # - item or * item or  item  item
