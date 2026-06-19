@@ -429,7 +429,8 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
             "source": c.source,
             "score": round(c.hybrid_score, 3),
             "position": c.position,
-            "reason": c.reason }
+            "reason": c.reason,
+            "kb_id": c.kb_id }
 
                 for c in context.chunks
 
@@ -1138,6 +1139,8 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
                 "reason": chunk.reason,  # Why this chunk was retrieved
                 
                 "source": chunk.source,
+
+                "kb_id": chunk.kb_id,
 
             }
 
