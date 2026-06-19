@@ -320,6 +320,8 @@ class KnowledgeBaseService:
 
                 source=request.source or "user_upload",
 
+                s3_path=request.s3_path,
+
             )
 
             kb_id = str(pg_kb.id)
@@ -343,6 +345,8 @@ class KnowledgeBaseService:
                 name: $name,
 
                 source: $source,
+
+                s3_path: $s3_path,
 
                 created_at: timestamp()
 
@@ -384,11 +388,14 @@ class KnowledgeBaseService:
 
                             "source": request.source or "user_upload",
 
+                            "s3_path": request.s3_path,
+
                         },
 
                     )
 
                 )
+
 
                 logger.info(f" Neo4j: Created KB node {kb_id}")
 
@@ -480,6 +487,8 @@ class KnowledgeBaseService:
 
         source: Optional[str] = None,
 
+        s3_path: Optional[str] = None,
+
     ) -> dict:
 
         """
@@ -497,6 +506,29 @@ class KnowledgeBaseService:
             if not kb:
 
                 return format_error(f"KB not found: {kb_id}", meta={"status_code": 404})
+
+            if s3_path:
+                kb.s3_path = s3_path
+                # Update Neo4j node
+                neo4j_update_query = """
+                MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                SET kb.s3_path = $s3_path
+                """
+                try:
+                    await retry_neo4j_operation(
+                        lambda: self.neo4j_repo.execute_write(
+                            neo4j_update_query,
+                            {
+                                "kb_id": kb_id,
+                                "tenant_id": str(self.tenant_id),
+                                "s3_path": s3_path
+                            }
+                        )
+                    )
+                    logger.info(f"Updated Neo4j KnowledgeBase {kb_id} with s3_path={s3_path}")
+                except Exception as neo_err:
+                    logger.warning(f"Failed to update Neo4j KB s3_path: {neo_err}")
+
 
 
 
@@ -822,6 +854,8 @@ class KnowledgeBaseService:
 
         source: Optional[str] = None,
 
+        s3_path: Optional[str] = None,
+
     ) -> dict:
 
         """
@@ -841,6 +875,29 @@ class KnowledgeBaseService:
             if not kb:
 
                 return format_error(f"KB not found: {kb_id}", meta={"status_code": 404})
+
+            if s3_path:
+                kb.s3_path = s3_path
+                # Update Neo4j node
+                neo_update_q = """
+                MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                SET kb.s3_path = $s3_path
+                """
+                try:
+                    await retry_neo4j_operation(
+                        lambda: self.neo4j_repo.execute_write(
+                            neo_update_q,
+                            {
+                                "kb_id": kb_id,
+                                "tenant_id": str(self.tenant_id),
+                                "s3_path": s3_path
+                            }
+                        )
+                    )
+                    logger.info(f"Updated Neo4j KnowledgeBase {kb_id} with s3_path={s3_path}")
+                except Exception as neo_err:
+                    logger.warning(f"Failed to update Neo4j KB s3_path: {neo_err}")
+
 
 
 
@@ -1060,6 +1117,67 @@ class KnowledgeBaseService:
     async def _validate_graph_integrity(self, kb_id: str) -> dict:
 
         return {"success": True, "issues": []}
+
+    async def get_file_preview_metadata(self, kb_id: str, user_id: str) -> dict:
+        """
+        Retrieves S3 path and other metadata for secure file preview.
+        Checks tenant and user permission.
+        """
+        kb = await self.repository.get_by_id(kb_id)
+        if not kb:
+            return {
+                "success": False,
+                "error": "File not found.",
+                "status_code": 404
+            }
+
+        # Check tenant permission
+        if str(kb.tenant_id) != str(self.tenant_id):
+            return {
+                "success": False,
+                "error": "Access denied.",
+                "status_code": 403
+            }
+
+        # Determine S3 key
+        s3_key = None
+        filename = kb.name
+        
+        # If kb.name contains prefixes, clean it up
+        clean_filename = filename
+        if clean_filename.startswith("PDF: "):
+            clean_filename = clean_filename[5:]
+        elif clean_filename.startswith("Spreadsheet: "):
+            clean_filename = clean_filename[13:]
+
+        if kb.s3_path:
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(kb.s3_path)
+                s3_key = parsed.path.lstrip('/')
+            except Exception:
+                pass
+
+        if not s3_key:
+            # Fallback reconstruction
+            from app.core.config import get_settings
+            settings = get_settings()
+            bucket_val = settings.aws_s3_bucket or "default-bucket"
+            bucket_parts = bucket_val.split('/', 1)
+            base_prefix = bucket_parts[1] + '/' if len(bucket_parts) > 1 else ''
+            s3_key = f"{base_prefix}uploads/{self.tenant_id}/{clean_filename}"
+
+        return {
+            "success": True,
+            "data": {
+                "file_id": str(kb.id),
+                "filename": clean_filename,
+                "s3_key": s3_key,
+                "user_id": str(kb.user_id),
+                "tenant_id": str(kb.tenant_id)
+            }
+        }
+
 
 
 

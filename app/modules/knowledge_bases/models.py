@@ -101,6 +101,9 @@ class KnowledgeBase(Base):
         nullable=True,
     )
 
+    s3_path = Column(String(1024), nullable=True)
+
+
     # ============= AUDIT TRACKING =============
     created_at = Column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

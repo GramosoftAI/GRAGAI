@@ -1066,6 +1066,8 @@ async def instant_ingest_pdf(
 
                 kb_service = KnowledgeBaseService(db, tenant_id)
 
+                s3_url = s3_service.get_s3_url(str(tenant_id), filename)
+
                 kb_request = KBCreate(
 
                     name=f"Spreadsheet: {filename}",
@@ -1074,7 +1076,9 @@ async def instant_ingest_pdf(
 
                     agent_id=uuid.UUID(agent_id),
 
-                    source="excel_upload"
+                    source="excel_upload",
+
+                    s3_path=s3_url
 
                 )
 
@@ -1102,9 +1106,12 @@ async def instant_ingest_pdf(
 
                     file_bytes=content,
 
-                    filename=filename
+                    filename=filename,
+
+                    source=s3_url
 
                 )
+
 
 
 

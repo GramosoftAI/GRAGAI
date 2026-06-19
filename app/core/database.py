@@ -717,8 +717,7 @@ async def init_db():
         from ..modules.personalities.models import Personality
 
         from ..modules.connectors.google.models import GmailMessage, GmailSyncState
-        from ..modules.connectors.google.models import GmailMessage, GmailSyncState
-        from ..modules.connectors.google.models import GmailMessage, GmailSyncState
+        from ..modules.jobs.models import ProcessingJob
 
 
         logger.debug("All models imported and registered")

@@ -733,7 +733,9 @@ async def ingest_file(
 
                 service = KnowledgeBaseService(db, tenant_id)
 
-                result = await service.ingest_document(kb_id, document_text)
+                s3_url = s3_service.get_s3_url(str(tenant_id), file.filename)
+
+                result = await service.ingest_document(kb_id, document_text, s3_path=s3_url)
 
 
 
@@ -761,6 +763,8 @@ async def ingest_file(
 
                 service = KnowledgeBaseService(db, tenant_id)
 
+                s3_url = s3_service.get_s3_url(str(tenant_id), file.filename)
+
                 result = await service.ingest_excel_or_csv(
 
                     kb_id=kb_id,
@@ -769,7 +773,10 @@ async def ingest_file(
 
                     filename=file.filename,
 
+                    s3_path=s3_url,
+
                 )
+
 
 
 
@@ -2267,3 +2274,5 @@ async def sync_outlook_api(request: Request, kb_id: str, payload: schemas.Outloo
         logger.error(f"Error in sync_outlook: {e}")
         from app.utils.formatters import format_error
         return format_error(f"Internal server error: {e}")
+
+

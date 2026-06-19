@@ -34,6 +34,12 @@ class KBCreate(BaseModel):
         max_length=50,
         description="Document type classification (e.g. PRICE_LIST, INVOICE)",
     )
+    s3_path: Optional[str] = Field(
+        None,
+        max_length=1024,
+        description="S3 storage path of the file",
+    )
+
 
     class Config:
         json_schema_extra = {
@@ -87,6 +93,8 @@ class KBResponse(BaseModel):
     )
     created_at: datetime
     updated_at: datetime
+    s3_path: Optional[str] = None
+
     connected_integration: Optional[str] = Field(None, description="The type of external integration connected to this KB (e.g., google_drive, sharepoint)")
 
     class Config:

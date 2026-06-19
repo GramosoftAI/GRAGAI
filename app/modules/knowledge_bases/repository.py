@@ -80,6 +80,8 @@ class KnowledgeBaseRepository(BaseRepository):
 
         source: str = "user_upload",
 
+        s3_path: Optional[str] = None,
+
     ) -> KnowledgeBase:
 
         """
@@ -110,6 +112,8 @@ class KnowledgeBaseRepository(BaseRepository):
 
             source: Source type
 
+            s3_path: Optional S3 URL/path
+
 
 
         Returns:
@@ -138,7 +142,10 @@ class KnowledgeBaseRepository(BaseRepository):
 
             is_active=True,
 
+            s3_path=s3_path,
+
         )
+
 
 
 

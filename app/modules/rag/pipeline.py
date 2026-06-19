@@ -1173,7 +1173,7 @@ class RAGPipeline:
                 MATCH (c:Chunk {tenant_id: $tenant_id})
                 WHERE c.id IN $chunk_ids
                 OPTIONAL MATCH (kb:KnowledgeBase {tenant_id: $tenant_id})-[:HAS_CHUNK]->(c)
-                RETURN c.id as chunk_id, c.text as text, c.kb_id as kb_id, c.position as position, COALESCE(c.source, kb.name) as source
+                RETURN c.id as chunk_id, c.text as text, c.kb_id as kb_id, c.position as position, COALESCE(kb.s3_path, c.source, kb.name) as source
                 """
                 neo_res = await self.neo4j_repo.execute_read(neo_query, {
                     "chunk_ids": needed_chunk_ids,
@@ -1413,7 +1413,7 @@ class RAGPipeline:
         WHERE kb.id IN $kb_ids AND kb.tenant_id = $tenant_id
         MATCH (kb)-[:HAS_CHUNK]->(c:Chunk)
         WHERE c.embedding IS NOT NULL AND size(c.embedding) = $dimension
-        RETURN c.id as chunk_id, c.text as text, c.position as position, c.kb_id as kb_id, c.embedding as embedding, coalesce(c.weight, 1.0) as weight, c.source as source
+        RETURN c.id as chunk_id, c.text as text, c.position as position, c.kb_id as kb_id, c.embedding as embedding, coalesce(c.weight, 1.0) as weight, COALESCE(kb.s3_path, c.source, kb.name) as source
         LIMIT 1000
         """
 

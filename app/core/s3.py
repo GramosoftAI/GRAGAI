@@ -116,3 +116,32 @@ class S3StorageService:
         except Exception as e:
             logger.error(f"Unexpected error in S3 storage service: {e}")
             raise HTTPException(status_code=500, detail="An error occurred while communicating with AWS S3.")
+
+    def get_s3_url(self, tenant_id: str, filename: str) -> str:
+        """
+        Determines the public/presigned standard S3 URL for a given tenant's filename.
+        """
+        bucket_val = settings.aws_s3_bucket or "default-bucket"
+        bucket_parts = bucket_val.split('/', 1)
+        bucket_name = bucket_parts[0]
+        base_prefix = bucket_parts[1] + '/' if len(bucket_parts) > 1 else ''
+        s3_key = f"{base_prefix}uploads/{tenant_id}/{filename}"
+        region = settings.aws_region or "us-east-1"
+        return f"https://{bucket_name}.s3.{region}.amazonaws.com/{s3_key}"
+
+    def get_file_stream(self, s3_key: str):
+        """
+        Returns a streaming body for the file stored in S3.
+        """
+        if not self.client:
+            logger.error("S3 client not initialized. Cannot stream file.")
+            raise ValueError("S3 configuration is missing or invalid.")
+        try:
+            response = self.client.get_object(Bucket=self.bucket_name, Key=s3_key)
+            return response['Body']
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code')
+            logger.error(f"S3 get_object error for key {s3_key}: {e}")
+            raise e
+
+

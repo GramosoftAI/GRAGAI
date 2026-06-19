@@ -340,6 +340,12 @@ Rules:
 - Never invent facts.
 - Mention source at the end.
 
+For files (ending in .pdf, .csv, .xlsx, .xls):
+The source citation MUST be strictly formatted as:
+[Source: <filename> - Position <comma_separated_chunks>]
+Example: [Source: Vishnu_Raj_Technical_Resume.pdf - Position 1,2,3,4,5,6,7]
+Do NOT write "Sources:" or "- PDF:" or any other prefix/label for these files; write only the [Source: ...] tag at the very end of your answer.
+
 For emails include:
 - Source: Gmail inbox/sent
 - sender
@@ -352,7 +358,7 @@ Answer:
 ...
 
 Sources:
-- ...
+- ... (only for emails)
 
 CRITICAL INSTRUCTION: If the user's query is a general greeting or conversational pleasantry (e.g., "hi", "hello"), you MUST leave the source citation completely blank. DO NOT output ANY Sources section.
 
@@ -749,6 +755,12 @@ Rules:
 - Never invent facts.
 - Mention source at the end.
 
+For files (ending in .pdf, .csv, .xlsx, .xls):
+The source citation MUST be strictly formatted as:
+[Source: <filename> - Position <comma_separated_chunks>]
+Example: [Source: Vishnu_Raj_Technical_Resume.pdf - Position 1,2,3,4,5,6,7]
+Do NOT write "Sources:" or "- PDF:" or any other prefix/label for these files; write only the [Source: ...] tag at the very end of your answer.
+
 For emails include:
 - Source: Gmail inbox/sent
 - sender
@@ -761,7 +773,7 @@ Answer:
 ...
 
 Sources:
-- ...
+- ... (only for emails)
 
 CRITICAL INSTRUCTION: If the user's query is a general greeting or conversational pleasantry (e.g., "hi", "hello"), you MUST leave the source citation completely blank. DO NOT output ANY Sources section.
 

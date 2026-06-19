@@ -76,13 +76,18 @@ async def run_pdf_ingestion_job(
             await job_service.update_job_progress(job_id, status="processing", progress=40, current_step="Creating Knowledge Base Entry")
 
             # Step 2: Create KB Entry
+            from app.core.s3 import S3StorageService
+            s3_service = S3StorageService()
+            s3_url = s3_service.get_s3_url(str(tenant_id), filename)
+
             kb_service = KnowledgeBaseService(db, tenant_id)
             kb_request = KBCreate(
                 name=f"PDF: {filename}",
                 description=f"Automated PDF upload source (Gdocz extraction)",
                 agent_id=uuid.UUID(agent_id),
                 source="pdf_upload",
-                document_type=document_type
+                document_type=document_type,
+                s3_path=s3_url
             )
             
             kb_result = await kb_service.create_knowledge_base(user_id, kb_request)
@@ -100,7 +105,8 @@ async def run_pdf_ingestion_job(
             await job_service.update_job_progress(job_id, status="processing", progress=60, current_step="Chunking and Generating Embeddings")
             
             logger.info(f"Job {job_id}: Starting embedding and graph ingestion for {kb_id}")
-            ingest_result = await kb_service.ingest_document(kb_id, document_text)
+            ingest_result = await kb_service.ingest_document(kb_id, document_text, source=s3_url, s3_path=s3_url)
+
             
             if not ingest_result.get("success"):
                 error_msg = ingest_result.get("error", "Unknown ingestion error")
