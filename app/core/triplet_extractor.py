@@ -34,6 +34,35 @@ from dataclasses import dataclass, field
 
 from .config import get_settings
 from .embeddings import EmbeddingGenerator
+import urllib.parse
+
+# ============================================================================
+# RDF SEMANTIC ONTOLOGY MAPPER
+# ============================================================================
+CANONICAL_RELATIONS = {
+    "issued": "ISSUED_BY",
+    "created_bill": "ISSUED_BY",
+    "generated_invoice": "ISSUED_BY",
+    "purchased": "PURCHASED",
+    "bought": "PURCHASED",
+    "ordered": "PURCHASED",
+    "supplied_by": "SUPPLIED_BY",
+    "provided_by": "SUPPLIED_BY",
+    "contains": "CONTAINS_PRODUCT",
+    "includes": "CONTAINS_PRODUCT",
+    "belongs_to": "BELONGS_TO",
+    "located_in": "LOCATED_IN",
+    "has_amount": "HAS_AMOUNT",
+    "has_date": "HAS_DATE",
+    "references": "REFERENCES",
+    "derived_from": "DERIVED_FROM"
+}
+
+def create_uri(entity_type: str, text: str) -> str:
+    """Generate globally unique RDF-compliant URI for an entity."""
+    clean_type = urllib.parse.quote(entity_type.lower().strip())
+    clean_text = urllib.parse.quote(text.lower().strip().replace(' ', '_'))
+    return f"https://grag.ai/kg/{clean_type}/{clean_text}"
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -59,10 +88,12 @@ class ExtractedTriplet:
         return f"{self.subject}  {self.predicate}  {self.object}"
 
     def normalize(self) -> "ExtractedTriplet":
-        """Normalize triplet fields for consistency."""
+        """Normalize triplet fields for consistency and apply RDF Ontology Mapping."""
+        raw_pred = self.predicate.strip().lower().replace(" ", "_")
+        canonical_pred = CANONICAL_RELATIONS.get(raw_pred, raw_pred.upper())
         return ExtractedTriplet(
             subject=self.subject.strip().lower(),
-            predicate=self.predicate.strip().lower().replace(" ", "_"),
+            predicate=canonical_pred,
             object=self.object.strip().lower(),
             subject_type=self.subject_type.upper().strip(),
             object_type=self.object_type.upper().strip(),
@@ -415,7 +446,15 @@ class TripletGraphWriter:
                 canonical_entities_to_merge[f"{t.subject}|{t.subject_type}"] = {
                     "text": t.subject,
                     "type": t.subject_type,
-                    "embedding": subj_mapped["embedding"]
+                    "embedding": subj_mapped["embedding"],
+                    "uri": create_uri(t.subject_type, t.subject)
+                }
+            else:
+                canonical_entities_to_merge[f"{t.subject}|{t.subject_type}"] = {
+                    "text": t.subject,
+                    "type": t.subject_type,
+                    "embedding": [],
+                    "uri": create_uri(t.subject_type, t.subject)
                 }
                 
             obj_mapped = canonical_map.get(t.object)
@@ -424,7 +463,15 @@ class TripletGraphWriter:
                 canonical_entities_to_merge[f"{t.object}|{t.object_type}"] = {
                     "text": t.object,
                     "type": t.object_type,
-                    "embedding": obj_mapped["embedding"]
+                    "embedding": obj_mapped["embedding"],
+                    "uri": create_uri(t.object_type, t.object)
+                }
+            else:
+                canonical_entities_to_merge[f"{t.object}|{t.object_type}"] = {
+                    "text": t.object,
+                    "type": t.object_type,
+                    "embedding": [],
+                    "uri": create_uri(t.object_type, t.object)
                 }
 
         # Step 1: MERGE Entity nodes (deduplicated + embeddings)
@@ -463,8 +510,12 @@ class TripletGraphWriter:
             text: e.text,
             type: e.type
         })
-        ON CREATE SET ent.id = randomUUID(), ent.created_at = timestamp()
-        SET ent.embedding = CASE WHEN e.embedding IS NOT NULL AND size(e.embedding) > 0 THEN e.embedding ELSE ent.embedding END
+        ON CREATE SET 
+            ent.id = randomUUID(), 
+            ent.created_at = timestamp(),
+            ent.uri = e.uri
+        SET ent.embedding = CASE WHEN e.embedding IS NOT NULL AND size(e.embedding) > 0 THEN e.embedding ELSE ent.embedding END,
+            ent.uri = CASE WHEN ent.uri IS NULL THEN e.uri ELSE ent.uri END
         RETURN count(ent) as count
         """
 
@@ -503,11 +554,15 @@ class TripletGraphWriter:
         UNWIND rel_list AS r
         MATCH (s:TripletEntity {tenant_id: $tenant_id, text: r.subject_text, type: r.subject_type})
         MATCH (o:TripletEntity {tenant_id: $tenant_id, text: r.object_text, type: r.object_type})
+        MATCH (c:Chunk {id: r.chunk_id, tenant_id: $tenant_id})
         CREATE (s)-[:RELATES_TO {
             predicate: r.predicate,
             chunk_id: r.chunk_id,
             confidence: r.confidence,
-            tenant_id: $tenant_id
+            tenant_id: $tenant_id,
+            source_document: CASE WHEN c.source IS NOT NULL THEN c.source ELSE 'unknown' END,
+            extraction_model: 'deepinfra-llm',
+            created_at: timestamp()
         }]->(o)
         RETURN count(*) as count
         """
