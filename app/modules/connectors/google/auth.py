@@ -132,6 +132,7 @@ async def execute_google_request(
     """
     Executes an async request and handles rate-limiting / error raising with tenancy retries.
     """
+    logger.info(f"Google API Request: {method} {url} with params {kwargs.get('params')}")
     response = await client.request(method, url, **kwargs)
 
     # 1. Handle Success

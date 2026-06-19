@@ -357,6 +357,9 @@ async def init_db():
         from ..modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
         from ..modules.chats.models import ChatSession, ChatMessage
         from ..modules.personalities.models import Personality
+        from ..modules.connectors.google.models import GmailMessage, GmailSyncState
+        from ..modules.connectors.google.models import GmailMessage, GmailSyncState
+        from ..modules.connectors.google.models import GmailMessage, GmailSyncState
 
         logger.debug("All models imported and registered")
 

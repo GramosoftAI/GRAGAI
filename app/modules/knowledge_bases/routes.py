@@ -5,7 +5,7 @@ import os
 import httpx
 import urllib.parse
 
-from fastapi import APIRouter, Request, HTTPException, status
+from fastapi import APIRouter, Request, HTTPException, status, BackgroundTasks
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2149,3 +2149,132 @@ async def outlook_callback(code: str, state: str):
         }
         await db.commit()
     return {"message": "Successfully connected Outlook! You can now close this window."}
+
+
+@router.post("/{kb_id}/gmail/register", status_code=200)
+async def register_gmail(request: Request, kb_id: str, payload: schemas.GmailRegister):
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            import uuid
+            query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
+            res = await db.execute(query)
+            db_conn = res.scalar_one_or_none()
+            if not db_conn:
+                db_conn = DatabaseConnection(
+                    tenant_id=uuid.UUID(tenant_id),
+                    kb_id=uuid.UUID(kb_id),
+                    db_type="gmail",
+                    connection_params={"credentials": payload.credentials}
+                )
+                db.add(db_conn)
+            else:
+                db_conn.db_type = "gmail"
+                db_conn.connection_params = {"credentials": payload.credentials}
+            await db.commit()
+            return {"success": True, "message": "Gmail credentials registered."}
+    except Exception as e:
+        logger.error(f"Error in register_gmail: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{kb_id}/gmail/labels", status_code=200)
+async def list_gmail_labels(request: Request, kb_id: str):
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        from app.utils.formatters import format_success
+        return format_success({"items": [
+            {"id": "INBOX", "name": "Inbox", "is_folder": True},
+            {"id": "SENT", "name": "Sent", "is_folder": True},
+            {"id": "STARRED", "name": "Starred", "is_folder": True}
+        ]})
+    except Exception as e:
+        logger.error(f"Error in list_gmail_labels: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/{kb_id}/gmail/sync", status_code=200)
+async def sync_gmail_api(request: Request, kb_id: str, payload: schemas.GmailSyncRequest):
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        
+        actual_email = payload.user_email or payload.email
+        if not actual_email:
+            return {"success": False, "message": "User Email is required"}
+            
+        payload.user_email = actual_email
+
+        async with AsyncSessionLocal() as db:
+            from app.modules.knowledge_bases.service import KnowledgeBaseService
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.sync_gmail_source(kb_id, payload.model_dump())
+            return result
+    except Exception as e:
+        logger.error(f"Error in sync_gmail: {e}")
+        from app.utils.formatters import format_error
+        return format_error(f"Internal server error: {e}")
+
+
+@router.post("/{kb_id}/outlook/register", status_code=200)
+async def register_outlook(request: Request, kb_id: str, payload: schemas.OutlookRegister):
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            import uuid
+            query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
+            res = await db.execute(query)
+            db_conn = res.scalar_one_or_none()
+            if not db_conn:
+                db_conn = DatabaseConnection(
+                    tenant_id=uuid.UUID(tenant_id),
+                    kb_id=uuid.UUID(kb_id),
+                    db_type="outlook",
+                    connection_params={"credentials": payload.credentials}
+                )
+                db.add(db_conn)
+            else:
+                db_conn.db_type = "outlook"
+                db_conn.connection_params = {"credentials": payload.credentials}
+            await db.commit()
+            return {"success": True, "message": "Outlook credentials registered."}
+    except Exception as e:
+        logger.error(f"Error in register_outlook: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{kb_id}/outlook/folders", status_code=200)
+async def list_outlook_folders(request: Request, kb_id: str):
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+        from app.utils.formatters import format_success
+        return format_success({"items": [
+            {"id": "inbox", "name": "Inbox", "is_folder": True},
+            {"id": "sentitems", "name": "Sent Items", "is_folder": True},
+            {"id": "archive", "name": "Archive", "is_folder": True}
+        ]})
+    except Exception as e:
+        logger.error(f"Error in list_outlook_folders: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/{kb_id}/outlook/sync", status_code=200)
+async def sync_outlook_api(request: Request, kb_id: str, payload: schemas.OutlookSyncRequest):
+    try:
+        tenant_id, _ = get_tenant_and_user(request)
+
+        actual_email = payload.user_email or payload.email
+        if not actual_email:
+            return {"success": False, "message": "User Email is required"}
+            
+        if payload.folder_ids:
+            payload.folder_id = payload.folder_ids[0]
+            
+        payload.user_email = actual_email
+
+        async with AsyncSessionLocal() as db:
+            from app.modules.knowledge_bases.service import KnowledgeBaseService
+            service = KnowledgeBaseService(db, tenant_id)
+            result = await service.sync_outlook_source(kb_id, payload.model_dump())
+            return result
+    except Exception as e:
+        logger.error(f"Error in sync_outlook: {e}")
+        from app.utils.formatters import format_error
+        return format_error(f"Internal server error: {e}")

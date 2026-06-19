@@ -342,16 +342,17 @@ class GmailRegister(BaseModel):
 
 class GmailSyncRequest(BaseModel):
     """Schema for syncing Gmail messages."""
-    user_email: str = Field(..., description="Email of the user to sync from")
+    user_email: Optional[str] = Field(None, description="Email of the user to sync from")
+    email: Optional[str] = Field(None, description="Alias for user_email")
+    folder_ids: Optional[list[str]] = Field(default_factory=list, description="Specific folder/labels to sync")
     max_results: Optional[int] = Field(100, description="Maximum number of emails to fetch")
     query: Optional[str] = Field(None, description="Optional Gmail search query (e.g. 'in:inbox')")
 
     class Config:
         json_schema_extra = {
             "example": {
-                "user_email": "user@example.com",
-                "max_results": 50,
-                "query": "in:inbox is:unread"
+                "email": "user@example.com",
+                "folder_ids": ["INBOX"]
             }
         }
 
@@ -374,14 +375,16 @@ class OutlookRegister(BaseModel):
 
 class OutlookSyncRequest(BaseModel):
     """Schema for syncing Outlook messages."""
-    user_email: str = Field(..., description="Email of the user to sync from")
+    user_email: Optional[str] = Field(None, description="Email of the user to sync from")
+    email: Optional[str] = Field(None, description="Alias for user_email")
+    folder_ids: Optional[list[str]] = Field(default_factory=list, description="Specific folder to sync")
     max_results: Optional[int] = Field(100, description="Maximum number of emails to fetch")
     folder_id: Optional[str] = Field(None, description="Specific folder to sync (default Inbox)")
 
     class Config:
         json_schema_extra = {
             "example": {
-                "user_email": "user@example.com",
-                "max_results": 50
+                "email": "user@example.com",
+                "folder_ids": ["inbox"]
             }
         }

@@ -956,7 +956,7 @@ class KnowledgeBaseService:
         if db_conn:
             await self.db.delete(db_conn)
 
-        await self.repository.soft_delete(kb_id)
+        await self.repository.hard_delete(kb_id)
         await self.db.commit()
 
         # Log audit event
@@ -995,10 +995,26 @@ class KnowledgeBaseService:
         kbs = res.scalars().unique().all()
 
         deleted_count = 0
+        user_emails_to_clear = set()
         for kb in kbs:
+            if integration_type == "gmail" and kb.source and kb.source.startswith("gmail("):
+                email = kb.source[6:-1]
+                user_emails_to_clear.add(email)
+                
             del_res = await self.delete_kb(str(kb.id), user_id)
             if del_res.get("success"):
                 deleted_count += 1
+                
+        if integration_type == "gmail" and user_emails_to_clear:
+            try:
+                from ..connectors.google.models import GmailSyncState, GmailMessage
+                from sqlalchemy import delete
+                for email in user_emails_to_clear:
+                    await self.db.execute(delete(GmailSyncState).where(GmailSyncState.user_id == email))
+                    await self.db.execute(delete(GmailMessage).where(GmailMessage.user_id == email))
+                await self.db.commit()
+            except Exception as e:
+                logger.error(f"Failed to clear gmail sync state during disconnect: {e}")
                 
         return format_success(
             {"deleted_count": deleted_count},
@@ -2381,6 +2397,7 @@ class KnowledgeBaseService:
 
 
     async def sync_gmail_source(self, kb_id: str, sync_req: dict) -> dict:
+        from app.utils.formatters import format_success, format_error
         import time
         import json
         from uuid import uuid4
@@ -2408,7 +2425,7 @@ class KnowledgeBaseService:
             return format_error('Gmail connection not configured for this KB.')
 
         credentials = db_conn.connection_params
-        user_email = sync_req.get('user_email')
+        user_email = sync_req.get('email')
         if not user_email:
             return format_error('user_email is required for Gmail sync.')
 
@@ -2417,93 +2434,35 @@ class KnowledgeBaseService:
 
         neo_query = "MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id}) SET kb.source = $new_source"
         try:
-            from app.core.neo4j import execute_write_query
-            await execute_write_query(neo_query, {'kb_id': str(kb_id), 'tenant_id': str(self.tenant_id), 'new_source': f'gmail({user_email})'})
+            await self.neo4j_repo.execute_write(neo_query, {'kb_id': str(kb_id), 'tenant_id': str(self.tenant_id), 'new_source': f'gmail({user_email})'})
         except Exception as e:
             logger.warning(f'Failed to update source string in Neo4j: {e}')
 
-        crawler = GmailConnector(query=sync_req.get('query'), max_results=sync_req.get('max_results', 100))
-        crawler.load_credentials(credentials)
-        checkpoint = ConnectorCheckpoint(user_emails=[user_email], has_more=True, completion_stage='start')
-
-        messages_synced = 0
-        neo4j_nodes = []
-
         try:
-            async for doc in crawler.load_from_checkpoint(0, time.time(), checkpoint):
-                if hasattr(doc, 'node_type'):
-                    continue
-                
-                msg_data = await crawler.get_message_content(doc.id, user_email)
-                if not msg_data or not msg_data.get('body'):
-                    continue
-
-                chunk_id = str(uuid4())
-                chunk_text = f"Subject: {msg_data.get('subject')}\nFrom: {msg_data.get('sender')}\nDate: {msg_data.get('date')}\n\n{msg_data.get('body')}"
-
-                from app.core.entity_extraction import EntityExtractor
-                entities = await EntityExtractor.extract_entities(msg_data.get('body') or "")
-
-                neo4j_nodes.append({
-                    'chunk_id': chunk_id,
-                    'message_id': doc.id,
-                    'subject': msg_data.get('subject'),
-                    'sender': msg_data.get('sender'),
-                    'date': msg_data.get('date'),
-                    'entities': [{'text': e.text, 'type': e.entity_type} for e in entities[:50]]
-                })
-
-                from app.core.embeddings import get_embedding
-                emb = await get_embedding(chunk_text)
-                
-                pg_chunk = DocumentChunk(
-                    id=uuid.UUID(chunk_id),
-                    tenant_id=self.tenant_id,
-                    kb_id=uuid.UUID(kb_id),
-                    content=chunk_text,
-                    embedding=emb,
-                    metadata_json={
-                        'source': 'gmail',
-                        'message_id': doc.id
-                    }
-                )
-                self.db.add(pg_chunk)
-                messages_synced += 1
-
-            if neo4j_nodes:
-                neo_query_emails = """
-                MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
-                UNWIND $chunks AS chunk
-                MERGE (p:Person {text: chunk.sender, tenant_id: $tenant_id})
-                ON CREATE SET p.type = 'PERSON', p.id = randomUUID(), p.created_at = timestamp()
-                MERGE (e:Email {id: chunk.message_id, tenant_id: $tenant_id})
-                ON CREATE SET e.subject = chunk.subject, e.date = chunk.date, e.chunk_id = chunk.chunk_id, e.created_at = timestamp()
-                MERGE (p)-[:SENT]->(e)
-                MERGE (kb)-[:HAS_EMAIL]->(e)
-                WITH e, chunk, $tenant_id AS tenant_id
-                UNWIND chunk.entities AS ent
-                MERGE (ent_node:Entity {text: ent.text, type: ent.type, tenant_id: tenant_id})
-                ON CREATE SET ent_node.id = randomUUID(), ent_node.created_at = timestamp()
-                MERGE (e)-[:MENTIONS]->(ent_node)
-                """
-                await execute_write_query(neo_query_emails, {
-                    'kb_id': str(kb_id),
-                    'tenant_id': str(self.tenant_id),
-                    'chunks': neo4j_nodes
-                })
-                
-                pg_kb.total_chunks += messages_synced
-                await self.db.commit()
-
-            from app.utils.formatters import format_success, format_error
-            return format_success({'kb_id': kb_id, 'messages_synced': messages_synced, 'sync_duration_seconds': time.time() - sync_start_time}, meta={'message': 'Gmail synchronized successfully'})
+            # Connect to Redis and enqueue the job
+            from app.worker.queue import get_redis_pool
+            redis = await get_redis_pool()
+            
+            job = await redis.enqueue_job(
+                'gmail_sync_job',
+                kb_id=str(kb_id),
+                tenant_id=str(self.tenant_id),
+                user_email=user_email,
+                label_ids=sync_req.get('folder_ids'),
+                credentials=credentials
+            )
+            
+            return format_success(
+                {'kb_id': kb_id, 'job_id': job.job_id}, 
+                meta={'message': 'Gmail sync job queued successfully'}
+            )
 
         except Exception as e:
-            logger.error(f'Gmail sync failed: {e}', exc_info=True)
-            from app.utils.formatters import format_error
-            return format_error(f'Failed to sync Gmail: {e}')
+            logger.error(f'Gmail sync queue failed: {e}', exc_info=True)
+            return format_error(f'Failed to queue Gmail sync: {e}')
 
     async def sync_outlook_source(self, kb_id: str, sync_req: dict) -> dict:
+        from app.utils.formatters import format_success, format_error
         import time
         import json
         from uuid import uuid4
@@ -2568,19 +2527,16 @@ class KnowledgeBaseService:
                     'entities': [{'text': e.text, 'type': e.entity_type} for e in entities[:50]]
                 })
 
-                from app.core.embeddings import get_embedding
-                emb = await get_embedding(chunk_text)
+                from app.core.embeddings import EmbeddingGenerator
+                emb = await EmbeddingGenerator.generate_embedding(chunk_text)
                 
                 pg_chunk = DocumentChunk(
                     id=uuid.UUID(chunk_id),
                     tenant_id=self.tenant_id,
                     kb_id=uuid.UUID(kb_id),
-                    content=chunk_text,
-                    embedding=emb,
-                    metadata_json={
-                        'source': 'outlook',
-                        'message_id': doc.id
-                    }
+                    text=chunk_text,
+                    chunk_index=messages_synced,
+                    embedding=emb
                 )
                 self.db.add(pg_chunk)
                 messages_synced += 1
@@ -2601,8 +2557,7 @@ class KnowledgeBaseService:
                 ON CREATE SET ent_node.id = randomUUID(), ent_node.created_at = timestamp()
                 MERGE (e)-[:MENTIONS]->(ent_node)
                 """
-                from app.core.neo4j import execute_write_query
-                await execute_write_query(neo_query_emails, {
+                await self.neo4j_repo.execute_write(neo_query_emails, {
                     'kb_id': str(kb_id),
                     'tenant_id': str(self.tenant_id),
                     'chunks': neo4j_nodes
@@ -2611,10 +2566,8 @@ class KnowledgeBaseService:
                 pg_kb.total_chunks += messages_synced
                 await self.db.commit()
 
-            from app.utils.formatters import format_success, format_error
             return format_success({'kb_id': kb_id, 'messages_synced': messages_synced, 'sync_duration_seconds': time.time() - sync_start_time}, meta={'message': 'Outlook synchronized successfully'})
 
         except Exception as e:
             logger.error(f'Outlook sync failed: {e}', exc_info=True)
-            from app.utils.formatters import format_error
             return format_error(f'Failed to sync Outlook: {e}')

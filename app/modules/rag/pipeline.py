@@ -479,14 +479,18 @@ class RAGPipeline:
 
 
         # STEP 0: ROUTE QUERY TO OPTIMAL SEARCH STRATEGY
+        route_result = await self.router.route_query(query)
+        search_type = route_result.intent
+        rewritten_data = route_result.rewritten or {}
+        extracted_keywords = rewritten_data.get("keywords", [])
+        
+        logger.info(f" Query Router selected strategy: {search_type.name} (Confidence: {route_result.confidence})")
+        if extracted_keywords:
+            logger.info(f" Query Rewriter extracted keywords: {extracted_keywords}")
 
 
 
-        search_type = await self.router.route_query(query)
-
-
-
-        logger.info(f" Query Router selected strategy: {search_type.name}")
+        # (replaced above)
 
 
 
@@ -497,6 +501,50 @@ class RAGPipeline:
         # Dynamically adjust retrieval parameters based on the chosen strategy
 
 
+
+        if search_type == SearchType.RECENT_EMAILS:
+            logger.info("   -> Optimizing for RECENT_EMAILS: Bypassing vector search, fetching latest directly from Neo4j.")
+            neo_query = """
+            MATCH (kb:KnowledgeBase)-[:HAS_CHUNK]->(c:Chunk)-[:EXTRACTED_FROM]->(e:Email)
+            WHERE kb.id IN $kb_ids AND kb.tenant_id = $tenant_id
+            RETURN c.id as chunk_id, c.text as text, c.position as position, c.kb_id as kb_id, e.date as email_date, e.subject as source
+            ORDER BY e.date DESC
+            LIMIT 10
+            """
+            try:
+                results = await self.neo4j_repo.execute_read(
+                    neo_query,
+                    {
+                        "kb_ids": kb_ids, 
+                        "tenant_id": self.tenant_id
+                    },
+                )
+                if results:
+                    chunks = []
+                    for idx, res in enumerate(results):
+                        chunks.append(RetrievedChunk(
+                            chunk_id=res["chunk_id"],
+                            text=f"Date: {res['email_date']}\nSubject: {res['source']}\nBody: {res['text']}",
+                            kb_id=res["kb_id"],
+                            position=res["position"],
+                            embedding_similarity=1.0,
+                            graph_score=1.0,
+                            hybrid_score=1.0 - (idx * 0.01),
+                            reason="RECENT_EMAIL",
+                            source=res["source"]
+                        ))
+                    
+                    return RAGContext(
+                        query=query, 
+                        chunks=chunks, 
+                        entity_mentions={}, 
+                        total_tokens=len(" ".join([c.text for c in chunks]).split()) * 1.5,
+                        personal_memories=[],
+                        search_type=search_type.name
+                    )
+            except Exception as e:
+                logger.error(f" Failed to fetch recent emails: {e}")
+                pass
 
         if search_type == SearchType.CHUNK_SEARCH:
 
@@ -695,6 +743,7 @@ class RAGPipeline:
             query_embedding=query_embedding,
             top_k=top_k,
             query=query,
+            exact_terms=extracted_keywords,
         )
 
 
@@ -1203,21 +1252,23 @@ class RAGPipeline:
         query_embedding: List[float],
         top_k: int,
         query: Optional[str] = None,
+        exact_terms: Optional[List[str]] = None,
     ) -> List[Dict]:
         """
         Retrieve top-k chunks by embedding similarity.
         Uses PostgreSQL pgvector if available, with a resilient fallback to Neo4j.
         """
         # Extract exact terms (numbers >= 4 digits, alphanumeric >= 5 chars) from query for hybrid search/boosting
-        exact_terms = []
-        if query:
-            import re
-            numbers = re.findall(r'\b\d{4,}\b', query)
-            exact_terms.extend(numbers)
-            alphanumeric = re.findall(r'\b[A-Za-z0-9\-\.]{5,}\b', query)
-            for item in alphanumeric:
-                if item not in exact_terms:
-                    exact_terms.append(item)
+        if exact_terms is None:
+            exact_terms = []
+            if query:
+                import re
+                numbers = re.findall(r'\b\d{4,}\b', query)
+                exact_terms.extend(numbers)
+                alphanumeric = re.findall(r'\b[A-Za-z0-9\-\.]{5,}\b', query)
+                for item in alphanumeric:
+                    if item not in exact_terms:
+                        exact_terms.append(item)
 
         # ============= STRATEGY 1: POSTGRESQL PGVECTOR =============
         if self.db:

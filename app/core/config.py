@@ -56,6 +56,9 @@ class Settings(BaseSettings):
 
 
 
+    # ============= REDIS (ARQ) =============
+    redis_url: str = "redis://localhost:6379"
+
     # ============= POSTGRESQL ASYNC =============
 
     postgres_user: str

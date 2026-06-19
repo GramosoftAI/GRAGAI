@@ -22,7 +22,18 @@ class SearchType(Enum):
     KNOWLEDGE_BASE = "KNOWLEDGE_BASE"       # "Summarize this document"
     GENERAL_KNOWLEDGE = "GENERAL_KNOWLEDGE" # "What is diabetes"
     SUPPORT_INTENT = "SUPPORT_INTENT"       # Complaints, human assistance
+    RECENT_EMAILS = "RECENT_EMAILS"         # Queries asking for recent or latest emails
+    EMAIL_ANALYSIS = "EMAIL_ANALYSIS"       # Needs gmail/outlook data
+    DOCUMENT_QA = "DOCUMENT_QA"             # Questions about documents
+    DATA_ANALYSIS = "DATA_ANALYSIS"         # Analysis of data/numbers
+    SUMMARIZATION = "SUMMARIZATION"         # Requesting summaries
 
+class RouteResult:
+    def __init__(self, intent: SearchType, confidence: float, reason: str = "", rewritten: dict = None):
+        self.intent = intent
+        self.confidence = confidence
+        self.reason = reason
+        self.rewritten = rewritten or {}
 class QueryRouter:
     """
     Professional Multi-Stage Query Router.
@@ -36,6 +47,10 @@ class QueryRouter:
         self.patterns = {
             SearchType.SUPPORT_INTENT: re.compile(
                 r'\b(help|support|complaint|human|call me|contact support|representative|agent|operator)\b',
+                re.IGNORECASE
+            ),
+            SearchType.RECENT_EMAILS: re.compile(
+                r'\b(latest|recent|today|last|newest|today\'s) (mail|email|message|inbox)s?\b',
                 re.IGNORECASE
             ),
             SearchType.ORGANIZATION_SPECIFIC: re.compile(
@@ -69,61 +84,126 @@ class QueryRouter:
         }
         self.llm_client = DeepInfraLLMClient()
 
-    async def route_query(self, query: str) -> SearchType:
+    async def route_query(self, query: str) -> RouteResult:
         """
         Routes the query using a professional hybrid approach.
         """
+        # --- STAGE 0: QUERY REWRITING ---
+        rewritten = await self.rewrite_query(query)
+        logger.info(f" Router Stage 0: Rewritten query metadata: {rewritten}")
+
         # --- STAGE 1: REGEX (Zero Latency) ---
         for search_type, pattern in self.patterns.items():
             if pattern.search(query):
                 logger.info(f" Router Stage 1: Regex match -> {search_type.name}")
-                return search_type
+                return RouteResult(intent=search_type, confidence=1.0, reason="Regex match", rewritten=rewritten)
 
         # --- STAGE 2: SEMANTIC LLM CLASSIFICATION (High Intelligence) ---
         # Only triggered for complex or ambiguous queries to save tokens
-        if len(query.split()) > 5:
+        if len(query.split()) > 2:
             logger.debug(" Router Stage 1 inconclusive. Escalating to Stage 2 (LLM)...")
             try:
-                return await self._llm_classify(query)
+                return await self._llm_classify(query, rewritten)
             except Exception as e:
                 logger.warning(f" Router Stage 2 failed: {e}. Falling back to default.")
         
         # Default fallback
-        return SearchType.GRAPH_COMPLETION
+        return RouteResult(intent=SearchType.GRAPH_COMPLETION, confidence=0.5, reason="Default fallback", rewritten=rewritten)
 
-    async def _llm_classify(self, query: str) -> SearchType:
+    async def rewrite_query(self, query: str) -> dict:
+        """
+        Extracts keywords, entities, and intent for better downstream retrieval.
+        """
+        prompt = f"""
+Rewrite this query for RAG retrieval.
+Extract:
+- entities
+- dates
+- intent
+- keywords
+
+Query:
+{query}
+
+Return ONLY valid JSON in this exact format, with no markdown formatting or backticks:
+{{
+ "keywords": ["keyword1"],
+ "entities": ["entity1"],
+ "date_filter": "yesterday",
+ "intent": "find information"
+}}
+"""
+        try:
+            result = await self.llm_client.generate(
+                prompt=prompt,
+                system_prompt="You are a query rewriting engine. Return only JSON.",
+                temperature=0.0,
+                max_tokens=1024
+            )
+            # Clean up markdown if present
+            cleaned = result.replace('```json', '').replace('```', '').strip()
+            return json.loads(cleaned)
+        except Exception as e:
+            logger.warning(f"Failed to rewrite query: {e}")
+            return {"keywords": [], "entities": [], "date_filter": "", "intent": ""}
+
+    async def _llm_classify(self, query: str, rewritten: dict) -> RouteResult:
         """
         Use LLM to determine the user's intent for complex queries.
         """
-        prompt = f"""Classify the user's search intent into exactly one category.
+        prompt = f"""
+You are an enterprise RAG router.
+Analyze:
+1. What does user want?
+2. Which data source is required?
+3. Is reasoning needed?
 
-CATEGORIES:
-- SUPPORT_INTENT: Requests requiring human assistance (e.g., "I need help", "How do I contact support", "I have a complaint")
-- ORGANIZATION_SPECIFIC: Questions about the organization (e.g., "What services do you provide?", "How can I book an appointment?", "What are your consultation fees?")
-- KNOWLEDGE_BASE: Document specific questions (e.g., "Summarize this document", "What does the policy say")
-- GENERAL_KNOWLEDGE: Questions unrelated to the organization (e.g., "What is diabetes", "Who invented the internet")
-- CHUNK_SEARCH: Direct fact lookup (e.g., "What is John's email?")
-- GRAPH_SUMMARY: Requests for overviews (e.g., "Tell me about Project X")
-- CHAIN_OF_THOUGHT: Complex reasoning (e.g., "Compare these two candidates")
-- MEMORY_ONLY: Personal history/preferences (e.g., "What did we decide earlier?")
-- ENTITY_CONNECTION: Relationship between two things (e.g., "How is Amit linked to Sarah?")
-- SOCIAL: Greetings, thanks, or small talk (e.g., "Hi", "How are you?")
-- GRAPH_COMPLETION: General knowledge questions.
+Choose exactly one of the following intents:
+- EMAIL_ANALYSIS: needs gmail/outlook data (e.g., "What did John send me?", "emails about payment")
+- RECENT_EMAILS: queries asking for recent or latest emails specifically
+- CHUNK_SEARCH: single fact lookup
+- GRAPH_SUMMARY: overview or summary requests
+- ENTITY_CONNECTION: relationships between people/concepts
+- KNOWLEDGE_BASE: company documents/policy questions
+- MEMORY_ONLY: previous conversation history
+- GENERAL_KNOWLEDGE: world knowledge
+- SUPPORT_INTENT: user needs help/human
+- ORGANIZATION_SPECIFIC: pricing/services
+- GRAPH_COMPLETION: general default
 
-QUERY: {query}
+Return ONLY valid JSON in this exact format, with no markdown formatting or backticks:
+{{
+ "intent": "EMAIL_ANALYSIS",
+ "confidence": 0.95,
+ "reason": "short explanation"
+}}
 
-Return ONLY the category name."""
+Query:
+{query}
+"""
 
-        response = await self.llm_client.generate(
-            prompt=prompt,
-            system_prompt="You are a query routing engine. Return only the category name.",
-            temperature=0.0,
-            max_tokens=20
-        )
-        
-        category = response.strip().upper()
         try:
-            return SearchType(category)
-        except ValueError:
-            logger.warning(f" LLM returned invalid category: {category}")
-            return SearchType.GRAPH_COMPLETION
+            response = await self.llm_client.generate(
+                prompt=prompt,
+                system_prompt="You are an enterprise RAG router. Return only JSON.",
+                temperature=0.0,
+                max_tokens=1024
+            )
+            cleaned = response.replace('```json', '').replace('```', '').strip()
+            data = json.loads(cleaned)
+            
+            intent_str = data.get("intent", "GRAPH_COMPLETION").upper()
+            try:
+                intent = SearchType(intent_str)
+            except ValueError:
+                intent = SearchType.GRAPH_COMPLETION
+                
+            return RouteResult(
+                intent=intent,
+                confidence=float(data.get("confidence", 0.5)),
+                reason=data.get("reason", "Parsed from LLM"),
+                rewritten=rewritten
+            )
+        except Exception as e:
+            logger.warning(f" LLM classification failed: {e}")
+            return RouteResult(intent=SearchType.GRAPH_COMPLETION, confidence=0.0, reason=f"Error: {str(e)}", rewritten=rewritten)

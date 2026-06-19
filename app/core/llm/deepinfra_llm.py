@@ -430,7 +430,10 @@ class DeepInfraLLMClient:
 
                 data = response.json()
 
-                return data["choices"][0]["message"]["content"].strip()
+                content = data["choices"][0]["message"]["content"].strip()
+                if "<think>" in content and "</think>" in content:
+                    content = content.split("</think>", 1)[1].strip()
+                return content
 
             except Exception as e:
 

@@ -17,10 +17,12 @@ class GmailConnector(CheckpointedConnector[ConnectorCheckpoint]):
     Fetches messages matching an optional query, decoding their base64 bodies.
     """
 
-    def __init__(self, query: Optional[str] = None, max_results: int = 100) -> None:
+    def __init__(self, query: Optional[str] = None, max_results: int = 100, label_ids: Optional[list] = None) -> None:
         self.auth_manager = GoogleAuthManager()
         self.query = query or ""
         self.max_results = max_results
+        self.label_ids = label_ids
+        self.label_ids = label_ids
 
     def load_credentials(self, credentials: Dict[str, Any]) -> Dict[str, Any] | None:
         return self.auth_manager.load_credentials(credentials)
@@ -40,10 +42,13 @@ class GmailConnector(CheckpointedConnector[ConnectorCheckpoint]):
         body = ""
         if 'parts' in payload:
             for part in payload['parts']:
-                body += self._decode_body(part)
+                if part.get("mimeType") in ("text/plain", "text/html") or "parts" in part:
+                    body += self._decode_body(part)
         elif 'body' in payload and 'data' in payload['body']:
             data = payload['body']['data']
             try:
+                # Add base64 padding to avoid binascii.Error: Incorrect padding
+                data += '=' * (-len(data) % 4)
                 body = base64.urlsafe_b64decode(data).decode('utf-8')
             except Exception as e:
                 logger.warning(f"Failed to decode message body: {e}")
@@ -63,6 +68,8 @@ class GmailConnector(CheckpointedConnector[ConnectorCheckpoint]):
             date_str = next((h['value'] for h in headers if h['name'].lower() == 'date'), '')
             
             body_text = self._decode_body(res.get('payload', {}))
+            if not body_text:
+                body_text = res.get("snippet", "")
             
             return {
                 "id": message_id,
@@ -102,6 +109,8 @@ class GmailConnector(CheckpointedConnector[ConnectorCheckpoint]):
                     }
                     if self.query:
                         params["q"] = self.query
+                    if self.label_ids:
+                        params["labelIds"] = self.label_ids
                     if page_token:
                         params["pageToken"] = page_token
 

@@ -1,4 +1,8 @@
 """Migration environment configuration"""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
@@ -18,6 +22,7 @@ from app.modules.agents.models import Agent
 from app.modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
 from app.modules.chats.models import ChatSession, ChatMessage
 from app.modules.personalities.models import Personality
+from app.modules.connectors.google.models import GmailMessage, GmailSyncState
 
 target_metadata = Base.metadata
 
