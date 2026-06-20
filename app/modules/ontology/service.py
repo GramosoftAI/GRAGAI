@@ -182,3 +182,82 @@ class OntologyService:
                     await self.create_relation(req)
             except Exception as e:
                 logger.warning(f"Failed to auto-register relation {r['name']}: {e}")
+
+    async def upload_ontology_file(self, file_content: bytes, format: str = "xml") -> dict:
+        """
+        Upload an RDF/OWL/TTL ontology file.
+        1. Parses file into rdflib Graph.
+        2. Extracts owl:Class and owl:ObjectProperty to sync with GRAG schema.
+        3. Pushes full RDF graph natively into Neo4j via rdflib_neo4j.
+        """
+        from rdflib import Graph, URIRef
+        from rdflib.namespace import OWL, RDFS, RDF
+        from rdflib_neo4j import Neo4jStoreConfig, Neo4jStore, HANDLE_VOCAB_URI_STRATEGY
+        from neo4j import GraphDatabase
+        from ...core.config import get_settings
+        
+        # Parse into local memory graph first
+        g = Graph()
+        g.parse(data=file_content, format=format)
+        
+        classes_synced = 0
+        relations_synced = 0
+        
+        # Sync Classes
+        q_classes = """
+        SELECT DISTINCT ?cls WHERE {
+            { ?cls a owl:Class } UNION { ?cls a rdfs:Class }
+            FILTER(isIRI(?cls))
+        }
+        """
+        for row in g.query(q_classes):
+            cls_uri = str(row[0])
+            # Extract local name (e.g., http://example.org/ontology#Person -> Person)
+            name = cls_uri.split("#")[-1].split("/")[-1]
+            if name:
+                req = schemas.OntologyClassCreate(name=name, description=f"Imported from {cls_uri}")
+                await self.create_class(req)
+                classes_synced += 1
+
+        # Sync Relations
+        q_props = """
+        SELECT DISTINCT ?prop WHERE {
+            ?prop a owl:ObjectProperty
+            FILTER(isIRI(?prop))
+        }
+        """
+        for row in g.query(q_props):
+            prop_uri = str(row[0])
+            name = prop_uri.split("#")[-1].split("/")[-1]
+            if name:
+                req = schemas.OntologyRelationCreate(name=name, description=f"Imported from {prop_uri}")
+                await self.create_relation(req)
+                relations_synced += 1
+                
+        # Push raw triples to Neo4j globally
+        try:
+            settings = get_settings()
+            driver = GraphDatabase.driver(
+                settings.neo4j_uri,
+                auth=(settings.neo4j_user, settings.neo4j_password)
+            )
+            config = Neo4jStoreConfig(
+                batching=True,
+                handle_vocab_uri_strategy=HANDLE_VOCAB_URI_STRATEGY.IGNORE
+            )
+            store = Neo4jStore(config=config, driver=driver)
+            neo_g = Graph(store=store)
+            neo_g.parse(data=file_content, format=format)
+            driver.close()
+            triples_pushed = len(g)
+        except Exception as e:
+            logger.error(f"Failed to push raw triples to Neo4j: {e}")
+            triples_pushed = 0
+
+        logger.info(f"Ontology file processed. Synced {classes_synced} classes, {relations_synced} relations.")
+        return {
+            "success": True,
+            "classes_synced": classes_synced,
+            "relations_synced": relations_synced,
+            "raw_triples_pushed": triples_pushed
+        }
