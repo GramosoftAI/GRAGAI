@@ -430,7 +430,8 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
             "score": round(c.hybrid_score, 3),
             "position": c.position,
             "reason": c.reason,
-            "kb_id": c.kb_id }
+            "kb_id": c.kb_id,
+            "content_type": getattr(c, "content_type", "original") }
 
                 for c in context.chunks
 
@@ -1141,6 +1142,8 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
                 "source": chunk.source,
 
                 "kb_id": chunk.kb_id,
+
+                "content_type": getattr(chunk, "content_type", "original")
 
             }
 

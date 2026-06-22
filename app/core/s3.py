@@ -144,4 +144,39 @@ class S3StorageService:
             logger.error(f"S3 get_object error for key {s3_key}: {e}")
             raise e
 
+    def store_parsed_content(self, tenant_id: str, kb_id: str, content: str, content_type: str = "text/plain") -> str:
+        """
+        Stores the extracted text in S3 and returns the full path/URL.
+        Key: parsed/{tenant_id}/{kb_id}/content.txt or content.html
+        """
+        if not self.client:
+            logger.error("S3 client not initialized. Cannot store parsed content.")
+            raise ValueError("S3 configuration is missing or invalid.")
+        
+        # s3_key structure: parsed/{tenant_id}/{kb_id}/content.txt or content.html
+        bucket_val = settings.aws_s3_bucket or "default-bucket"
+        bucket_parts = bucket_val.split('/', 1)
+        base_prefix = bucket_parts[1] + '/' if len(bucket_parts) > 1 else ''
+        
+        ext = "html" if content_type == "text/html" else "txt"
+        s3_key = f"{base_prefix}parsed/{tenant_id}/{kb_id}/content.{ext}"
+        
+        try:
+            self.client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=content.encode("utf-8"),
+                ContentType=content_type
+            )
+            logger.info(f"Successfully uploaded parsed content to S3 at key {s3_key} with ContentType {content_type}")
+            
+            # Return the full URL/path
+            bucket_name = bucket_parts[0]
+            region = settings.aws_region or "us-east-1"
+            return f"https://{bucket_name}.s3.{region}.amazonaws.com/{s3_key}"
+        except Exception as e:
+            logger.error(f"Failed to upload parsed content to S3: {e}")
+            raise e
+
+
 

@@ -42,6 +42,14 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+class ExtractedText(str):
+    def __new__(cls, clean_text: str, raw_html: str, is_html: bool = False):
+        obj = super().__new__(cls, clean_text)
+        obj.raw_html = raw_html
+        obj.is_html = is_html
+        return obj
+
+
 class PDFExtractor:
     """
     PDF content extraction with dual-layer strategy:
@@ -129,7 +137,7 @@ class PDFExtractor:
         filename: str = "document.pdf",
         tenant_id: Optional[str] = None,
         agent_id: Optional[str] = None,
-    ) -> str:
+    ) -> ExtractedText:
         """
         Extract text from PDF bytes using the best available method.
 
@@ -146,7 +154,7 @@ class PDFExtractor:
             agent_id: For billing/tracking
 
         Returns:
-            Cleaned text string ready for ingestion pipeline
+            ExtractedText: Subclass of str containing cleaned text, with .raw_html and .is_html properties.
 
         Raises:
             ValueError: If no text could be extracted from the PDF
@@ -158,21 +166,23 @@ class PDFExtractor:
         # ============= PRIMARY: GDOCZ SDK =============
         if settings.gdocz_api_key:
             try:
-                extracted_text = await PDFExtractor._extract_gdocz(
+                raw_html = await PDFExtractor._extract_gdocz(
                     pdf_bytes, filename
                 )
-                if extracted_text and extracted_text.strip():
+                if raw_html and raw_html.strip():
                     logger.info(
                         f" Gdocz extraction success: {filename} "
-                        f"({len(extracted_text)} chars raw markdown)"
+                        f"({len(raw_html)} chars raw HTML/markdown)"
                     )
-                    # Clean markdown  GraphRAG-friendly text
-                    cleaned = PDFExtractor._clean_markdown_for_rag(extracted_text)
+                    # Clean page markers if present in HTML
+                    raw_html_clean = re.sub(r"<---- Page \d+ ---->\r?\n?", "", raw_html)
+                    # Clean markdown / HTML for RAG
+                    cleaned = PDFExtractor._clean_markdown_for_rag(raw_html_clean)
                     logger.info(
                         f" Cleaned for RAG: {len(cleaned)} chars "
-                        f"(from {len(extracted_text)} raw)"
+                        f"(from {len(raw_html_clean)} raw)"
                     )
-                    return cleaned
+                    return ExtractedText(cleaned, raw_html_clean, is_html=True)
                 else:
                     logger.warning(
                         f" Gdocz returned empty result for {filename}. "
@@ -198,7 +208,7 @@ class PDFExtractor:
                     f" pdfplumber extraction success: {filename} "
                     f"({len(extracted_text)} chars)"
                 )
-                return extracted_text
+                return ExtractedText(extracted_text, extracted_text, is_html=False)
         except Exception as e:
             logger.error(f" pdfplumber also failed for {filename}: {e}")
 
@@ -215,53 +225,44 @@ class PDFExtractor:
     @staticmethod
     async def _extract_gdocz(pdf_bytes: bytes, filename: str) -> str:
         """
-        Extract PDF content using Gdocz SDK (cloud API).
-
-        The SDK is synchronous, so we run it in a thread pool executor
-        to avoid blocking the async event loop.
-
-        Args:
-            pdf_bytes: Raw PDF bytes
-            filename: Original filename
-
-        Returns:
-            Raw markdown string from Gdocz
+        Extract PDF content using Gdocz OCR server.
         """
         def _sync_gdocz_convert(pdf_data: bytes, fname: str) -> str:
-            """Synchronous wrapper for Gdocz SDK (runs in thread pool)."""
-            from gdocz_sdk import GdoczaiClient, ConvertOptions
+            import requests
+            url = "https://gdocz.gramopro.ai/ocr/ocr/pdf"
+            headers = {"X-API-Key": settings.gdocz_api_key}
+            files = {"file": (fname, pdf_data, "application/pdf")}
+            
+            # Smart determination of document type
+            doc_type = "GENERAL"
+            fname_lower = fname.lower()
+            if "resume" in fname_lower or "cv" in fname_lower or "profile" in fname_lower:
+                doc_type = "resume"
+            elif "invoice" in fname_lower or "bill" in fname_lower:
+                doc_type = "INVOICE"
+            elif "quote" in fname_lower or "quotation" in fname_lower:
+                doc_type = "QUOTATION"
+            elif "price" in fname_lower:
+                doc_type = "PRICE_LIST"
 
-            client = GdoczaiClient(api_key=settings.gdocz_api_key)
+            data = {
+                "model": "chandra",
+                "output_format": "html",
+                "document_type": doc_type
+            }
 
-            options = ConvertOptions(
-                mode="chandra",  # Best quality extraction mode
-            )
+            logger.info(f"Calling Gdocz `/ocr/pdf` directly with document_type: {doc_type}")
+            response = requests.post(url, files=files, data=data, headers=headers, timeout=600)
+            
+            if response.status_code != 200:
+                raise ValueError(f"Gdocz API returned status code {response.status_code}: {response.text}")
+                
+            res_json = response.json()
+            if not res_json.get("success"):
+                raise ValueError(f"Gdocz API error: {res_json.get('error')}")
+                
+            return res_json.get("markdown", "")
 
-            # Write bytes to a temp file (SDK expects file path)
-            tmp_path = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    suffix=".pdf", delete=False, prefix="graphmind_"
-                ) as tmp:
-                    tmp.write(pdf_data)
-                    tmp_path = tmp.name
-
-                logger.debug(f"Gdocz converting: {tmp_path}")
-                result = client.convert(tmp_path, options=options)
-
-                if isinstance(result, dict):
-                    return result.get("markdown", "")
-                else:
-                    return getattr(result, "markdown", "") or ""
-            finally:
-                # Clean up temp file
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-
-        # Run synchronous SDK call in thread pool (non-blocking)
         loop = asyncio.get_event_loop()
         raw_markdown = await loop.run_in_executor(
             None, _sync_gdocz_convert, pdf_bytes, filename

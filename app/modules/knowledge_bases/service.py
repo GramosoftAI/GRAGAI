@@ -489,6 +489,8 @@ class KnowledgeBaseService:
 
         s3_path: Optional[str] = None,
 
+        parsed_path: Optional[str] = None,
+
     ) -> dict:
 
         """
@@ -528,6 +530,29 @@ class KnowledgeBaseService:
                     logger.info(f"Updated Neo4j KnowledgeBase {kb_id} with s3_path={s3_path}")
                 except Exception as neo_err:
                     logger.warning(f"Failed to update Neo4j KB s3_path: {neo_err}")
+
+            if parsed_path:
+                kb.parsed_path = parsed_path
+                # Update Neo4j node
+                neo4j_parsed_query = """
+                MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                SET kb.parsed_path = $parsed_path
+                """
+                try:
+                    await retry_neo4j_operation(
+                        lambda: self.neo4j_repo.execute_write(
+                            neo4j_parsed_query,
+                            {
+                                "kb_id": kb_id,
+                                "tenant_id": str(self.tenant_id),
+                                "parsed_path": parsed_path
+                            }
+                        )
+                    )
+                    logger.info(f"Updated Neo4j KnowledgeBase {kb_id} with parsed_path={parsed_path}")
+                except Exception as neo_err:
+                    logger.warning(f"Failed to update Neo4j KB parsed_path: {neo_err}")
+
 
 
 
@@ -1177,6 +1202,81 @@ class KnowledgeBaseService:
                 "tenant_id": str(kb.tenant_id)
             }
         }
+
+    async def get_parsed_content(self, kb_id: str, user_id: str) -> dict:
+        """
+        Retrieves the parsed content text from S3 for a given knowledge base.
+        Checks tenant permission.
+        """
+        kb = await self.repository.get_by_id(kb_id)
+        if not kb:
+            return {
+                "success": False,
+                "error": "File not found.",
+                "status_code": 404
+            }
+
+        # Check tenant permission
+        if str(kb.tenant_id) != str(self.tenant_id):
+            return {
+                "success": False,
+                "error": "Access denied.",
+                "status_code": 403
+            }
+
+        if not kb.parsed_path:
+            return {
+                "success": False,
+                "error": "Parsed content not available",
+                "status_code": 404
+            }
+
+        # Parse S3 key from parsed_path URL
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(kb.parsed_path)
+            s3_key = parsed.path.lstrip('/')
+        except Exception:
+            return {
+                "success": False,
+                "error": "Invalid parsed path URL stored",
+                "status_code": 500
+            }
+
+        # Download content from S3
+        from app.core.s3 import S3StorageService
+        s3_service = S3StorageService()
+        try:
+            stream_body = s3_service.get_file_stream(s3_key)
+            # Read all content as string
+            content_bytes = stream_body.read()
+            content_text = content_bytes.decode("utf-8")
+        except Exception as e:
+            logger.error(f"Failed to fetch parsed content for key {s3_key}: {e}")
+            return {
+                "success": False,
+                "error": "Failed to fetch parsed content from S3 storage.",
+                "status_code": 500
+            }
+
+        # Clean filename
+        clean_filename = kb.name
+        if clean_filename.startswith("PDF: "):
+            clean_filename = clean_filename[5:]
+        elif clean_filename.startswith("Spreadsheet: "):
+            clean_filename = clean_filename[13:]
+
+        # Determine content type based on path extension
+        content_type = "text/html" if kb.parsed_path and kb.parsed_path.endswith(".html") else "text/plain"
+
+        return {
+            "success": True,
+            "file_name": clean_filename,
+            "type": "parsed",
+            "content_type": content_type,
+            "content": content_text
+        }
+
 
 
 

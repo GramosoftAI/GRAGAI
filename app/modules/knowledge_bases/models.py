@@ -102,6 +102,8 @@ class KnowledgeBase(Base):
     )
 
     s3_path = Column(String(1024), nullable=True)
+    parsed_path = Column(String(1024), nullable=True)
+
 
 
     # ============= AUDIT TRACKING =============

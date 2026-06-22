@@ -79,3 +79,29 @@ async def preview_file(request: Request, file_id: str):
             media_type=content_type,
             headers=headers
         )
+
+
+@router.get("/files/{file_id}/content")
+@router.get("/api/v1/files/{file_id}/content", include_in_schema=False)
+async def get_parsed_file_content(request: Request, file_id: str):
+    """
+    Securely retrieve the parsed text content of a file.
+    """
+    try:
+        tenant_id, user_id = get_tenant_and_user(request)
+    except HTTPException as e:
+        raise e
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with AsyncSessionLocal() as db:
+        service = KnowledgeBaseService(db, tenant_id)
+        result = await service.get_parsed_content(file_id, user_id)
+        
+        if not result.get("success"):
+            error_msg = result.get("error", "File not found")
+            status_code = result.get("status_code", 404)
+            raise HTTPException(status_code=status_code, detail=error_msg)
+
+        return result
+

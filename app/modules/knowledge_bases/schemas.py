@@ -94,6 +94,8 @@ class KBResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     s3_path: Optional[str] = None
+    parsed_path: Optional[str] = None
+
 
     connected_integration: Optional[str] = Field(None, description="The type of external integration connected to this KB (e.g., google_drive, sharepoint)")
 

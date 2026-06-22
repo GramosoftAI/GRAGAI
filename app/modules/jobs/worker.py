@@ -101,11 +101,34 @@ async def run_pdf_ingestion_job(
             if table_rows:
                 await kb_service.save_table_rows(kb_id, table_rows)
             
+            # Store parsed content in S3
+            parsed_url = None
+            try:
+                is_html = getattr(document_text, "is_html", False)
+                raw_content = getattr(document_text, "raw_html", document_text)
+                content_type = "text/html" if is_html else "text/plain"
+
+                parsed_url = s3_service.store_parsed_content(
+                    tenant_id=str(tenant_id),
+                    kb_id=str(kb_id),
+                    content=raw_content,
+                    content_type=content_type
+                )
+            except Exception as e:
+                logger.error(f"Job {job_id}: Failed to store parsed content in S3: {e}")
+
             # Step 3: Ingest Document (Chunking + Embeddings + Neo4j)
             await job_service.update_job_progress(job_id, status="processing", progress=60, current_step="Chunking and Generating Embeddings")
             
             logger.info(f"Job {job_id}: Starting embedding and graph ingestion for {kb_id}")
-            ingest_result = await kb_service.ingest_document(kb_id, document_text, source=s3_url, s3_path=s3_url)
+            ingest_result = await kb_service.ingest_document(
+                kb_id, 
+                document_text, 
+                source=s3_url, 
+                s3_path=s3_url,
+                parsed_path=parsed_url
+            )
+
 
             
             if not ingest_result.get("success"):

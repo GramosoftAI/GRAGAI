@@ -727,6 +727,22 @@ async def ingest_file(
 
 
 
+            # Store parsed content in S3
+            parsed_url = None
+            try:
+                is_html = getattr(document_text, "is_html", False)
+                raw_content = getattr(document_text, "raw_html", document_text)
+                content_type = "text/html" if is_html else "text/plain"
+
+                parsed_url = s3_service.store_parsed_content(
+                    tenant_id=str(tenant_id),
+                    kb_id=str(kb_id),
+                    content=raw_content,
+                    content_type=content_type
+                )
+            except Exception as e:
+                logger.error(f"Failed to store parsed content in S3: {e}")
+
             # Ingest standard document text
 
             async with AsyncSessionLocal() as db:
@@ -735,7 +751,12 @@ async def ingest_file(
 
                 s3_url = s3_service.get_s3_url(str(tenant_id), file.filename)
 
-                result = await service.ingest_document(kb_id, document_text, s3_path=s3_url)
+                result = await service.ingest_document(
+                    kb_id, 
+                    document_text, 
+                    s3_path=s3_url,
+                    parsed_path=parsed_url
+                )
 
 
 

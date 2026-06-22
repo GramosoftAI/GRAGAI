@@ -127,6 +127,8 @@ class RetrievedChunk:
 
 
     source: Optional[str] = None  # Source of the chunk (e.g., filename, URL, database table)
+    content_type: str = "original"
+
 
 
 
@@ -1150,20 +1152,27 @@ class RAGPipeline:
             if self.db:
                 try:
                     from sqlalchemy import select
-                    from app.modules.knowledge_bases.models import DocumentChunk
-                    stmt = select(DocumentChunk).where(DocumentChunk.id.in_([UUID(cid) for cid in needed_chunk_ids]))
+                    from app.modules.knowledge_bases.models import DocumentChunk, KnowledgeBase
+                    stmt = select(DocumentChunk, KnowledgeBase.parsed_path).outerjoin(
+                        KnowledgeBase, DocumentChunk.kb_id == KnowledgeBase.id
+                    ).where(DocumentChunk.id.in_([UUID(cid) for cid in needed_chunk_ids]))
                     res = await self.db.execute(stmt)
-                    db_chunks = {str(db_c.id): db_c for db_c in res.scalars().all()}
+                    
+                    db_chunks = {}
+                    for db_c, parsed_path in res.all():
+                        db_chunks[str(db_c.id)] = (db_c, parsed_path)
                     
                     for chunk in context_chunks:
                         if chunk.chunk_id in db_chunks:
-                            db_c = db_chunks[chunk.chunk_id]
+                            db_c, parsed_path = db_chunks[chunk.chunk_id]
                             if not chunk.text:
                                 chunk.text = db_c.text or ""
                             if not chunk.kb_id:
                                 chunk.kb_id = str(db_c.kb_id)
                             if chunk.position == 0:
                                 chunk.position = db_c.chunk_index
+                            if parsed_path:
+                                chunk.content_type = "text/html" if parsed_path.endswith(".html") else "text/plain"
                 except Exception as db_err:
                     logger.error(f"Failed to bulk fetch chunk details from PostgreSQL: {db_err}")
 
@@ -1173,7 +1182,7 @@ class RAGPipeline:
                 MATCH (c:Chunk {tenant_id: $tenant_id})
                 WHERE c.id IN $chunk_ids
                 OPTIONAL MATCH (kb:KnowledgeBase {tenant_id: $tenant_id})-[:HAS_CHUNK]->(c)
-                RETURN c.id as chunk_id, c.text as text, c.kb_id as kb_id, c.position as position, COALESCE(kb.s3_path, c.source, kb.name) as source
+                RETURN c.id as chunk_id, c.text as text, c.kb_id as kb_id, c.position as position, COALESCE(kb.s3_path, c.source, kb.name) as source, kb.parsed_path as parsed_path
                 """
                 neo_res = await self.neo4j_repo.execute_read(neo_query, {
                     "chunk_ids": needed_chunk_ids,
@@ -1191,6 +1200,10 @@ class RAGPipeline:
                         if chunk.position == 0 and n_c.get("position") is not None:
                             chunk.position = n_c["position"]
                         chunk.source = n_c.get("source")
+                        parsed_path = n_c.get("parsed_path")
+                        if parsed_path:
+                            chunk.content_type = "text/html" if parsed_path.endswith(".html") else "text/plain"
+
             except Exception as neo_err:
                 logger.error(f"Failed to bulk fetch chunk details from Neo4j: {neo_err}")
 
