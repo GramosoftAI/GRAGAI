@@ -336,6 +336,11 @@ async def init_rls_policies():
 
         "document_chunks",
 
+        "processing_jobs",
+        "document_table_rows",
+        "analytics_query_log",
+        "document_entities",
+        "document_sections",
     ]
 
 
@@ -584,6 +589,11 @@ async def verify_rls_enabled():
 
         "document_chunks",
 
+        "processing_jobs",
+        "document_table_rows",
+        "analytics_query_log",
+        "document_entities",
+        "document_sections",
      ]
 
 
@@ -710,7 +720,7 @@ async def init_db():
 
         from ..modules.agents.models import Agent
 
-        from ..modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
+        from ..modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk, DocumentTableRow, DocumentEntity, DocumentSection
 
         from ..modules.chats.models import ChatSession, ChatMessage
 

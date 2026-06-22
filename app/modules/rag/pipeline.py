@@ -514,6 +514,43 @@ class RAGPipeline:
                 logger.error(f"   -> SQL Table Analytics failed: {e}. Falling back to vector search.", exc_info=True)
                 search_type = SearchType.CHUNK_SEARCH
 
+        # STAGE 0.6: EARLY EXIT FOR EXTRACTIVE ENGINE
+        if search_type == SearchType.EXTRACTIVE:
+            logger.info("   -> Intercepting query for Extractive Engine!")
+            try:
+                # Naive intent parsing for entity_type from the query
+                q_lower = query.lower()
+                entity_type = None
+                for et in ["gstin", "pan", "invoice_number", "vin", "engine_number", "address", "email", "phone", "hsn", "part_number", "registration_number"]:
+                    if et.replace('_', ' ') in q_lower or et in q_lower:
+                        entity_type = et.upper()
+                        break
+                        
+                if entity_type:
+                    from .extractive_engine import ExtractiveEngine
+                    engine = ExtractiveEngine(self.db, str(self.tenant_id))
+                    ext_result = await engine.execute_query(entity_type, kb_ids)
+                    if ext_result:
+                        val = ext_result["extracted_value"]
+                        meta = ext_result["metadata"]
+                        status_warning = "" if meta.get("entity_status") == "VERIFIED" else f"\n\nWARNING: Extraction confidence is low. Status: {meta.get('entity_status')}"
+                        context_text = f"EXTRACTED {entity_type}:\n{val}\n\nProvenance:\nPage: {meta['page_number']}\nSource Context: {meta['source_text']}{status_warning}"
+                        
+                        return RAGContext(
+                            query=query,
+                            chunks=[],
+                            entity_mentions={},
+                            total_tokens=0,
+                            triplet_context=context_text,
+                            search_type=search_type.name
+                        )
+                
+                logger.warning("   -> Extractive Engine returned no results or entity type unclear. Falling back to vector search.")
+                search_type = SearchType.CHUNK_SEARCH
+            except Exception as e:
+                logger.error(f"   -> Extractive Engine failed: {e}. Falling back to vector search.", exc_info=True)
+                search_type = SearchType.CHUNK_SEARCH
+
 
 
 

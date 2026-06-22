@@ -625,39 +625,69 @@ class KnowledgeBaseService:
 
 
 
+            from ...core.pdf_extractor import PDFExtractor
+            
+            async def safe_extract_structured(text: str, idx: int):
+                try:
+                    return await PDFExtractor.extract_structured_entities(text)
+                except Exception as e:
+                    logger.warning(f" Structured extraction failed for chunk {idx}: {e}")
+                    return {"identifiers": [], "sections": []}
+
             entity_tasks = [safe_extract_entities(chunks[i], i) for i in range(len(chunks))]
-
             triplet_tasks = []
-
             if use_triplets:
-
                 extractor = TripletExtractor(tenant_id=str(self.tenant_id))
-
                 triplet_tasks = [safe_extract_triplets(extractor, f"idx_{i}", chunks[i], i) for i in range(len(chunks))]
-
+            structured_tasks = [safe_extract_structured(chunks[i], i) for i in range(len(chunks))]
             
-
             logger.info(f" Processing extractions for {len(chunks)} chunks (Concurrency: {settings.ingestion_llm_concurrency})...")
-
             
-
-            all_extraction_results = await asyncio.gather(*entity_tasks, *triplet_tasks)
-
-            entity_results = all_extraction_results[:len(chunks)]
-
-            triplet_results = [r for r in all_extraction_results[len(chunks):] if r] if use_triplets else []
-
+            entity_results = await asyncio.gather(*entity_tasks)
+            triplet_results = await asyncio.gather(*triplet_tasks) if use_triplets else []
+            structured_results = await asyncio.gather(*structured_tasks)
             
-
             entities_by_chunk = {}
-
             all_entities_set = set()
-
             for i, extracted in enumerate(entity_results):
-
                 entities_by_chunk[i] = [{"text": e.text, "type": e.entity_type, "confidence": e.confidence} for e in extracted]
-
                 for e in extracted: all_entities_set.add(f"{e.text}|{e.entity_type}")
+
+            # Prepare structured entities for storage
+            from .models import DocumentEntity, DocumentSection
+            structured_entities_to_save = []
+            structured_sections_to_save = []
+            for i, result in enumerate(structured_results):
+                for ident in result.get("identifiers", []):
+                    structured_entities_to_save.append(
+                        DocumentEntity(
+                            tenant_id=self.tenant_id,
+                            document_id=uuid.UUID(kb_id),
+                            entity_type=ident["type"],
+                            entity_value=ident["value"],
+                            start_offset=ident.get("start_offset"),
+                            end_offset=ident.get("end_offset"),
+                            source_text=ident.get("source_text"),
+                            page_number=1, # Assuming 1 for simplicity here, can be enhanced
+                            confidence=ident.get("confidence", 1.0),
+                            entity_status="REVIEW" if float(ident.get("confidence", 1.0)) < 0.80 else "VERIFIED"
+                        )
+                    )
+                for sec in result.get("sections", []):
+                    structured_sections_to_save.append(
+                        DocumentSection(
+                            tenant_id=self.tenant_id,
+                            document_id=uuid.UUID(kb_id),
+                            section_name=sec["name"],
+                            section_json=sec["content"],
+                            page_number=1
+                        )
+                    )
+            
+            if structured_entities_to_save:
+                self.db.add_all(structured_entities_to_save)
+            if structured_sections_to_save:
+                self.db.add_all(structured_sections_to_save)
 
 
 

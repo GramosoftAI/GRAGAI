@@ -352,3 +352,79 @@ class AnalyticsQueryLog(Base):
     
     def __repr__(self) -> str:
         return f"<AnalyticsQueryLog id={self.id} kb_id={self.kb_id} rows={self.rows_returned}>"
+
+class DocumentEntity(Base):
+    """
+    Structured Entity Storage Layer.
+    Stores structured business entities during ingestion for precise, extractive queries.
+    """
+    __tablename__ = "document_entities"
+
+    id = Column(
+        SQLAlchemyUUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True, nullable=False
+    )
+    tenant_id = Column(
+        SQLAlchemyUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    document_id = Column(
+        SQLAlchemyUUID(as_uuid=True), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    
+    entity_type = Column(String(50), nullable=False, index=True) # e.g. GSTIN, PAN
+    entity_value = Column(String(500), nullable=False)
+    page_number = Column(Integer, nullable=True)
+    section_name = Column(String(255), nullable=True)
+    
+    from sqlalchemy import Numeric
+    confidence = Column(Numeric(4, 3), nullable=True, default=1.0)
+    
+    start_offset = Column(Integer, nullable=True)
+    end_offset = Column(Integer, nullable=True)
+    source_text = Column(Text, nullable=True)
+    entity_status = Column(String(50), nullable=False, default="VERIFIED")
+
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_doc_entities_tenant_id", "tenant_id"),
+        Index("ix_doc_entities_doc_id", "document_id"),
+        Index("ix_doc_entities_type", "entity_type"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DocumentEntity type={self.entity_type} value={self.entity_value}>"
+
+
+class DocumentSection(Base):
+    """
+    Structured Section Storage.
+    Stores complete extracted sections (e.g. Place of Delivery, Billing Address).
+    """
+    __tablename__ = "document_sections"
+
+    id = Column(
+        SQLAlchemyUUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True, nullable=False
+    )
+    tenant_id = Column(
+        SQLAlchemyUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    document_id = Column(
+        SQLAlchemyUUID(as_uuid=True), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    
+    section_name = Column(String(255), nullable=False, index=True)
+    
+    from sqlalchemy.dialects.postgresql import JSONB
+    section_json = Column(JSONB, nullable=False)
+    page_number = Column(Integer, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_doc_sections_tenant_id", "tenant_id"),
+        Index("ix_doc_sections_doc_id", "document_id"),
+        Index("ix_doc_sections_name", "section_name"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DocumentSection name={self.section_name}>"

@@ -28,6 +28,7 @@ class SearchType(Enum):
     DATA_ANALYSIS = "DATA_ANALYSIS"         # Analysis of data/numbers
     SUMMARIZATION = "SUMMARIZATION"         # Requesting summaries
     TABLE_ANALYTICS = "TABLE_ANALYTICS"     # SQL-like database filtering on structured tables
+    EXTRACTIVE = "EXTRACTIVE"               # Exact value extraction (e.g., GSTIN, PAN)
 
 class RouteResult:
     def __init__(self, intent: SearchType, confidence: float, reason: str = "", rewritten: dict = None):
@@ -46,6 +47,10 @@ class QueryRouter:
     def __init__(self):
         # Pre-compile regex patterns for high performance
         self.patterns = {
+            SearchType.EXTRACTIVE: re.compile(
+                r'\b(gstin|pan number|pan|invoice number|vin|engine number|address|email|phone|part number|hsn code|customer details|billing address|shipping address|place of delivery|place of supply|registration number)\b',
+                re.IGNORECASE
+            ),
             SearchType.TABLE_ANALYTICS: re.compile(
                 r'\b(below|above|greater than|less than|between|top \d+|highest|lowest|average|count|sum|total of|cheapest|most expensive|all products where|price under|price over|mrp)\b',
                 re.IGNORECASE
@@ -169,17 +174,18 @@ Choose exactly one of the following intents:
 - DOCUMENT_QA: Questions about documents
 - DATA_ANALYSIS: Analysis of data/numbers
 - SUMMARIZATION: Requesting summaries
-- SUPPORT_INTENT: Requests requiring human assistance
-- ORGANIZATION_SPECIFIC: Questions about the organization
-- KNOWLEDGE_BASE: Document specific questions
-- GENERAL_KNOWLEDGE: Questions unrelated to the organization
-- CHUNK_SEARCH: Direct fact lookup
-- GRAPH_SUMMARY: Requests for overviews
-- CHAIN_OF_THOUGHT: Complex reasoning
-- MEMORY_ONLY: Personal history/preferences
-- ENTITY_CONNECTION: Relationship between two things
-- SOCIAL: Greetings, thanks, or small talk
-- TABLE_ANALYTICS: Database-style filtering on tables or price lists
+- SUPPORT_INTENT: Requests requiring human assistance (e.g., "I need help", "How do I contact support", "I have a complaint")
+- ORGANIZATION_SPECIFIC: Questions about the organization (e.g., "What services do you provide?", "How can I book an appointment?", "What are your consultation fees?")
+- KNOWLEDGE_BASE: Document specific questions (e.g., "Summarize this document", "What does the policy say")
+- GENERAL_KNOWLEDGE: Questions unrelated to the organization (e.g., "What is diabetes", "Who invented the internet")
+- CHUNK_SEARCH: Direct fact lookup (e.g., "What is John's email?")
+- GRAPH_SUMMARY: Requests for overviews (e.g., "Tell me about Project X")
+- CHAIN_OF_THOUGHT: Complex reasoning (e.g., "Compare these two candidates")
+- MEMORY_ONLY: Personal history/preferences (e.g., "What did we decide earlier?")
+- ENTITY_CONNECTION: Relationship between two things (e.g., "How is Amit linked to Sarah?")
+- SOCIAL: Greetings, thanks, or small talk (e.g., "Hi", "How are you?")
+- TABLE_ANALYTICS: Database-style filtering on tables or price lists (e.g., "Products below 5000", "Top 10 highest MRP", "Average cost")
+- EXTRACTIVE: Strict exact value retrieval without generation (e.g., "Give me the GSTIN", "What is the invoice number")
 - GRAPH_COMPLETION: General default.
 
 Return ONLY valid JSON in this exact format, with no markdown formatting or backticks:

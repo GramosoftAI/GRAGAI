@@ -457,3 +457,85 @@ class PDFExtractor:
         )
 
         return text
+
+    @staticmethod
+    async def extract_structured_entities(text: str) -> dict:
+        """
+        Phase 4: Universal Entity Extraction.
+        LLM identifies candidate entities, system extracts exact source spans.
+        """
+        from .llm.deepinfra_llm import DeepInfraLLMClient
+        import json
+        from .entity_registry import ENTITY_TYPES, resolve_entity_type
+        
+        try:
+            client = DeepInfraLLMClient()
+            
+            identifier_hints = []
+            for canonical, aliases in ENTITY_TYPES.items():
+                identifier_hints.append(f"{canonical} (aliases: {', '.join(aliases[:3])})")
+            identifier_hint_str = "\n            ".join(identifier_hints)
+            
+            prompt = f"""
+            Identify business identifiers and sections in the text.
+            Look for these identifiers and their aliases:
+            {identifier_hint_str}
+            Plus standard ones like ADDRESS, EMAIL, PHONE.
+            Sections include: Place of Delivery, Billing Address, Shipping Address, Customer Details.
+            
+            Return exactly in JSON format:
+            {{
+                "identifiers": [
+                    {{"type": "GSTIN", "candidate_value": "33AAACS8779D1Z7", "confidence": 0.99}}
+                ],
+                "sections": [
+                    {{"name": "Place of Delivery", "content": {{"address": "...", "gstin": "..."}}, "confidence": 0.95}}
+                ]
+            }}
+            
+            TEXT: {text}
+            """
+            
+            response = await client.generate(
+                prompt=prompt,
+                system_prompt="You are an extraction system.",
+                temperature=0.0,
+                max_tokens=1000
+            )
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if not json_match:
+                return {"identifiers": [], "sections": []}
+                
+            data = json.loads(json_match.group(0))
+            
+            results = {"identifiers": [], "sections": []}
+            
+            # System extracts exact spans for identifiers to avoid hallucination
+            for ident in data.get("identifiers", []):
+                cand = str(ident.get("candidate_value", ""))
+                raw_type = ident.get("type", "")
+                if cand and raw_type:
+                    canonical_type = resolve_entity_type(raw_type)
+                    # Find exact span in original text
+                    idx = text.find(cand)
+                    if idx != -1:
+                        results["identifiers"].append({
+                            "type": canonical_type,
+                            "value": text[idx:idx+len(cand)],
+                            "start_offset": idx,
+                            "end_offset": idx+len(cand),
+                            "source_text": text[max(0, idx-20):min(len(text), idx+len(cand)+20)],
+                            "confidence": float(ident.get("confidence", 1.0))
+                        })
+            
+            for sec in data.get("sections", []):
+                if isinstance(sec.get("content"), dict):
+                    results["sections"].append({
+                        "name": sec.get("name", ""),
+                        "content": sec.get("content", {})
+                    })
+                
+            return results
+        except Exception as e:
+            logger.error(f"Structured extraction failed: {e}")
+            return {"identifiers": [], "sections": []}
