@@ -40,6 +40,9 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         ("/api/v1/auth/register", "POST"),
         ("/api/v1/auth/login", "POST"),
         ("/api/v1/auth/refresh", "POST"),
+        ("/api/v1/auth/send-registration-otp", "POST"),
+        ("/api/v1/auth/forgot-password", "POST"),
+        ("/api/v1/auth/reset-password", "POST"),
         ("/docs", "GET"),
         ("/openapi.json", "GET"),
         ("/redoc", "GET"),
@@ -50,8 +53,13 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # ============= CHECK IF ROUTE IS PUBLIC =============
         route_key = (request.url.path, request.method)
-        if route_key in self.PUBLIC_ROUTES:
-            logger.debug(f"Public route: {request.method} {request.url.path}")
+        if (
+            route_key in self.PUBLIC_ROUTES 
+            or request.url.path.startswith("/api/v1/embed")
+            or "/sharepoint/login" in request.url.path
+            or "/sharepoint/callback" in request.url.path
+        ):
+            logger.debug(f"Public/Embed/Auth route: {request.method} {request.url.path}")
             return await call_next(request)
 
         # ============= EXTRACT JWT =============

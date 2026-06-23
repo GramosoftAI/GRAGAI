@@ -72,11 +72,11 @@ class DeepInfraEmbeddingClient:
         self.model = "BAAI/bge-large-en-v1.5"
         self.timeout = 10.0  # Request timeout in seconds
         self.max_retries = 3  # Number of retry attempts
-        self.max_text_length = 2000  # Prevent API overload
+        self.max_text_length = 500  # Prevent API overload (approx 125 tokens)
         self.expected_dimension = EXPECTED_EMBEDDING_DIMENSION  # 1024
 
         logger.info(
-            f"🚀 DeepInfra Embedding Client initialized (model={self.model}, timeout={self.timeout}s, dim={self.expected_dimension})"
+            f" DeepInfra Embedding Client initialized (model={self.model}, timeout={self.timeout}s, dim={self.expected_dimension})"
         )
 
     async def generate_embedding(self, text: str) -> List[float]:
@@ -136,7 +136,7 @@ class DeepInfraEmbeddingClient:
             embedding = _embedding_cache[text_hash]
             _cache_hits += 1
             logger.debug(
-                f"📦 Cache HIT: Retrieved embedding from cache ({len(embedding)} dims, cache: {len(_embedding_cache)}/{_MAX_EMBEDDING_CACHE}) — hits: {_cache_hits} | misses: {_cache_misses}"
+                f" Cache HIT: Retrieved embedding from cache ({len(embedding)} dims, cache: {len(_embedding_cache)}/{_MAX_EMBEDDING_CACHE})  hits: {_cache_hits} | misses: {_cache_misses}"
             )
             # Move to end of insertion order (mark as recently used for LRU)
             if text_hash in _embedding_cache_insertion_order:
@@ -217,11 +217,11 @@ class DeepInfraEmbeddingClient:
                                 del _embedding_cache[oldest_hash]
                                 _cache_evictions += 1
                                 logger.debug(
-                                    f"🗑️  Evicted oldest embedding (cache size > {_MAX_EMBEDDING_CACHE}) — total evictions: {_cache_evictions}"
+                                    f"  Evicted oldest embedding (cache size > {_MAX_EMBEDDING_CACHE})  total evictions: {_cache_evictions}"
                                 )
 
                         logger.debug(
-                            f"✅ Embedding generated and cached ({len(embedding)} dims, cache: {len(_embedding_cache)}/{_MAX_EMBEDDING_CACHE})"
+                            f" Embedding generated and cached ({len(embedding)} dims, cache: {len(_embedding_cache)}/{_MAX_EMBEDDING_CACHE})"
                         )
 
                         # LOG EMBEDDING SOURCE (for rollout monitoring)
@@ -235,25 +235,25 @@ class DeepInfraEmbeddingClient:
                         f"API timeout after {self.timeout}s (attempt {attempt + 1})"
                     )
                     logger.warning(
-                        f"⏱️  API timeout on attempt {attempt + 1}/{self.max_retries}"
+                        f"  API timeout on attempt {attempt + 1}/{self.max_retries}"
                     )
 
                 except httpx.HTTPStatusError as e:
                     # HTTP error (4xx, 5xx)
                     last_error = e
                     logger.warning(
-                        f"⚠️  HTTP {e.response.status_code} on attempt {attempt + 1}/{self.max_retries}: {e.response.text}"
+                        f"  HTTP {e.response.status_code} on attempt {attempt + 1}/{self.max_retries}: {e.response.text}"
                     )
 
                 except (ValueError, KeyError) as e:
                     # Response parsing error
                     last_error = e
-                    logger.warning(f"⚠️  Response parsing error: {e}")
+                    logger.warning(f"  Response parsing error: {e}")
 
                 except Exception as e:
                     # Unexpected error
                     last_error = e
-                    logger.warning(f"⚠️  Unexpected error on attempt {attempt + 1}: {e}")
+                    logger.warning(f"  Unexpected error on attempt {attempt + 1}: {e}")
 
                 # Don't retry on last attempt
                 if attempt < self.max_retries - 1:
@@ -265,7 +265,7 @@ class DeepInfraEmbeddingClient:
 
             # All retries exhausted
             logger.error(
-                f"❌ All {self.max_retries} attempts failed. Last error: {last_error}"
+                f" All {self.max_retries} attempts failed. Last error: {last_error}"
             )
             raise last_error or Exception(
                 "Failed to generate embedding after all retries"
@@ -294,6 +294,11 @@ class DeepInfraEmbeddingClient:
         to_embed_texts = []
         
         for i, text in enumerate(texts):
+            # Validate and truncate text to prevent API token limit errors
+            if not text or not text.strip():
+                text = "empty"
+            text = text[: self.max_text_length]
+            
             text_hash = hashlib.sha256(text.encode()).hexdigest()
             if text_hash in _embedding_cache:
                 results_map[i] = _embedding_cache[text_hash]
@@ -302,10 +307,10 @@ class DeepInfraEmbeddingClient:
                 to_embed_texts.append(text)
                 
         if not to_embed_texts:
-            logger.info(f"✅ All {len(texts)} embeddings retrieved from cache")
+            logger.info(f" All {len(texts)} embeddings retrieved from cache")
             return [results_map[i] for i in range(len(texts))]
 
-        logger.info(f"🚀 API Batch generating {len(to_embed_texts)} embeddings (out of {len(texts)} total)...")
+        logger.info(f" API Batch generating {len(to_embed_texts)} embeddings (out of {len(texts)} total)...")
         
         # 2. Process in chunks of 50 (API limit safety)
         batch_size = 50
@@ -326,7 +331,11 @@ class DeepInfraEmbeddingClient:
                 
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     response = await client.post(self.base_url, headers=headers, json=payload)
-                    response.raise_for_status()
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        logger.error(f" DeepInfra API Error ({response.status_code}): {response.text}")
+                        raise
                     data = response.json()
                     
                     # Extract embeddings: {"data": [{"embedding": [...], "index": 0}, ...]}
@@ -346,5 +355,5 @@ class DeepInfraEmbeddingClient:
             results_map[idx] = all_new_embeddings[i]
             
         final_results = [results_map[i] for i in range(len(texts))]
-        logger.info(f"✅ Batch generation complete: {len(texts)} embeddings")
+        logger.info(f" Batch generation complete: {len(texts)} embeddings")
         return final_results

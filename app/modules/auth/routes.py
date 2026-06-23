@@ -1,6 +1,6 @@
 """Authentication routes: register, login, refresh, API keys"""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
@@ -13,7 +13,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
-@router.post("/register", status_code=status.HTTP_201_CREATED)
+@router.post("/send-registration-otp", status_code=status.HTTP_200_OK)
+async def send_registration_otp(
+    request: schemas.SendRegistrationOTPRequest, 
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db_public)
+):
+    """
+    Send OTP for registration email verification.
+    """
+    result = await services.send_registration_otp(request, background_tasks, db)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error")
+        )
+    return format_success(meta={"message": result.get("message")})
+
+
+@router.post("/register", status_code=status.HTTP_200_OK)
 async def register(
     request: schemas.RegisterRequest, db: AsyncSession = Depends(get_db_public)
 ):
@@ -39,7 +56,7 @@ async def register(
         tokens=schemas.TokenResponse(**result["tokens"]),
     )
 
-    return format_success(data=login_response, meta={"action": "registered"})
+    return format_success(data=login_response, meta={"action": "registered","message":"User registered successfully"})
 
 
 @router.post("/login")
@@ -68,7 +85,7 @@ async def login(
         tokens=schemas.TokenResponse(**result["tokens"]),
     )
 
-    return format_success(data=login_response, meta={"action": "authenticated"})
+    return format_success(data=login_response, meta={"action": "authenticated","message":"User logged in successfully"})
 
 
 @router.post("/refresh")
@@ -93,16 +110,17 @@ async def refresh_token(
     )
 
 
-@router.post("/forgot-password")
+@router.post("/forgot-password", status_code=status.HTTP_200_OK)
 async def forgot_password(
-    request: schemas.ForgotPasswordRequest, db: AsyncSession = Depends(get_db_public)
+    request: schemas.ForgotPasswordRequest, 
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db_public)
 ):
     """
     Request a password reset link.
-    
     Generates a secure token, hashes it for storage, and sends it via email.
     """
-    result = await services.request_password_reset(request.email, db)
+    result = await services.request_password_reset(request.email, background_tasks, db)
     return format_success(meta={"message": result.get("message")})
 
 

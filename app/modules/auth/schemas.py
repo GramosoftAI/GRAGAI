@@ -7,10 +7,32 @@ import uuid
 
 
 # ============= REQUEST SCHEMAS =============
+class SendRegistrationOTPRequest(BaseModel):
+    """Request to send registration OTP"""
+    email: EmailStr = Field(..., description="User email address")
+    first_name: Optional[str] = Field(None, description="Optional user first name for personalized email greeting")
+    tenant_name: Optional[str] = Field(None, description="Optional tenant name to check availability before sending OTP")
+    password: Optional[str] = Field(None, description="Optional password to validate strength before sending OTP", min_length=8, max_length=128)
+
+    @validator("password")
+    def validate_password_strength(cls, v):
+        """Validate password meets security requirements"""
+        if v is None:
+            return v
+        if not any(c.isupper() for c in v):
+            raise ValueError("Password must contain uppercase letter")
+        if not any(c.islower() for c in v):
+            raise ValueError("Password must contain lowercase letter")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("Password must contain digit")
+        return v
+
+
 class RegisterRequest(BaseModel):
     """User registration request"""
 
     email: EmailStr = Field(..., description="User email address")
+    otp: str = Field(..., description="6-digit OTP sent to email", min_length=6, max_length=6)
     first_name: str = Field(..., min_length=1, max_length=255)
     last_name: str = Field(..., min_length=1, max_length=255)
     password: str = Field(..., min_length=8, max_length=128)

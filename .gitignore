@@ -1,10 +1,23 @@
-# Python
+# Environment and Configs
+.env
+.env.local
+.env.*.local
+.env.production
+config.yaml
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+mind/
+
+# Python Cache and Build
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -21,44 +34,39 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
-venv/
-ENV/
-mind/
-
-# Environment Variables
-.env
-.env.production
-.env.local
-.env.*.local
-
 # Logs
 logs/
 *.log
 
-# Project specific
-tester_zone/
-tests/
-scratch/
-tmp/
+# IDEs and Tools
 .vscode/
 .idea/
 .streamlit/
+.DS_Store
+Thumbs.db
+alembic.ini
 
-# Analysis docs
-cognee_full_analysis_part*.md
-competitor_strategic_analysis.md
-API_DOCUMENTATION.md
+# Project specific ignores
+tmp/
+scratch/
+scripts/
+tester_zone/
+poc/
+evaluation/
+vector_extracted/
+*.zip
+scratch_mod*.py
+test_chunk*.py
 
-# Testing scripts in root
-check_user_columns.py
-debug_db.py
-drop_tables.py
-test_triplet_diag.py
-
-# Large files
+# Analysis & Docs (Local)
+docs/analysis/
 *.pptx
+*.xlsx
 *.pdf
 
-# Streamlit
-.streamlit/config.toml
+# Deploy keys
+graphmind_deploy_key*
+*deploy_key*
+
+README_old.md
+README (1) (1).md

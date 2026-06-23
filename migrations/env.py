@@ -1,4 +1,8 @@
 """Migration environment configuration"""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
@@ -12,10 +16,15 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import your models here for autogenerate support
-# from app.models import Base
-# target_metadata = Base.metadata
+from app.models.base import Base
+from app.modules.auth.models import User, Tenant, APIKey, TokenBlacklist
+from app.modules.agents.models import Agent
+from app.modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
+from app.modules.chats.models import ChatSession, ChatMessage
+from app.modules.personalities.models import Personality
+from app.modules.connectors.google.models import GmailMessage, GmailSyncState
 
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
@@ -35,7 +44,7 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
     connectable = engine_from_config(
-        config.get_section(config.config_section),
+        config.get_section(config.config_ini_section),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )

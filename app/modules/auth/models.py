@@ -1,6 +1,6 @@
 """Authentication models: User, Tenant, APIKey"""
 
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Index, text
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Index, text, Integer
 from sqlalchemy.sql import func
 import uuid
 from datetime import datetime
@@ -284,3 +284,44 @@ class PasswordResetToken(Base):
 
     def __repr__(self) -> str:
         return f"<PasswordResetToken user={self.user_id} used={self.is_used}>"
+
+
+class RegistrationOTP(Base):
+    """
+    Registration OTP model.
+    Stores hashed OTPs for secure email validation during registration.
+    """
+
+    __tablename__ = "registration_otps"
+
+    # ============= PRIMARY KEY =============
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True,
+        nullable=False,
+    )
+
+    # ============= OTP DATA =============
+    email = Column(String(255), nullable=False)
+    otp_hash = Column(String(255), nullable=False)
+    is_used = Column(Boolean, default=False, nullable=False)
+    failed_attempts = Column(Integer, default=0, nullable=False)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
+
+    # ============= STATUS =============
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    ) 
+
+    __table_args__ = (
+        Index("ix_registration_otps_email", "email"),
+        Index("ix_registration_otps_expires", "expires_at"),  # For cleanup
+    )
+
+    def __repr__(self) -> str:
+        return f"<RegistrationOTP email={self.email} used={self.is_used}>"
+

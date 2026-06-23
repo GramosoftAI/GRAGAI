@@ -1,0 +1,8 @@
+{
+    "timestamp": "2026-06-10T15:32:03.129053",
+    "readiness_score": "100%",
+    "ingestion_score": "100.0%",
+    "graph_score": "14.2%",
+    "overall_grag_score": "51.0%",
+    "recommendation": "REJECT (Tune ingestion/graph extraction)"
+}

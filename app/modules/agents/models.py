@@ -74,6 +74,15 @@ class Agent(Base):
     )
     system_prompt = Column(Text, nullable=True)  # Agent's system instruction
 
+    # ============= INTEGRATED AGENT FIELDS =============
+    agent_type = Column(String(50), default="platform", nullable=False) # 'platform' or 'integrated'
+    organization_name = Column(String(255), nullable=True)
+    contact_phone = Column(String(50), nullable=True)
+    contact_email = Column(String(255), nullable=True)
+    website_url = Column(String(255), nullable=True)
+    fallback_message_enabled = Column(Boolean, default=True, nullable=False)
+    brand_persona = Column(String(255), nullable=True)
+
     # ============= STATUS =============
     is_active = Column(Boolean, default=True, nullable=False)
 

@@ -106,6 +106,13 @@ class AgentService:
                 personality=request.personality,
                 personality_id=request.personality_id,
                 system_prompt=request.system_prompt,
+                agent_type=request.agent_type,
+                organization_name=request.organization_name,
+                contact_phone=request.contact_phone,
+                contact_email=request.contact_email,
+                website_url=request.website_url,
+                fallback_message_enabled=request.fallback_message_enabled,
+                brand_persona=request.brand_persona,
             )
             agent_id = str(pg_agent.id)
             logger.info(f"✅ PostgreSQL: Created agent {agent_id}")
@@ -218,6 +225,55 @@ class AgentService:
                 f"Failed to create agent: {str(e)}", meta={"error_code": "CREATION_ERROR"}
             )
 
+    async def _enrich_agents_with_connections(self, agents, schema_class) -> list[dict]:
+        if not agents:
+            return []
+            
+        agent_ids = [a.id for a in agents]
+        
+        from sqlalchemy import select
+        from app.modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection
+        
+        query = select(
+            KnowledgeBase.agent_id, 
+            DatabaseConnection.db_type,
+            KnowledgeBase.source
+        ).outerjoin(
+            DatabaseConnection, KnowledgeBase.id == DatabaseConnection.kb_id
+        ).where(
+            KnowledgeBase.agent_id.in_(agent_ids),
+            KnowledgeBase.is_active == True
+        )
+        res = await self.db.execute(query)
+        
+        connections_by_agent = {}
+        for row in res.all():
+            agent_id = row.agent_id
+            if agent_id not in connections_by_agent:
+                connections_by_agent[agent_id] = set()
+            if row.db_type:
+                connections_by_agent[agent_id].add(row.db_type)
+            if row.source:
+                if row.source.startswith('google_drive'):
+                    connections_by_agent[agent_id].add('google_drive')
+                elif row.source.startswith('sharepoint'):
+                    connections_by_agent[agent_id].add('sharepoint')
+                elif row.source.startswith('gmail'):
+                    connections_by_agent[agent_id].add('gmail')
+                elif row.source.startswith('outlook'):
+                    connections_by_agent[agent_id].add('outlook')
+                elif row.source == 'web_scraper':
+                    connections_by_agent[agent_id].add('web_scraper')
+            
+        responses = []
+        for agent in agents:
+            # We support both AgentResponse and AgentEnhancedResponse
+            agent_dict = schema_class.model_validate(agent, from_attributes=True).model_dump(mode="json")
+            agent_dict["connected_integrations"] = list(connections_by_agent.get(agent.id, set()))
+            responses.append(agent_dict)
+            
+        return responses
+
     async def get_agent(self, agent_id: str) -> dict:
         """
         Get agent by ID (PostgreSQL only, Neo4j not needed for read).
@@ -234,11 +290,11 @@ class AgentService:
             if not agent:
                 return format_error(f"Agent not found: {agent_id}", meta={"status_code": 404})
 
+            enriched = await self._enrich_agents_with_connections([agent], schemas.AgentResponse)
+
             return format_success(
                 {
-                    "agent": schemas.AgentResponse.model_validate(
-                        agent, from_attributes=True
-                    )
+                    "agent": enriched[0]
                 }
             )
 
@@ -255,12 +311,11 @@ class AgentService:
                 limit=limit, offset=offset
             )
 
+            enriched = await self._enrich_agents_with_connections(agents, schemas.AgentResponse)
+
             return format_success(
                 {
-                    "agents": [
-                        schemas.AgentResponse.model_validate(a, from_attributes=True)
-                        for a in agents
-                    ],
+                    "agents": enriched,
                     "count": len(agents),
                     "total": total,
                 }
@@ -282,12 +337,54 @@ class AgentService:
                 search=search, limit=limit, offset=offset
             )
 
+            # Enhanced agents are just raw objects/dicts based on the repository return type, 
+            # we need to be careful if they are objects with an ID or dictionaries.
+            # Usually they are mapped to models or are raw rows. Let's handle them assuming they behave like models.
+            # To be safe, we just use the schema class to dump them.
+            
+            # Since agents here might be named tuples returned by the enhanced query, 
+            # we adapt the enrichment for them.
+            agent_ids = [a.agent_id for a in agents]
+            
+            from sqlalchemy import select
+            query = select(
+                KnowledgeBase.agent_id, 
+                DatabaseConnection.db_type,
+                KnowledgeBase.source
+            ).outerjoin(
+                DatabaseConnection, KnowledgeBase.id == DatabaseConnection.kb_id
+            ).where(
+                KnowledgeBase.agent_id.in_(agent_ids),
+                KnowledgeBase.is_active == True
+            )
+            res = await self.db.execute(query)
+            connections_by_agent = {}
+            for row in res.all():
+                if row.agent_id not in connections_by_agent:
+                    connections_by_agent[row.agent_id] = set()
+                if row.db_type:
+                    connections_by_agent[row.agent_id].add(row.db_type)
+                if row.source:
+                    if row.source.startswith('google_drive'):
+                        connections_by_agent[row.agent_id].add('google_drive')
+                    elif row.source.startswith('sharepoint'):
+                        connections_by_agent[row.agent_id].add('sharepoint')
+                    elif row.source.startswith('gmail'):
+                        connections_by_agent[row.agent_id].add('gmail')
+                    elif row.source.startswith('outlook'):
+                        connections_by_agent[row.agent_id].add('outlook')
+                    elif row.source == 'web_scraper':
+                        connections_by_agent[row.agent_id].add('web_scraper')
+            
+            responses = []
+            for agent in agents:
+                agent_dict = schemas.AgentEnhancedResponse.model_validate(agent, from_attributes=True).model_dump(mode="json")
+                agent_dict["connected_integrations"] = list(connections_by_agent.get(agent.agent_id, set()))
+                responses.append(agent_dict)
+
             return format_success(
                 {
-                    "agents": [
-                        schemas.AgentEnhancedResponse.model_validate(a)
-                        for a in agents
-                    ],
+                    "agents": responses,
                     "count": len(agents),
                     "total": total,
                 }
@@ -316,12 +413,11 @@ class AgentService:
                 user_id, limit=limit, offset=offset
             )
 
+            enriched = await self._enrich_agents_with_connections(agents, schemas.AgentResponse)
+
             return format_success(
                 {
-                    "agents": [
-                        schemas.AgentResponse.model_validate(a, from_attributes=True)
-                        for a in agents
-                    ],
+                    "agents": enriched,
                     "count": len(agents),
                     "total": total,
                 }
@@ -360,12 +456,11 @@ class AgentService:
                 user_id=str(user.id), limit=limit, offset=offset
             )
 
+            enriched = await self._enrich_agents_with_connections(agents, schemas.AgentResponse)
+
             return format_success(
                 {
-                    "agents": [
-                        schemas.AgentResponse.model_validate(a, from_attributes=True)
-                        for a in agents
-                    ],
+                    "agents": enriched,
                     "count": len(agents),
                     "total": total,
                     "owner": {
@@ -510,8 +605,7 @@ class AgentService:
             MATCH (a:Agent {tenant_id: $tenant_id, id: $agent_id})
             OPTIONAL MATCH (a)-[:OWNS_KB]->(kb:KnowledgeBase {tenant_id: $tenant_id})
             OPTIONAL MATCH (kb)-[:HAS_CHUNK]->(c:Chunk {tenant_id: $tenant_id})
-            OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity {tenant_id: $tenant_id})
-            DETACH DELETE a, kb, c, e
+            DETACH DELETE a, kb, c
             RETURN count(a) as deleted_agents
             """
 
@@ -542,6 +636,34 @@ class AgentService:
             # ============= STEP 2: POSTGRES SOFT-DELETE (AFTER NEO4J SUCCESS) =============
             # Only soft-delete if Neo4j succeeded
             deleted = await self.repository.soft_delete(agent_id)
+            
+            # CRITICAL: Cascade delete KnowledgeBases and DocumentChunks from Postgres
+            from sqlalchemy import update, delete, select
+            import uuid
+            from app.modules.knowledge_bases.models import KnowledgeBase, DocumentChunk
+            
+            agent_uuid = uuid.UUID(agent_id) if isinstance(agent_id, str) else agent_id
+            
+            # Find KBs to delete their chunks
+            kbs_query = select(KnowledgeBase.id).where(
+                KnowledgeBase.agent_id == agent_uuid,
+                KnowledgeBase.tenant_id == self.tenant_id
+            )
+            
+            # Hard-delete chunks (frees up pgvector space and prevents zombie retrieval)
+            await self.db.execute(
+                delete(DocumentChunk).where(DocumentChunk.kb_id.in_(kbs_query))
+            )
+            
+            # Soft-delete KnowledgeBases
+            await self.db.execute(
+                update(KnowledgeBase)
+                .where(
+                    KnowledgeBase.agent_id == agent_uuid,
+                    KnowledgeBase.tenant_id == self.tenant_id
+                )
+                .values(is_active=False, deleted_at=datetime.utcnow())
+            )
 
             if not deleted:
                 # Rare case: agent not found in PostgreSQL
