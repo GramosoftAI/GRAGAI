@@ -42,6 +42,11 @@ ENTITY_TYPES: Dict[str, List[str]] = {
         "Engine No",
         "Motor Number"
     ],
+    "REGISTRATION_NUMBER": [
+        "Registration No",
+        "Vehicle Registration Number",
+        "Reg No"
+    ],
     "HSN_CODE": [
         "HSN",
         "HSN/SAC",

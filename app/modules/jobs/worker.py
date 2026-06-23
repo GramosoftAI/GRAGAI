@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -108,11 +109,12 @@ async def run_pdf_ingestion_job(
                 raw_content = getattr(document_text, "raw_html", document_text)
                 content_type = "text/html" if is_html else "text/plain"
 
-                parsed_url = s3_service.store_parsed_content(
-                    tenant_id=str(tenant_id),
-                    kb_id=str(kb_id),
-                    content=raw_content,
-                    content_type=content_type
+                parsed_url = await asyncio.to_thread(
+                    s3_service.store_parsed_content,
+                    str(tenant_id),
+                    str(kb_id),
+                    raw_content,
+                    content_type
                 )
             except Exception as e:
                 logger.error(f"Job {job_id}: Failed to store parsed content in S3: {e}")

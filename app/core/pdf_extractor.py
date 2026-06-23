@@ -471,21 +471,17 @@ class PDFExtractor:
         try:
             client = DeepInfraLLMClient()
             
-            identifier_hints = []
-            for canonical, aliases in ENTITY_TYPES.items():
-                identifier_hints.append(f"{canonical} (aliases: {', '.join(aliases[:3])})")
-            identifier_hint_str = "\n            ".join(identifier_hints)
-            
             prompt = f"""
-            Identify business identifiers and sections in the text.
-            Look for these identifiers and their aliases:
-            {identifier_hint_str}
-            Plus standard ones like ADDRESS, EMAIL, PHONE.
+            Identify ALL business identifiers, codes, references, numbers, and key-value pairs in the text.
+            Do not restrict yourself to a predefined list. Extract any field that looks like a business identifier (e.g. E-Way Bill, Registration No, Chassis Number, Policy Number, Claim Number, Dispatch Number, Batch Number, GSTIN, PAN, VIN, Invoice Number, etc.).
+            Also extract standard contact info like ADDRESS, EMAIL, PHONE.
             Sections include: Place of Delivery, Billing Address, Shipping Address, Customer Details.
             
-            Return exactly in JSON format:
+            Return exactly in JSON format. DO NOT use <think> blocks or reasoning. Output ONLY the JSON object immediately:
             {{
                 "identifiers": [
+                    {{"type": "E-WAY_BILL_NUMBER", "candidate_value": "123456789012", "confidence": 0.99}},
+                    {{"type": "REGISTRATION_NO", "candidate_value": "TN06AD4950", "confidence": 0.98}},
                     {{"type": "GSTIN", "candidate_value": "33AAACS8779D1Z7", "confidence": 0.99}}
                 ],
                 "sections": [
@@ -502,6 +498,7 @@ class PDFExtractor:
                 temperature=0.0,
                 max_tokens=1000
             )
+            print(f"RAW LLM RESPONSE: {response}")
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if not json_match:
                 return {"identifiers": [], "sections": []}
@@ -515,7 +512,9 @@ class PDFExtractor:
                 cand = str(ident.get("candidate_value", ""))
                 raw_type = ident.get("type", "")
                 if cand and raw_type:
-                    canonical_type = resolve_entity_type(raw_type)
+                    # Dynamically accept any entity type returned by the LLM
+                    # Normalize to uppercase with underscores
+                    canonical_type = str(raw_type).strip().upper().replace(' ', '_')
                     # Find exact span in original text
                     idx = text.find(cand)
                     if idx != -1:
@@ -538,4 +537,9 @@ class PDFExtractor:
             return results
         except Exception as e:
             logger.error(f"Structured extraction failed: {e}")
+            # Print raw response for debugging
+            try:
+                print(f"RAW LLM RESPONSE: {response}")
+            except:
+                pass
             return {"identifiers": [], "sections": []}

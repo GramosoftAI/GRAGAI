@@ -82,7 +82,7 @@ _MAX_CACHE_SIZE = 1000  # Evict oldest entries if exceeded
 
 _CACHE_INSERTION_ORDER = []  # Track insertion order for LRU eviction
 
-_RAG_TIMEOUT_SECONDS = 30.0  # Professional timeout for remote AI calls + graph compute
+_RAG_TIMEOUT_SECONDS = 90.0  # Professional timeout for remote AI calls + graph compute
 
 
 
@@ -404,15 +404,15 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
 
             )
 
-        except Exception as e:
-
-            logger.error(f"RAG Retrieval failed for stream: {e}")
-
-            yield json.dumps({"error": f"Retrieval failed: {str(e)}"})
-
+        except asyncio.TimeoutError:
+            logger.error(f"RAG Retrieval timed out after {_RAG_TIMEOUT_SECONDS}s")
+            yield json.dumps({"error": f"The AI provider is taking too long to respond. Please try again later."})
             return
-
-
+        except Exception as e:
+            error_msg = str(e) if str(e) else e.__class__.__name__
+            logger.error(f"RAG Retrieval failed for stream: {error_msg}")
+            yield json.dumps({"error": f"Retrieval failed: {error_msg}"})
+            return
 
         # 3. Yield metadata first (sources)
         for c in context.chunks:
@@ -447,7 +447,9 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
 
             "kb_name": kb.name if len(kb_ids) == 1 else f"Multi-KB ({len(kb_ids)})",
 
-            "augmented_query": query
+            "augmented_query": query,
+            
+            "authoritative_entities": context.authoritative_entities or []
 
         }
 
@@ -455,7 +457,20 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
 
 
 
-        # 3.5 Check for empty context
+        # 3.5 Check for empty context or bypass intents
+        is_extractive = context.search_type == "EXTRACTIVE" if context else False
+        is_table_analytics = context.search_type == "TABLE_ANALYTICS" if context else False
+
+        if is_extractive or is_table_analytics:
+            logger.info(f"Bypassing LLM stream for {context.search_type} mode.")
+            # Yield any structured data if available
+            if getattr(context, "authoritative_entities", None):
+                yield "\n**System Verified Data (100% Trust):**\n"
+                for ent in context.authoritative_entities:
+                    yield f"- **{ent['entity_type']}**: `{ent['value']}` (Source: {ent.get('source', 'document_entities')}, Page: {ent.get('page', 1)}, Confidence: {ent.get('confidence', 1.0)})\n"
+                yield "\n"
+            yield context.triplet_context
+            return
 
         if not context or not context.chunks:
 
@@ -464,6 +479,13 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
             yield "Im sorry, but the requested information is not available within my current knowledge base. Please try a related query or provide additional context."
 
             return
+
+        # System-Level Value Injection
+        if getattr(context, "authoritative_entities", None):
+            yield "\n**System Verified Data (100% Trust):**\n"
+            for ent in context.authoritative_entities:
+                yield f"- **{ent['entity_type']}**: `{ent['value']}` (Source: {ent.get('source', 'document_entities')}, Page: {ent.get('page', 1)}, Confidence: {ent.get('confidence', 1.0)})\n"
+            yield "\n**AI Analysis (Hybrid Retrieval):**\n"
 
 
 
@@ -1036,6 +1058,42 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
                 "reasoning_path": "Bypassed retrieval for integrated support intent.",
             }
         
+        is_extractive = context.search_type == "EXTRACTIVE" if context else False
+        is_table_analytics = context.search_type == "TABLE_ANALYTICS" if context else False
+
+        if is_extractive or is_table_analytics:
+            logger.info(f"Bypassing LLM generation for {context.search_type} mode.")
+            result = {
+                "answer": context.triplet_context,
+                "sources": [],
+                "context": {
+                    "kb_id": kb_id,
+                    "kb_name": kb.name,
+                    "chunks_used": 0,
+                    "entities_mentioned": [],
+                    "reasoning_path": f"Bypassed retrieval for {context.search_type}.",
+                },
+                "stats": {
+                    "total_chunks": 0,
+                    "total_tokens": 0,
+                    "entity_count": 0,
+                    "llm_tokens": 0,
+                    "llm_source": "DirectExtraction",
+                    "search_strategy": context.search_type,
+                },
+                "confidence": 1.0,
+                "nodes_used": 0,
+                "reasoning_path": f"Bypassed retrieval for {context.search_type}.",
+            }
+            # Cache the result
+            _rag_cache[cache_key] = (result, datetime.now(), len(_CACHE_INSERTION_ORDER))
+            _CACHE_INSERTION_ORDER.append(cache_key)
+            if len(_CACHE_INSERTION_ORDER) > _MAX_CACHE_SIZE:
+                oldest_key = _CACHE_INSERTION_ORDER.pop(0)
+                _rag_cache.pop(oldest_key, None)
+                
+            return result
+
         if (not context or not context.chunks) and not is_social:
             logger.info("Empty context retrieved and not social, returning fallback message.")
             
@@ -1537,7 +1595,13 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
 
             context_text += f"\n[KNOWLEDGE GRAPH RELATIONSHIPS]:\n{context.triplet_context}\n"
 
-
+        if getattr(context, "authoritative_entities", None):
+            context_text += "\n" + "=" * 60 + "\n[SYSTEM INSTRUCTION: ALREADY VERIFIED DATA]\n"
+            context_text += "The system has already verified and securely injected the following fields into the final response.\n"
+            context_text += "DO NOT include these fields in your generation. ONLY answer for the REMAINING missing fields.\n"
+            for ent in context.authoritative_entities:
+                context_text += f"- {ent['entity_type']}\n"
+            context_text += "=" * 60 + "\n"
 
         if context.personal_memories:
 

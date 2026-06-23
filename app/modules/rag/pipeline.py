@@ -182,9 +182,9 @@ class RAGContext:
 
     search_type: str = "DEFAULT" # The strategy selected by the router
 
-
-
     personal_memories: List[str] = None # Phase 5: Personal user context (Mem0)
+    
+    authoritative_entities: List[Dict] = None # Phase 6: System-Level Value Injection (Highest Trust)
 
 
 
@@ -501,11 +501,12 @@ class RAGPipeline:
                 table_results = await self._execute_table_analytics(query, kb_ids)
                 if table_results:
                     return RAGContext(
-                        ranked_chunks=[],
-                        total_chunks=0,
-                        context_text=f"STRUCTURED TABLE ANALYTICS RESULTS:\n{table_results}",
-                        search_type=search_type.name,
-                        metadata={"sql_executed": True}
+                        query=query,
+                        chunks=[],
+                        entity_mentions={},
+                        total_tokens=0,
+                        triplet_context=f"STRUCTURED TABLE ANALYTICS RESULTS:\n{table_results}",
+                        search_type=search_type.name
                     )
                 else:
                     logger.warning("   -> SQL Table Analytics returned no results. Falling back to vector search.")
@@ -514,41 +515,95 @@ class RAGPipeline:
                 logger.error(f"   -> SQL Table Analytics failed: {e}. Falling back to vector search.", exc_info=True)
                 search_type = SearchType.CHUNK_SEARCH
 
-        # STAGE 0.6: EARLY EXIT FOR EXTRACTIVE ENGINE
-        if search_type == SearchType.EXTRACTIVE:
-            logger.info("   -> Intercepting query for Extractive Engine!")
+        # STAGE 0.6: HYBRID CONTEXT INJECTION (Extractive DB + Vector Search)
+        extractive_context_text = ""
+        if search_type in [SearchType.EXTRACTIVE, SearchType.CHUNK_SEARCH]:
+            logger.info("   -> Checking Extractive DB for any structured identifiers matching the query.")
             try:
-                # Naive intent parsing for entity_type from the query
+                # We do not use a hardcoded list of entities anymore.
+                # Instead of string-matching valid_entities, we let the ExtractiveEngine do a dynamic lookup
+                # across all available entity types in the DB that might match the query keywords!
+                from .extractive_engine import ExtractiveEngine
+                engine = ExtractiveEngine(self.db, str(self.tenant_id))
+                
+                from sqlalchemy import text
+                kb_ids_formatted = "','".join(kb_ids)
+                stmt = text(f"SELECT DISTINCT entity_type, entity_value, page_number, entity_status FROM document_entities WHERE document_id IN ('{kb_ids_formatted}')")
+                
+                result = await self.db.execute(stmt)
+                db_entities = result.fetchall()
+                
+                matched_types = set()
+                
+                authoritative_entities_list = []
                 q_lower = query.lower()
-                entity_type = None
-                for et in ["gstin", "pan", "invoice_number", "vin", "engine_number", "address", "email", "phone", "hsn", "part_number", "registration_number"]:
-                    if et.replace('_', ' ') in q_lower or et in q_lower:
-                        entity_type = et.upper()
-                        break
+                
+                logger.info(f"   [DEBUG] q_lower: '{q_lower}'")
+                logger.info(f"   [DEBUG] fetched {len(db_entities)} rows from DB")
+                
+                for row in db_entities:
+                    e_type = row.entity_type.lower().replace('_', ' ')
+                    e_type_normalized = row.entity_type.lower().replace(' ', '_')
+                    logger.info(f"   [DEBUG] checking row: type='{e_type}', val='{row.entity_value}'")
+                    
+                    is_requested = False
+                    if route_result and route_result.requested_entities:
+                        is_requested = any(req.lower() == e_type_normalized for req in route_result.requested_entities)
                         
-                if entity_type:
-                    from .extractive_engine import ExtractiveEngine
-                    engine = ExtractiveEngine(self.db, str(self.tenant_id))
-                    ext_result = await engine.execute_query(entity_type, kb_ids)
-                    if ext_result:
-                        val = ext_result["extracted_value"]
-                        meta = ext_result["metadata"]
-                        status_warning = "" if meta.get("entity_status") == "VERIFIED" else f"\n\nWARNING: Extraction confidence is low. Status: {meta.get('entity_status')}"
-                        context_text = f"EXTRACTED {entity_type}:\n{val}\n\nProvenance:\nPage: {meta['page_number']}\nSource Context: {meta['source_text']}{status_warning}"
+                    if is_requested or e_type in q_lower or str(row.entity_value).lower() in q_lower:
+                        logger.info(f"   [DEBUG] MATCHED: {e_type}")
+                        matched_types.add(e_type)
+                        trust_score = 1.0 if row.entity_status == "VERIFIED" else 0.8
+                        authoritative_entities_list.append({
+                            "entity_type": row.entity_type,
+                            "value": row.entity_value,
+                            "source": "document_entities",
+                            "page": row.page_number,
+                            "confidence": trust_score
+                        })
+                
+                if authoritative_entities_list:
+                    logger.info(f"   -> Found {len(authoritative_entities_list)} authoritative structured entities.")
+                    
+                    # Deterministic completeness check based on intent
+                    requested_entities = route_result.requested_entities or []
+                    req_set = {str(r).lower().replace(' ', '_') for r in requested_entities}
+                    found_set = {str(mt).lower().replace(' ', '_') for mt in matched_types}
+                    
+                    if req_set:
+                        missing_entities = req_set - found_set
+                        if not missing_entities:
+                            is_complete = True
+                        else:
+                            is_complete = False
+                            logger.info(f"   -> Missing requested entities: {missing_entities}")
+                    else:
+                        # Fallback if LLM didn't specify requested_entities
+                        is_complete = False
                         
+                    is_group_match = route_result is not None and bool(route_result.requested_groups)
+                    if is_complete or (is_group_match and len(authoritative_entities_list) > 0):
+                        logger.info("   -> Structured DB satisfies intent (complete or group match). EARLY EXIT.")
                         return RAGContext(
                             query=query,
                             chunks=[],
                             entity_mentions={},
                             total_tokens=0,
-                            triplet_context=context_text,
-                            search_type=search_type.name
+                            triplet_context="",
+                            search_type=search_type.name,
+                            authoritative_entities=authoritative_entities_list
                         )
+                    else:
+                        logger.info("   -> Structured DB partially satisfies query. Proceeding to Hybrid Vector Search.")
+                        # We do NOT inject this into the triplet context. It will be system-injected in service.py
+                        search_type = SearchType.CHUNK_SEARCH
+                        # We must attach it to the pipeline context state so it can be passed up
+                        # We can store it in a local variable and pass it to RAGContext later
+                else:
+                    search_type = SearchType.CHUNK_SEARCH
                 
-                logger.warning("   -> Extractive Engine returned no results or entity type unclear. Falling back to vector search.")
-                search_type = SearchType.CHUNK_SEARCH
             except Exception as e:
-                logger.error(f"   -> Extractive Engine failed: {e}. Falling back to vector search.", exc_info=True)
+                logger.error(f"   -> Extractive Engine failed: {e}. Falling back to standard vector search.", exc_info=True)
                 search_type = SearchType.CHUNK_SEARCH
 
 
@@ -1273,9 +1328,12 @@ class RAGPipeline:
 
 
 
+        # Merge Hybrid Context
+        final_triplet_context = triplet_context or ""
+        if 'extractive_context_text' in locals() and extractive_context_text:
+            final_triplet_context = extractive_context_text + final_triplet_context
+            
         return RAGContext(
-
-
 
             query=query,
 
@@ -1293,17 +1351,15 @@ class RAGPipeline:
 
 
 
-            triplet_context=triplet_context,
+            triplet_context=final_triplet_context,
 
 
 
             triplets=relevant_triplets if 'relevant_triplets' in locals() else None,
 
-
-
             search_type=search_type.name,
 
-
+            authoritative_entities=authoritative_entities_list if 'authoritative_entities_list' in locals() else None,
 
             personal_memories=personal_memories
 

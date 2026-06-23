@@ -18,10 +18,10 @@ class ExtractiveEngine:
         self.db = db
         self.tenant_id = tenant_id
         
-    async def execute_query(self, entity_type: str, kb_ids: List[str]) -> Optional[Dict[str, Any]]:
+    async def execute_query(self, entity_type: str, kb_ids: List[str]) -> Optional[List[Dict[str, Any]]]:
         """
         Lookup exact entities by type across specified knowledge bases.
-        Returns provenance metadata.
+        Returns provenance metadata for all matched unique entities.
         """
         kb_uuids = [uuid.UUID(k) for k in kb_ids]
         tenant_uuid = uuid.UUID(self.tenant_id)
@@ -34,23 +34,27 @@ class ExtractiveEngine:
                 DocumentEntity.entity_type == entity_type.upper()
             )
             .order_by(DocumentEntity.confidence.desc(), DocumentEntity.created_at.desc())
-            .limit(1)
         )
         
         result = await self.db.execute(query)
-        entity = result.scalar_one_or_none()
+        entities = result.scalars().all()
         
-        if entity:
-            return {
-                "extracted_value": entity.entity_value,
-                "metadata": {
-                    "entity_type": entity.entity_type,
-                    "page_number": entity.page_number,
-                    "source_text": entity.source_text,
-                    "confidence": float(entity.confidence) if entity.confidence else 1.0,
-                    "entity_status": entity.entity_status,
-                    "document_id": str(entity.document_id)
-                }
-            }
+        if entities:
+            # Group by value to deduplicate identical extractions
+            unique_entities = {}
+            for entity in entities:
+                if entity.entity_value not in unique_entities:
+                    unique_entities[entity.entity_value] = {
+                        "extracted_value": entity.entity_value,
+                        "metadata": {
+                            "entity_type": entity.entity_type,
+                            "page_number": entity.page_number,
+                            "source_text": entity.source_text,
+                            "confidence": float(entity.confidence) if entity.confidence else 1.0,
+                            "entity_status": entity.entity_status,
+                            "document_id": str(entity.document_id)
+                        }
+                    }
+            return list(unique_entities.values())
         
         return None
