@@ -1,0 +1,6 @@
+[
+  {"text": "Bill Gates", "type": "PERSON"},
+  {"text": "Microsoft", "type": "ORGANIZATION"},
+  {"text": "Steve Jobs", "type": "PERSON"},
+  {"text": "Apple", "type": "ORGANIZATION"}
+]

@@ -77,7 +77,7 @@ class OntologyResolver:
                     resolved_count += 1
                     
             if resolved_count > 0:
-                logger.info(f"🗺️ Ontology Grounding resolved {resolved_count} coreferences.")
+                logger.info(f" Ontology Grounding resolved {resolved_count} coreferences.")
                 
             return mapping
             

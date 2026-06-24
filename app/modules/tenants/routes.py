@@ -10,7 +10,7 @@ router = APIRouter(prefix="/tenants", tags=["tenants"])
 
 
 @router.post(
-    "/", response_model=schemas.TenantResponse, status_code=status.HTTP_201_CREATED
+    "/", response_model=schemas.TenantResponse, status_code=status.HTTP_200_OK
 )
 async def create_tenant(
     tenant_data: schemas.TenantCreate,

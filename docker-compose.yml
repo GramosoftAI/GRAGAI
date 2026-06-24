@@ -5,7 +5,7 @@ services:
   # PostgreSQL: Primary relational database (Users, Tenants, API Keys, Billing)
   # ============================================================================
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: graphmind-db
     environment:
       POSTGRES_USER: graphmind
@@ -15,7 +15,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U graphmind"]
       interval: 10s
@@ -28,7 +28,7 @@ services:
   # Neo4j: Graph database (Agents, Knowledge Bases, Chunks, Relationships)
   # ============================================================================
   neo4j:
-    image: neo4j:5.15-enterprise
+    image: neo4j:5.15
     container_name: graphmind-neo4j
     environment:
       # CRITICAL: Change these in production

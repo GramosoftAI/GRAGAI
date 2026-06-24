@@ -46,9 +46,13 @@ async def get_tenant_graph(request: Request, limit: int = 100):
                     if not node: return None
                     node_id = node.get("id") or str(node.element_id)
                     if node_id not in nodes:
+                        label = node.get("name") or node.get("subject")
+                        if not label:
+                            label = node.get("text", "")[:20] + "..." if node.get("text") else node.get("id")
+                            
                         nodes[node_id] = {
                             "id": node_id,
-                            "label": node.get("name") or node.get("content", "")[:20] + "...",
+                            "label": label,
                             "type": list(node.labels)[0] if node.labels else "Unknown",
                             "properties": dict(node)
                         }
@@ -150,7 +154,7 @@ async def get_agent_graph(request: Request, agent_id: str, limit: int = 300):
     OPTIONAL MATCH (a)-[r1:OWNS_KB]->(kb:KnowledgeBase)
     OPTIONAL MATCH (kb)-[r2:HAS_CHUNK]->(c:Chunk)
     WITH a, kb, c, r1, r2 LIMIT $limit
-    OPTIONAL MATCH (c)-[r3:MENTIONS|NEXT|RELATED]-(m)
+    OPTIONAL MATCH (c)-[r3:MENTIONS|NEXT|RELATED|EXTRACTED_FROM|SENT|BELONGS_TO]-(m)
     WHERE m.tenant_id = $tenant_id
     RETURN a, kb, c, m, r1, r2, r3
     """
@@ -171,9 +175,13 @@ async def get_agent_graph(request: Request, agent_id: str, limit: int = 300):
                 if not node: return None
                 node_id = node.get("id") or str(node.element_id)
                 if node_id not in nodes:
+                    label = node.get("name") or node.get("subject")
+                    if not label:
+                        label = node.get("text", "")[:20] + "..." if node.get("text") else node.get("id")
+                    
                     nodes[node_id] = {
                         "id": node_id,
-                        "label": node.get("name") or (node.get("content", "")[:20] + "..." if node.get("content") else node.get("id")),
+                        "label": label,
                         "type": list(node.labels)[0] if node.labels else "Unknown",
                         "properties": dict(node)
                     }

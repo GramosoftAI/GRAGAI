@@ -6,10 +6,10 @@ interactions. It converts conversational context into structured triplets
 (Subject, Predicate, Object) and persists them to the Knowledge Graph (Neo4j).
 
 ARCHITECTURE:
-    Conversation Interaction → LLM Analysis → Persistent Facts (Triplets)
-                             → MERGE Entity nodes (deduplicated)
-                             → CREATE typed RELATES_TO edges
-                             → CREATE Memory nodes
+    Conversation Interaction  LLM Analysis  Persistent Facts (Triplets)
+                              MERGE Entity nodes (deduplicated)
+                              CREATE typed RELATES_TO edges
+                              CREATE Memory nodes
 
 DESIGN PRINCIPLES:
     1. Selective Memory: Only extract facts/preferences, not every chat line.
@@ -101,7 +101,7 @@ class MemoryConsolidator:
         Returns:
             Summary of consolidation: {facts_extracted: int, success: bool}
         """
-        logger.info(f"🧠 Memory Consolidation: Analyzing interaction for session {session_id[:8]}")
+        logger.info(f" Memory Consolidation: Analyzing interaction for session {session_id[:8]}")
         
         try:
             # 1. Extract facts via LLM
@@ -120,7 +120,7 @@ class MemoryConsolidator:
             extracted_facts = self._parse_facts(response_text)
             
             if not extracted_facts:
-                logger.debug(f"🧠 Consolidation: No persistent facts found in interaction.")
+                logger.debug(f" Consolidation: No persistent facts found in interaction.")
                 return {"facts_extracted": 0, "success": True}
             
             # 2. Convert to TripletExtractionResult (reusing existing schema)
@@ -131,7 +131,7 @@ class MemoryConsolidator:
             )
             
             # 3. Persist to Neo4j
-            logger.info(f"🧠 Consolidation: Persisting {len(extracted_facts)} facts to Neo4j for tenant {self.tenant_id}")
+            logger.info(f" Consolidation: Persisting {len(extracted_facts)} facts to Neo4j for tenant {self.tenant_id}")
             stats = await self.graph_writer.persist_triplets([extraction_result])
             
             return {
@@ -141,7 +141,7 @@ class MemoryConsolidator:
             }
             
         except Exception as e:
-            logger.error(f"❌ Memory consolidation failed for session {session_id}: {e}", exc_info=True)
+            logger.error(f" Memory consolidation failed for session {session_id}: {e}", exc_info=True)
             return {"facts_extracted": 0, "success": False, "error": str(e)}
 
     def _parse_facts(self, response_text: str) -> List[ExtractedTriplet]:

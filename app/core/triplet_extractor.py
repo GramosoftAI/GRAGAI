@@ -7,16 +7,16 @@ using LLM, then creates typed relationship edges in Neo4j graph.
 INTEGRATION STRATEGY (ZERO BREAKING CHANGES):
     - Runs as a POST-INGESTION hook AFTER existing pipeline succeeds
     - Feature-flagged via settings.use_triplet_extraction (OFF by default)
-    - Creates NEW node/edge types (Triplet, RELATES_TO) — never modifies existing
+    - Creates NEW node/edge types (Triplet, RELATES_TO)  never modifies existing
     - Existing MENTIONS, SIMILAR, NEXT edges remain untouched
     - If triplet extraction fails, ingestion still succeeds (graceful degradation)
 
 ARCHITECTURE:
-    Chunk Text → LLM Extract Triplets → (Subject, Predicate, Object)
-                                       → MERGE Entity nodes (deduplicated)
-                                       → CREATE typed RELATES_TO edges
-                                       → CREATE Triplet nodes with embedded text
-                                       → Embed triplet strings for semantic search
+    Chunk Text  LLM Extract Triplets  (Subject, Predicate, Object)
+                                        MERGE Entity nodes (deduplicated)
+                                        CREATE typed RELATES_TO edges
+                                        CREATE Triplet nodes with embedded text
+                                        Embed triplet strings for semantic search
 
 GRAPH SCHEMA (additive):
     (:Entity {text, type, tenant_id})
@@ -34,6 +34,35 @@ from dataclasses import dataclass, field
 
 from .config import get_settings
 from .embeddings import EmbeddingGenerator
+import urllib.parse
+
+# ============================================================================
+# RDF SEMANTIC ONTOLOGY MAPPER
+# ============================================================================
+CANONICAL_RELATIONS = {
+    "issued": "ISSUED_BY",
+    "created_bill": "ISSUED_BY",
+    "generated_invoice": "ISSUED_BY",
+    "purchased": "PURCHASED",
+    "bought": "PURCHASED",
+    "ordered": "PURCHASED",
+    "supplied_by": "SUPPLIED_BY",
+    "provided_by": "SUPPLIED_BY",
+    "contains": "CONTAINS_PRODUCT",
+    "includes": "CONTAINS_PRODUCT",
+    "belongs_to": "BELONGS_TO",
+    "located_in": "LOCATED_IN",
+    "has_amount": "HAS_AMOUNT",
+    "has_date": "HAS_DATE",
+    "references": "REFERENCES",
+    "derived_from": "DERIVED_FROM"
+}
+
+def create_uri(entity_type: str, text: str) -> str:
+    """Generate globally unique RDF-compliant URI for an entity."""
+    clean_type = urllib.parse.quote(entity_type.lower().strip())
+    clean_text = urllib.parse.quote(text.lower().strip().replace(' ', '_'))
+    return f"https://grag.ai/kg/{clean_type}/{clean_text}"
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -55,14 +84,16 @@ class ExtractedTriplet:
 
     @property
     def text(self) -> str:
-        """Triplet as searchable string: 'Einstein → born_in → Ulm'"""
-        return f"{self.subject} → {self.predicate} → {self.object}"
+        """Triplet as searchable string: 'Einstein  born_in  Ulm'"""
+        return f"{self.subject}  {self.predicate}  {self.object}"
 
     def normalize(self) -> "ExtractedTriplet":
-        """Normalize triplet fields for consistency."""
+        """Normalize triplet fields for consistency and apply RDF Ontology Mapping."""
+        raw_pred = self.predicate.strip().lower().replace(" ", "_")
+        canonical_pred = CANONICAL_RELATIONS.get(raw_pred, raw_pred.upper())
         return ExtractedTriplet(
             subject=self.subject.strip().lower(),
-            predicate=self.predicate.strip().lower().replace(" ", "_"),
+            predicate=canonical_pred,
             object=self.object.strip().lower(),
             subject_type=self.subject_type.upper().strip(),
             object_type=self.object_type.upper().strip(),
@@ -86,8 +117,8 @@ class TripletExtractionResult:
 # TRIPLET EXTRACTOR (LLM-BASED)
 # ============================================================================
 
-# Extraction prompt — deterministic, structured output
-# NOTE: All literal {{ }} are escaped for Python .format() — only {text} is a placeholder
+# Extraction prompt  deterministic, structured output
+# NOTE: All literal {{ }} are escaped for Python .format()  only {text} is a placeholder
 TRIPLET_EXTRACTION_PROMPT = """Extract knowledge triplets from the following text.
 Each triplet must be a factual relationship in the form (Subject, Predicate, Object).
 
@@ -172,17 +203,30 @@ class TripletExtractor:
 
         try:
             # --- ONTOLOGY GROUNDING INJECTION ---
-            valid_types = "PERSON, ORGANIZATION, LOCATION, CONCEPT, EVENT, PRODUCT, TECHNOLOGY, NUMERIC"
+            valid_types_str = "PERSON, ORGANIZATION, LOCATION, CONCEPT, EVENT, PRODUCT, TECHNOLOGY, NUMERIC"
+            valid_relations_str = ""
+            rules_text = ""
             if self.tenant_id:
                 from ..modules.ontology.service import OntologyService
                 ont_svc = OntologyService(self.tenant_id)
                 ont_data = await ont_svc.get_ontology()
                 if ont_data.get("classes"):
-                    valid_types = ", ".join([c["name"] for c in ont_data["classes"]])
+                    valid_types_str = ", ".join([c["name"] for c in ont_data["classes"]])
+                if ont_data.get("relations"):
+                    # Avoid duplicate empty objects if no relations
+                    rels = [r["name"] for r in ont_data["relations"] if r.get("name")]
+                    if rels:
+                        valid_relations_str = "\nValid relationship predicates: " + ", ".join(rels)
+                if ont_data.get("rules"):
+                    rules_list = [f"({r['source_class']} -> {r['relation']} -> {r['target_class']})" for r in ont_data["rules"] if r.get("source_class")]
+                    if rules_list:
+                        rules_text = "\nALLOWED RELATIONSHIP RULES (STRICT SCHEMA):\n" + "\n".join(rules_list) + "\nYou MUST ONLY use these exact relationships if they apply."
+
+            replacement = f"Valid entity types: {valid_types_str}{valid_relations_str}{rules_text}"
             
             prompt = TRIPLET_EXTRACTION_PROMPT.replace(
                 "Valid entity types: PERSON, ORGANIZATION, LOCATION, CONCEPT, EVENT, PRODUCT, TECHNOLOGY, NUMERIC",
-                f"Valid entity types: {valid_types}"
+                replacement
             ).format(text=chunk_text[:2000])
 
             logger.info(f"Calling LLM for triplet extraction (chunk {chunk_id[:8]}, text length: {len(chunk_text)})")
@@ -222,9 +266,28 @@ class TripletExtractor:
         """
         import asyncio
         
-        logger.info(f"🚀 Batch extracting triplets from {len(chunks)} chunks in parallel...")
+        logger.info(f" Batch extracting triplets from {len(chunks)} chunks in parallel...")
         
         # Create tasks for all chunks
+        
+        # --- DYNAMIC SCHEMA DISCOVERY (Ontology-Aware Ingestion) ---
+        if self.tenant_id and chunks:
+            try:
+                from .schema_detector import SchemaDetector
+                from ..modules.ontology.service import OntologyService
+                
+                sample_text = "\n".join([c.get("text", "") for c in chunks[:3]])
+                if sample_text:
+                    detector = SchemaDetector()
+                    schema = await detector.discover_schema(sample_text)
+                    
+                    if schema.get("classes") or schema.get("relations"):
+                        ont_svc = OntologyService(self.tenant_id)
+                        await ont_svc.auto_register_schema(schema)
+            except Exception as e:
+                logger.warning(f"Dynamic schema detection failed: {e}")
+                
+        # --- TRIPLET EXTRACTION ---
         tasks = [
             self.extract_from_chunk(
                 chunk_id=chunk["chunk_id"],
@@ -239,7 +302,7 @@ class TripletExtractor:
         total_triplets = sum(len(r.triplets) for r in results)
         failed = sum(1 for r in results if not r.success)
         logger.info(
-            f"✅ Batch extraction complete: {total_triplets} triplets "
+            f" Batch extraction complete: {total_triplets} triplets "
             f"from {len(chunks)} chunks ({failed} failures)"
         )
         return results
@@ -305,7 +368,7 @@ class TripletGraphWriter:
     """
     Persist extracted triplets to Neo4j graph.
 
-    CREATES (additive only — never modifies existing graph):
+    CREATES (additive only  never modifies existing graph):
         1. MERGE Entity nodes (deduplicated by text+type+tenant)
         2. CREATE typed RELATES_TO edges between entities
         3. CREATE Triplet nodes with embedded text for semantic search
@@ -352,10 +415,10 @@ class TripletGraphWriter:
                     })
 
         if not all_triplets:
-            logger.info("📊 No triplets to persist")
+            logger.info(" No triplets to persist")
             return {"entities_created": 0, "relationships_created": 0, "triplets_created": 0}
 
-        logger.info(f"📊 Persisting {len(all_triplets)} triplets to Neo4j...")
+        logger.info(f" Persisting {len(all_triplets)} triplets to Neo4j...")
 
         # Step 1: ONTOLOGY GROUNDING (Coreference Resolution)
         from .ontology_resolver import OntologyResolver
@@ -383,7 +446,15 @@ class TripletGraphWriter:
                 canonical_entities_to_merge[f"{t.subject}|{t.subject_type}"] = {
                     "text": t.subject,
                     "type": t.subject_type,
-                    "embedding": subj_mapped["embedding"]
+                    "embedding": subj_mapped["embedding"],
+                    "uri": create_uri(t.subject_type, t.subject)
+                }
+            else:
+                canonical_entities_to_merge[f"{t.subject}|{t.subject_type}"] = {
+                    "text": t.subject,
+                    "type": t.subject_type,
+                    "embedding": [],
+                    "uri": create_uri(t.subject_type, t.subject)
                 }
                 
             obj_mapped = canonical_map.get(t.object)
@@ -392,7 +463,15 @@ class TripletGraphWriter:
                 canonical_entities_to_merge[f"{t.object}|{t.object_type}"] = {
                     "text": t.object,
                     "type": t.object_type,
-                    "embedding": obj_mapped["embedding"]
+                    "embedding": obj_mapped["embedding"],
+                    "uri": create_uri(t.object_type, t.object)
+                }
+            else:
+                canonical_entities_to_merge[f"{t.object}|{t.object_type}"] = {
+                    "text": t.object,
+                    "type": t.object_type,
+                    "embedding": [],
+                    "uri": create_uri(t.object_type, t.object)
                 }
 
         # Step 1: MERGE Entity nodes (deduplicated + embeddings)
@@ -411,7 +490,7 @@ class TripletGraphWriter:
         }
 
         logger.info(
-            f"✅ Triplet persistence complete: "
+            f" Triplet persistence complete: "
             f"{entities_created} entities, "
             f"{relationships_created} relationships, "
             f"{triplets_created} triplet nodes"
@@ -431,8 +510,12 @@ class TripletGraphWriter:
             text: e.text,
             type: e.type
         })
-        ON CREATE SET ent.id = randomUUID(), ent.created_at = timestamp()
-        SET ent.embedding = CASE WHEN e.embedding IS NOT NULL AND size(e.embedding) > 0 THEN e.embedding ELSE ent.embedding END
+        ON CREATE SET 
+            ent.id = randomUUID(), 
+            ent.created_at = timestamp(),
+            ent.uri = e.uri
+        SET ent.embedding = CASE WHEN e.embedding IS NOT NULL AND size(e.embedding) > 0 THEN e.embedding ELSE ent.embedding END,
+            ent.uri = CASE WHEN ent.uri IS NULL THEN e.uri ELSE ent.uri END
         RETURN count(ent) as count
         """
 
@@ -445,7 +528,7 @@ class TripletGraphWriter:
             )
             return len(entity_list)
         except Exception as e:
-            logger.warning(f"⚠️ Entity MERGE failed: {e}")
+            logger.warning(f" Entity MERGE failed: {e}")
             return 0
 
     async def _create_relationships(self, all_triplets: List[Dict]) -> int:
@@ -471,11 +554,15 @@ class TripletGraphWriter:
         UNWIND rel_list AS r
         MATCH (s:TripletEntity {tenant_id: $tenant_id, text: r.subject_text, type: r.subject_type})
         MATCH (o:TripletEntity {tenant_id: $tenant_id, text: r.object_text, type: r.object_type})
+        MATCH (c:Chunk {id: r.chunk_id, tenant_id: $tenant_id})
         CREATE (s)-[:RELATES_TO {
             predicate: r.predicate,
             chunk_id: r.chunk_id,
             confidence: r.confidence,
-            tenant_id: $tenant_id
+            tenant_id: $tenant_id,
+            source_document: CASE WHEN c.source IS NOT NULL THEN c.source ELSE 'unknown' END,
+            extraction_model: 'deepinfra-llm',
+            created_at: timestamp()
         }]->(o)
         RETURN count(*) as count
         """
@@ -489,7 +576,7 @@ class TripletGraphWriter:
             )
             return len(rel_data)
         except Exception as e:
-            logger.warning(f"⚠️ Relationship creation failed: {e}")
+            logger.warning(f" Relationship creation failed: {e}")
             return 0
 
     async def _create_triplet_nodes(self, all_triplets: List[Dict]) -> int:
@@ -502,7 +589,7 @@ class TripletGraphWriter:
                 triplet_texts
             )
         except Exception as e:
-            logger.warning(f"⚠️ Triplet embedding generation failed: {e}")
+            logger.warning(f" Triplet embedding generation failed: {e}")
             embeddings = [None] * len(triplet_texts)
 
         node_data = []
@@ -550,7 +637,7 @@ class TripletGraphWriter:
             )
             return len(node_data)
         except Exception as e:
-            logger.warning(f"⚠️ Triplet node creation failed: {e}")
+            logger.warning(f" Triplet node creation failed: {e}")
             return 0
 
 
@@ -563,11 +650,11 @@ class TripletRetriever:
     Retrieve relevant triplets for a query using semantic search.
 
     INTEGRATION: Called as an optional enrichment step in RAG pipeline.
-    Does NOT replace existing retrieval — ADDS triplet context alongside chunks.
+    Does NOT replace existing retrieval  ADDS triplet context alongside chunks.
 
     FLOW:
-        Query → Embed → Search Triplet embeddings → Get relevant (S,P,O)
-              → Expand to neighboring entities → Format as context
+        Query  Embed  Search Triplet embeddings  Get relevant (S,P,O)
+               Expand to neighboring entities  Format as context
     """
 
     def __init__(self, tenant_id: str):
@@ -650,7 +737,7 @@ class TripletRetriever:
             return scored_triplets[:top_k]
 
         except Exception as e:
-            logger.warning(f"⚠️ Triplet search failed: {e}")
+            logger.warning(f" Triplet search failed: {e}")
             return []
 
     async def get_entity_neighborhood(
@@ -689,7 +776,7 @@ class TripletRetriever:
             )
             return [dict(r) for r in results] if results else []
         except Exception as e:
-            logger.warning(f"⚠️ Entity neighborhood search failed: {e}")
+            logger.warning(f" Entity neighborhood search failed: {e}")
             return []
 
     def format_triplets_as_context(self, triplets: List[Dict]) -> str:
@@ -701,7 +788,7 @@ class TripletRetriever:
         for t in triplets:
             score = t.get("similarity", 0)
             lines.append(
-                f"  • {t['subject']} —[{t['predicate']}]→ {t['object']} "
+                f"   {t['subject']} [{t['predicate']}] {t['object']} "
                 f"(relevance: {score:.2f})"
             )
         return "\n".join(lines)

@@ -29,6 +29,13 @@ class AgentCreate(BaseModel):
         None,
         description="System prompt for specific agent behavior (e.g., 'You are a Python expert...')",
     )
+    agent_type: str = Field("platform", description="'platform' or 'integrated'")
+    organization_name: Optional[str] = Field(None, description="Organization Name")
+    contact_phone: Optional[str] = Field(None, description="Contact Phone")
+    contact_email: Optional[str] = Field(None, description="Contact Email")
+    website_url: Optional[str] = Field(None, description="Website URL")
+    fallback_message_enabled: bool = Field(True, description="Enable fallback message")
+    brand_persona: Optional[str] = Field(None, description="Brand persona for integrated agents")
 
     class Config:
         json_schema_extra = {
@@ -52,6 +59,13 @@ class AgentUpdate(BaseModel):
     personality_id: Optional[UUID] = Field(None)
     system_prompt: Optional[str] = Field(None)
     is_active: Optional[bool] = Field(None)
+    agent_type: Optional[str] = Field(None)
+    organization_name: Optional[str] = Field(None)
+    contact_phone: Optional[str] = Field(None)
+    contact_email: Optional[str] = Field(None)
+    website_url: Optional[str] = Field(None)
+    fallback_message_enabled: Optional[bool] = Field(None)
+    brand_persona: Optional[str] = Field(None)
 
     class Config:
         json_schema_extra = {
@@ -79,12 +93,20 @@ class AgentResponse(BaseModel):
     personality: Optional[str]
     personality_id: Optional[UUID]
     system_prompt: Optional[str]
+    agent_type: str
+    organization_name: Optional[str]
+    contact_phone: Optional[str]
+    contact_email: Optional[str]
+    website_url: Optional[str]
+    fallback_message_enabled: bool
+    brand_persona: Optional[str]
     is_active: bool
     deleted_at: Optional[datetime] = Field(
         None, description="Soft delete timestamp (null = not deleted)"
     )
     created_at: datetime
     updated_at: datetime
+    connected_integrations: list[str] = Field(default_factory=list, description="List of integrations connected to any KB of this agent")
 
     class Config:
         from_attributes = True  # SQLAlchemy ORM mode
@@ -127,6 +149,7 @@ class AgentEnhancedResponse(BaseModel):
     kb_id: Optional[UUID]
     is_active: bool
     created_at: datetime
+    connected_integrations: list[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

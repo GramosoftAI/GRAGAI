@@ -1,0 +1,6 @@
+[
+  {"text": "Google", "type": "ORGANIZATION"},
+  {"text": "Larry Page", "type": "PERSON"},
+  {"text": "Sergey Brin", "type": "PERSON"},
+  {"text": "Mountain View", "type": "LOCATION"}
+]

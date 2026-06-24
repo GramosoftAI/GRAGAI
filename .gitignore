@@ -1,10 +1,23 @@
-# Python
+# Environment and Configs
+.env
+.env.local
+.env.*.local
+.env.production
+config.yaml
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+mind/
+
+# Python Cache and Build
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -21,44 +34,78 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
-venv/
-ENV/
-mind/
-
-# Environment Variables
-.env
-.env.production
-.env.local
-.env.*.local
-
 # Logs
 logs/
 *.log
 
-# Project specific
-tester_zone/
-tests/
-scratch/
-tmp/
+# IDEs and Tools
 .vscode/
 .idea/
 .streamlit/
+.DS_Store
+Thumbs.db
+alembic.ini
 
-# Analysis docs
+# Project specific ignores
+tmp/
+scratch/
+scripts/
+tester_zone/
+poc/
+evaluation/
+vector_extracted/
+*.zip
+scratch_mod*.py
+test_chunk*.py
+
+# Analysis & Docs (Local)
+docs/analysis/
+*.pptx
+*.xlsx
+*.pdf
+
+# Deploy keys
+graphmind_deploy_key*
+*deploy_key*
+
+README_old.md
+README (1) (1).md
+
+# Testing/Patching/Temporary Root Scripts
+apply_disconnect_fix.py
+apply_ui.py
+check_user_columns.py
+debug_db.py
+debug_ws.py
+drop_tables.py
+fix_cards.py
+fix_config.py
+fix_dates.py
+fix_llm3.py
+fix_modals.py
+insert_route.py
+patch_db.py
+patch_routes.py
+patch_service.py
+test_generate.py
+test_integrated_agents.py
+test_labels.py
+test_passlib.txt
+test_pipeline.py
+test_query.py
+test_triplet_diag.py
+test_ws_embed.py
+temp_page.tsx
+rewrite.py
+requirements-1.txt
+scratch.py
+scratch_ingest_res.json
+deploy_test.txt
+response.md
+
+# Analysis & Documentation
 cognee_full_analysis_part*.md
 competitor_strategic_analysis.md
 API_DOCUMENTATION.md
-
-# Testing scripts in root
-check_user_columns.py
-debug_db.py
-drop_tables.py
-test_triplet_diag.py
-
-# Large files
-*.pptx
-*.pdf
-
-# Streamlit
-.streamlit/config.toml
+graphmind_memory_architecture_analysis.md
+Cognee_Infrastructure_Blueprint.pptx

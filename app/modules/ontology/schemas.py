@@ -25,7 +25,22 @@ class OntologyRelationResponse(BaseModel):
     name: str
     description: Optional[str]
 
+class OntologyRuleCreate(BaseModel):
+    """Request to create an ontology rule (Source -> Relation -> Target)"""
+    source_class: str = Field(..., description="Source entity class")
+    relation: str = Field(..., description="Relationship name")
+    target_class: str = Field(..., description="Target entity class")
+    description: Optional[str] = Field(None, description="Detailed description")
+
+class OntologyRuleResponse(BaseModel):
+    """Response for an ontology rule"""
+    source_class: str
+    relation: str
+    target_class: str
+    description: Optional[str]
+
 class OntologyResponse(BaseModel):
     """Full ontology overview for a tenant"""
     classes: List[OntologyClassResponse]
     relations: List[OntologyRelationResponse]
+    rules: List[OntologyRuleResponse]

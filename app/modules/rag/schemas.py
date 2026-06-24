@@ -33,6 +33,11 @@ class SourceChunk(BaseModel):
     reason: str = Field(
         default="", description="Why retrieved (SIMILAR, ENTITY, NEXT, Seed)"
     )
+    source: Optional[str] = Field(None, description="Source URL or filename")
+    kb_id: Optional[str] = Field(None, description="Knowledge base ID / file ID")
+    content_type: Optional[str] = Field(None, description="Type of content: text/html, text/plain, or original")
+
+
 
 
 class RAGContextInfo(BaseModel):

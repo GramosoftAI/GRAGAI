@@ -1,8 +1,8 @@
-"""PDF Extraction Service — Gdocz SDK (Primary) + pdfplumber (Fallback)
+"""PDF Extraction Service  Gdocz SDK (Primary) + pdfplumber (Fallback)
 
 ARCHITECTURE:
-    Primary:  Gdocz SDK → Converts PDF to clean markdown via cloud API
-    Fallback: pdfplumber + AI-OCR → Local extraction with Vision LLM for scans
+    Primary:  Gdocz SDK  Converts PDF to clean markdown via cloud API
+    Fallback: pdfplumber + AI-OCR  Local extraction with Vision LLM for scans
 
 STRATEGY:
     1. Try Gdocz SDK first (best quality, handles complex PDFs + scans)
@@ -13,13 +13,13 @@ STRATEGY:
 MARKDOWN CLEANING:
     The raw markdown from Gdocz contains formatting artifacts that are
     noise for embedding models. We clean:
-    - Headers (## Title → Title)
-    - Bold/Italic (**text**, *text* → text)
-    - Links ([text](url) → text)
-    - Images (![alt](url) → removed)
-    - Tables (| col | → flattened to sentences)
-    - Code blocks (```code``` → code)
-    - HTML tags (<tag> → removed)
+    - Headers (## Title  Title)
+    - Bold/Italic (**text**, *text*  text)
+    - Links ([text](url)  text)
+    - Images (![alt](url)  removed)
+    - Tables (| col |  flattened to sentences)
+    - Code blocks (```code```  code)
+    - HTML tags (<tag>  removed)
     - Excessive whitespace normalized
 
 NON-BREAKING:
@@ -42,15 +42,94 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+class ExtractedText(str):
+    def __new__(cls, clean_text: str, raw_html: str, is_html: bool = False):
+        obj = super().__new__(cls, clean_text)
+        obj.raw_html = raw_html
+        obj.is_html = is_html
+        return obj
+
+
 class PDFExtractor:
     """
     PDF content extraction with dual-layer strategy:
-    1. Gdocz SDK (primary) — Cloud-based, high-quality PDF → Markdown
-    2. pdfplumber (fallback) — Local extraction with AI-OCR for scans
+    1. Gdocz SDK (primary)  Cloud-based, high-quality PDF  Markdown
+    2. pdfplumber (fallback)  Local extraction with AI-OCR for scans
 
     Usage:
         text = await PDFExtractor.extract(pdf_bytes, filename="doc.pdf")
     """
+
+    @staticmethod
+    async def extract_tables_to_json(pdf_bytes: bytes) -> list:
+        """
+        Extract structured tables from PDF using pdfplumber into JSONB friendly format.
+        Returns a list of dicts:
+        [{
+            "page_number": 1,
+            "table_index": 0,
+            "row_index": 0,
+            "row_data": {"Part Number": "123", "Price": "5000"}
+        }]
+        """
+        import pdfplumber
+        import io
+        
+        extracted_tables = []
+        try:
+            # Run blocking pdfplumber open and extraction in a thread pool
+            def _extract() -> list:
+                results = []
+                with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                    for page_idx, page in enumerate(pdf.pages):
+                        tables = page.extract_tables()
+                        for table_idx, table in enumerate(tables):
+                            if not table or len(table) < 2:
+                                continue
+                                
+                            # Extract headers
+                            headers = table[0]
+                            headers = [str(h).strip().replace('\n', ' ') if h else f"col_{i}" for i, h in enumerate(headers)]
+                            
+                            # Ensure unique headers if there are duplicates
+                            unique_headers = []
+                            for i, h in enumerate(headers):
+                                if h in unique_headers:
+                                    unique_headers.append(f"{h}_{i}")
+                                else:
+                                    unique_headers.append(h)
+                            headers = unique_headers
+
+                            # Extract rows
+                            for row_idx, row in enumerate(table[1:]):
+                                row_data = {}
+                                has_data = False
+                                for i, cell in enumerate(row):
+                                    if i < len(headers):
+                                        col_name = headers[i]
+                                        cell_val = str(cell).strip().replace('\n', ' ') if cell else ""
+                                        row_data[col_name] = cell_val
+                                        if cell_val:
+                                            has_data = True
+                                
+                                # Only append if the row has actual data
+                                if has_data:
+                                    results.append({
+                                        "page_number": page_idx + 1,
+                                        "table_index": table_idx,
+                                        "row_index": row_idx,
+                                        "row_data": row_data
+                                    })
+                return results
+
+            loop = asyncio.get_event_loop()
+            extracted_tables = await loop.run_in_executor(None, _extract)
+            logger.info(f" Extracted {len(extracted_tables)} structured table rows from PDF")
+            
+        except Exception as e:
+            logger.error(f" Failed to extract tables: {e}", exc_info=True)
+            
+        return extracted_tables
 
     @staticmethod
     async def extract(
@@ -58,13 +137,13 @@ class PDFExtractor:
         filename: str = "document.pdf",
         tenant_id: Optional[str] = None,
         agent_id: Optional[str] = None,
-    ) -> str:
+    ) -> ExtractedText:
         """
         Extract text from PDF bytes using the best available method.
 
         FLOW:
         1. Try Gdocz SDK (cloud API, handles complex/scanned PDFs)
-        2. If Gdocz fails → fall back to pdfplumber + AI-OCR
+        2. If Gdocz fails  fall back to pdfplumber + AI-OCR
         3. Clean raw output into GraphRAG-friendly text
         4. Return cleaned text ready for chunking
 
@@ -75,46 +154,48 @@ class PDFExtractor:
             agent_id: For billing/tracking
 
         Returns:
-            Cleaned text string ready for ingestion pipeline
+            ExtractedText: Subclass of str containing cleaned text, with .raw_html and .is_html properties.
 
         Raises:
             ValueError: If no text could be extracted from the PDF
         """
-        logger.info(f"📄 PDF Extraction starting: {filename} ({len(pdf_bytes)} bytes)")
+        logger.info(f" PDF Extraction starting: {filename} ({len(pdf_bytes)} bytes)")
 
         extracted_text = ""
 
         # ============= PRIMARY: GDOCZ SDK =============
         if settings.gdocz_api_key:
             try:
-                extracted_text = await PDFExtractor._extract_gdocz(
+                raw_html = await PDFExtractor._extract_gdocz(
                     pdf_bytes, filename
                 )
-                if extracted_text and extracted_text.strip():
+                if raw_html and raw_html.strip():
                     logger.info(
-                        f"✅ Gdocz extraction success: {filename} "
-                        f"({len(extracted_text)} chars raw markdown)"
+                        f" Gdocz extraction success: {filename} "
+                        f"({len(raw_html)} chars raw HTML/markdown)"
                     )
-                    # Clean markdown → GraphRAG-friendly text
-                    cleaned = PDFExtractor._clean_markdown_for_rag(extracted_text)
+                    # Clean page markers if present in HTML
+                    raw_html_clean = re.sub(r"<---- Page \d+ ---->\r?\n?", "", raw_html)
+                    # Clean markdown / HTML for RAG
+                    cleaned = PDFExtractor._clean_markdown_for_rag(raw_html_clean)
                     logger.info(
-                        f"✅ Cleaned for RAG: {len(cleaned)} chars "
-                        f"(from {len(extracted_text)} raw)"
+                        f" Cleaned for RAG: {len(cleaned)} chars "
+                        f"(from {len(raw_html_clean)} raw)"
                     )
-                    return cleaned
+                    return ExtractedText(cleaned, raw_html_clean, is_html=True)
                 else:
                     logger.warning(
-                        f"⚠️ Gdocz returned empty result for {filename}. "
+                        f" Gdocz returned empty result for {filename}. "
                         f"Falling back to pdfplumber."
                     )
             except Exception as e:
                 logger.warning(
-                    f"⚠️ Gdocz extraction failed for {filename}: {e}. "
+                    f" Gdocz extraction failed for {filename}: {e}. "
                     f"Falling back to pdfplumber."
                 )
         else:
             logger.info(
-                "ℹ️ GDOCZ_API_KEY not configured. Using pdfplumber directly."
+                " GDOCZ_API_KEY not configured. Using pdfplumber directly."
             )
 
         # ============= FALLBACK: PDFPLUMBER + AI-OCR =============
@@ -124,12 +205,12 @@ class PDFExtractor:
             )
             if extracted_text and extracted_text.strip():
                 logger.info(
-                    f"✅ pdfplumber extraction success: {filename} "
+                    f" pdfplumber extraction success: {filename} "
                     f"({len(extracted_text)} chars)"
                 )
-                return extracted_text
+                return ExtractedText(extracted_text, extracted_text, is_html=False)
         except Exception as e:
-            logger.error(f"❌ pdfplumber also failed for {filename}: {e}")
+            logger.error(f" pdfplumber also failed for {filename}: {e}")
 
         # ============= BOTH FAILED =============
         raise ValueError(
@@ -144,51 +225,44 @@ class PDFExtractor:
     @staticmethod
     async def _extract_gdocz(pdf_bytes: bytes, filename: str) -> str:
         """
-        Extract PDF content using Gdocz SDK (cloud API).
-
-        The SDK is synchronous, so we run it in a thread pool executor
-        to avoid blocking the async event loop.
-
-        Args:
-            pdf_bytes: Raw PDF bytes
-            filename: Original filename
-
-        Returns:
-            Raw markdown string from Gdocz
+        Extract PDF content using Gdocz OCR server.
         """
         def _sync_gdocz_convert(pdf_data: bytes, fname: str) -> str:
-            """Synchronous wrapper for Gdocz SDK (runs in thread pool)."""
-            from gdocz_sdk import GdoczaiClient, ConvertOptions
+            import requests
+            url = "https://gdocz.gramopro.ai/ocr/ocr/pdf"
+            headers = {"X-API-Key": settings.gdocz_api_key}
+            files = {"file": (fname, pdf_data, "application/pdf")}
+            
+            # Smart determination of document type
+            doc_type = "GENERAL"
+            fname_lower = fname.lower()
+            if "resume" in fname_lower or "cv" in fname_lower or "profile" in fname_lower:
+                doc_type = "resume"
+            elif "invoice" in fname_lower or "bill" in fname_lower:
+                doc_type = "INVOICE"
+            elif "quote" in fname_lower or "quotation" in fname_lower:
+                doc_type = "QUOTATION"
+            elif "price" in fname_lower:
+                doc_type = "PRICE_LIST"
 
-            client = GdoczaiClient(api_key=settings.gdocz_api_key)
+            data = {
+                "model": "chandra",
+                "output_format": "html",
+                "document_type": doc_type
+            }
 
-            options = ConvertOptions(
-                mode="chandra",  # Best quality extraction mode
-            )
+            logger.info(f"Calling Gdocz `/ocr/pdf` directly with document_type: {doc_type}")
+            response = requests.post(url, files=files, data=data, headers=headers, timeout=600)
+            
+            if response.status_code != 200:
+                raise ValueError(f"Gdocz API returned status code {response.status_code}: {response.text}")
+                
+            res_json = response.json()
+            if not res_json.get("success"):
+                raise ValueError(f"Gdocz API error: {res_json.get('error')}")
+                
+            return res_json.get("markdown", "")
 
-            # Write bytes to a temp file (SDK expects file path)
-            tmp_path = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    suffix=".pdf", delete=False, prefix="graphmind_"
-                ) as tmp:
-                    tmp.write(pdf_data)
-                    tmp_path = tmp.name
-
-                logger.debug(f"Gdocz converting: {tmp_path}")
-                result = client.convert(tmp_path, options=options)
-
-                return result.markdown or ""
-
-            finally:
-                # Clean up temp file
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-
-        # Run synchronous SDK call in thread pool (non-blocking)
         loop = asyncio.get_event_loop()
         raw_markdown = await loop.run_in_executor(
             None, _sync_gdocz_convert, pdf_bytes, filename
@@ -237,7 +311,7 @@ class PDFExtractor:
                 else:
                     # OCR FALLBACK: Page is likely a scan/image
                     logger.info(
-                        f"🔄 Empty page {page.page_number} in {filename}. "
+                        f" Empty page {page.page_number} in {filename}. "
                         f"Attempting AI-OCR..."
                     )
                     try:
@@ -261,13 +335,13 @@ class PDFExtractor:
                                 f"{ocr_text}\n\n"
                             )
                             logger.info(
-                                f"✅ AI-OCR success for page {page.page_number}"
+                                f" AI-OCR success for page {page.page_number}"
                             )
                     except Exception as ocr_err:
                         logger.error(
-                            f"❌ AI-OCR failed for page {page.page_number}: {ocr_err}"
+                            f" AI-OCR failed for page {page.page_number}: {ocr_err}"
                         )
-                        # Continue — other pages may have text
+                        # Continue  other pages may have text
 
         return document_text
 
@@ -314,52 +388,45 @@ class PDFExtractor:
         text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
 
         # ============= STEP 2: CONVERT LINKS TO TEXT =============
-        # [link text](url) → link text
+        # [link text](url)  link text
         text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
 
         # ============= STEP 3: REMOVE CODE FENCES =============
-        # ```language\ncode\n``` → code
+        # ```language\ncode\n```  code
         text = re.sub(r"```[\w]*\n?", "", text)
 
         # ============= STEP 4: REMOVE HTML TAGS =============
         text = re.sub(r"<[^>]+>", "", text)
 
         # ============= STEP 5: CONVERT HEADERS TO PLAIN TEXT =============
-        # ## Header → Header (keep the text, remove #)
+        # ## Header  Header (keep the text, remove #)
         text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
 
         # ============= STEP 6: REMOVE FORMATTING =============
-        # Bold: **text** or __text__ → text
+        # Bold: **text** or __text__  text
         text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
         text = re.sub(r"__([^_]+)__", r"\1", text)
 
-        # Italic: *text* or _text_ → text
+        # Italic: *text* or _text_  text
         text = re.sub(r"\*([^*]+)\*", r"\1", text)
         text = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", text)
 
-        # Strikethrough: ~~text~~ → text
+        # Strikethrough: ~~text~~  text
         text = re.sub(r"~~([^~]+)~~", r"\1", text)
 
-        # Inline code: `text` → text
+        # Inline code: `text`  text
         text = re.sub(r"`([^`]+)`", r"\1", text)
 
-        # ============= STEP 7: CLEAN TABLE FORMATTING =============
-        # Convert markdown table rows to readable text
-        # | Col1 | Col2 | Col3 | → Col1, Col2, Col3
-        text = re.sub(
-            r"\|([^|\n]+)\|",
-            lambda m: m.group(1).strip() + ". ",
-            text,
-        )
-        # Remove table separator lines (|---|---|)
-        text = re.sub(r"\|[-:]+\|[-:|\s]+", "", text)
-        # Clean remaining pipe characters
-        text = re.sub(r"\|", " ", text)
+        # ============= STEP 7: REMOVE MARKDOWN TABLES =============
+        # We now extract tables separately into structured rows. We do NOT want 
+        # flattened tables polluting the unstructured semantic vector space.
+        # Matches typical markdown tables like | Col1 | Col2 |
+        text = re.sub(r"^(?:\|[^\n]+\|\r?\n)+", "", text, flags=re.MULTILINE)
 
         # ============= STEP 8: CLEAN LIST MARKERS =============
-        # - item or * item or • item → item
-        text = re.sub(r"^[\s]*[-*+•●▪▫◦]\s+", "", text, flags=re.MULTILINE)
-        # 1. item → item (Only 1-2 digit numbers to avoid stripping years like 2023.)
+        # - item or * item or  item  item
+        text = re.sub(r"^[\s]*[-*+]\s+", "", text, flags=re.MULTILINE)
+        # 1. item  item (Only 1-2 digit numbers to avoid stripping years like 2023.)
         text = re.sub(r"^[\s]*\d{1,2}\.\s+", "", text, flags=re.MULTILINE)
 
         # ============= STEP 9: REMOVE HORIZONTAL RULES =============
@@ -385,8 +452,94 @@ class PDFExtractor:
         text = text.strip()
 
         logger.debug(
-            f"Markdown cleaned: {len(raw_markdown)} chars → {len(text)} chars "
+            f"Markdown cleaned: {len(raw_markdown)} chars  {len(text)} chars "
             f"(removed {len(raw_markdown) - len(text)} chars of formatting)"
         )
 
         return text
+
+    @staticmethod
+    async def extract_structured_entities(text: str) -> dict:
+        """
+        Phase 4: Universal Entity Extraction.
+        LLM identifies candidate entities, system extracts exact source spans.
+        """
+        from .llm.deepinfra_llm import DeepInfraLLMClient
+        import json
+        from .entity_registry import ENTITY_TYPES, resolve_entity_type
+        
+        try:
+            client = DeepInfraLLMClient()
+            
+            prompt = f"""
+            Identify ALL business identifiers, codes, references, numbers, and key-value pairs in the text.
+            Do not restrict yourself to a predefined list. Extract any field that looks like a business identifier (e.g. E-Way Bill, Registration No, Chassis Number, Policy Number, Claim Number, Dispatch Number, Batch Number, GSTIN, PAN, VIN, Invoice Number, etc.).
+            Also extract standard contact info like ADDRESS, EMAIL, PHONE.
+            Sections include: Place of Delivery, Billing Address, Shipping Address, Customer Details.
+            
+            Return exactly in JSON format. DO NOT use <think> blocks or reasoning. Output ONLY the JSON object immediately:
+            {{
+                "identifiers": [
+                    {{"type": "E-WAY_BILL_NUMBER", "candidate_value": "123456789012", "confidence": 0.99}},
+                    {{"type": "REGISTRATION_NO", "candidate_value": "TN06AD4950", "confidence": 0.98}},
+                    {{"type": "GSTIN", "candidate_value": "33AAACS8779D1Z7", "confidence": 0.99}}
+                ],
+                "sections": [
+                    {{"name": "Place of Delivery", "content": {{"address": "...", "gstin": "..."}}, "confidence": 0.95}}
+                ]
+            }}
+            
+            TEXT: {text}
+            """
+            
+            response = await client.generate(
+                prompt=prompt,
+                system_prompt="You are an extraction system.",
+                temperature=0.0,
+                max_tokens=1000
+            )
+            print(f"RAW LLM RESPONSE: {response}")
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if not json_match:
+                return {"identifiers": [], "sections": []}
+                
+            data = json.loads(json_match.group(0))
+            
+            results = {"identifiers": [], "sections": []}
+            
+            # System extracts exact spans for identifiers to avoid hallucination
+            for ident in data.get("identifiers", []):
+                cand = str(ident.get("candidate_value", ""))
+                raw_type = ident.get("type", "")
+                if cand and raw_type:
+                    # Dynamically accept any entity type returned by the LLM
+                    # Normalize to uppercase with underscores
+                    canonical_type = str(raw_type).strip().upper().replace(' ', '_')
+                    # Find exact span in original text
+                    idx = text.find(cand)
+                    if idx != -1:
+                        results["identifiers"].append({
+                            "type": canonical_type,
+                            "value": text[idx:idx+len(cand)],
+                            "start_offset": idx,
+                            "end_offset": idx+len(cand),
+                            "source_text": text[max(0, idx-20):min(len(text), idx+len(cand)+20)],
+                            "confidence": float(ident.get("confidence", 1.0))
+                        })
+            
+            for sec in data.get("sections", []):
+                if isinstance(sec.get("content"), dict):
+                    results["sections"].append({
+                        "name": sec.get("name", ""),
+                        "content": sec.get("content", {})
+                    })
+                
+            return results
+        except Exception as e:
+            logger.error(f"Structured extraction failed: {e}")
+            # Print raw response for debugging
+            try:
+                print(f"RAW LLM RESPONSE: {response}")
+            except:
+                pass
+            return {"identifiers": [], "sections": []}

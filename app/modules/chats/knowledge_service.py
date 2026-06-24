@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class ChatKnowledgeService:
     """
-    Orchestrates the "Session ↔ Graph Sync".
+    Orchestrates the "Session  Graph Sync".
     
     This service turns conversations into permanent knowledge.
     It is designed to run in the background after a chat turn is complete.
@@ -45,7 +45,7 @@ class ChatKnowledgeService:
         Returns:
             Dict with extraction stats
         """
-        logger.info(f"🔄 Syncing chat turn to graph: session={session_id[:8]}")
+        logger.info(f" Syncing chat turn to graph: session={session_id[:8]}")
         
         # 1. Prepare the text for extraction
         # We combine both because the context of the answer often completes the fact
@@ -64,7 +64,7 @@ class ChatKnowledgeService:
             result.kb_id = kb_id  # Ensure the result knows which KB it belongs to
             
             if not result.triplets:
-                logger.debug(f"ℹ️ No clear facts extracted from session turn {session_id[:8]}")
+                logger.debug(f" No clear facts extracted from session turn {session_id[:8]}")
                 return {"success": True, "triplets_created": 0}
 
             # 3. Add Session Metadata to Triplets
@@ -79,7 +79,7 @@ class ChatKnowledgeService:
             persist_result = await self.writer.persist_triplets([result])
             
             logger.info(
-                f"✅ Knowledge Flywheel: Extracted {persist_result.get('triplets_created', 0)} "
+                f" Knowledge Flywheel: Extracted {persist_result.get('triplets_created', 0)} "
                 f"triplets from session {session_id[:8]}"
             )
             
@@ -90,7 +90,7 @@ class ChatKnowledgeService:
             }
 
         except Exception as e:
-            logger.error(f"❌ Failed to sync chat to graph: {e}")
+            logger.error(f" Failed to sync chat to graph: {e}")
             return {"success": False, "error": str(e)}
 
     @staticmethod

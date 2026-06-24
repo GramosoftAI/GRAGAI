@@ -31,3 +31,17 @@ async def get_ontology(request: Request):
     svc = service.OntologyService(str(tenant_id))
     result = await svc.get_ontology()
     return format_success(result)
+
+from fastapi import UploadFile, File, Form
+@router.post("/upload", response_model=dict)
+async def upload_ontology(request: Request, file: UploadFile = File(...), format: str = Form("xml")):
+    """Upload an RDF/OWL/TTL file to define the Knowledge Base's strict ontology"""
+    tenant_id, _ = get_tenant_and_user(request)
+    svc = service.OntologyService(str(tenant_id))
+    
+    content = await file.read()
+    if not content:
+        return format_error("Empty file provided")
+        
+    result = await svc.upload_ontology_file(content, format=format)
+    return format_success(result, meta={"message": "Ontology file processed successfully"})

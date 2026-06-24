@@ -1,0 +1,20 @@
+name: Secure GRAG Deployment
+
+on:
+  push:
+    branches:
+      - backdev 
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Deploy Application
+        run: |
+          cd /home/GRAG/backend
+          git fetch origin backdev
+          git reset --hard origin/backdev
+          sed -i 's/\r$//' deploy.sh
+          chmod +x deploy.sh
+          bash deploy.sh
