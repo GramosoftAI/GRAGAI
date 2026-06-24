@@ -1,0 +1,14 @@
+{
+  "invoice_sample.txt": {
+    "entities": 43,
+    "triplets": 28
+  },
+  "contract_sample.txt": {
+    "entities": 150,
+    "triplets": 92
+  },
+  "technical_manual.txt": {
+    "entities": 300,
+    "triplets": 210
+  }
+}

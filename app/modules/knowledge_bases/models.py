@@ -9,6 +9,7 @@ from sqlalchemy import (
     Index,
     Text,
     Integer,
+    Float,
     JSON,
     UUID as SQLAlchemyUUID,
 )
@@ -428,3 +429,78 @@ class DocumentSection(Base):
 
     def __repr__(self) -> str:
         return f"<DocumentSection name={self.section_name}>"
+
+
+class DocumentIngestionRun(Base):
+    """
+    Ingestion Audit Trail table.
+    Tracks the complete lifecycle of a document ingestion job, providing 
+    historical evidence for pipeline behavior, anomalies, and scaling patterns.
+    """
+    __tablename__ = "document_ingestion_runs"
+
+    id = Column(
+        SQLAlchemyUUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True, nullable=False
+    )
+    tenant_id = Column(
+        SQLAlchemyUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    document_id = Column(
+        SQLAlchemyUUID(as_uuid=True), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    
+    # Timing
+    started_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Extraction metrics
+    chunk_count = Column(Integer, nullable=False, default=0)
+    entity_count = Column(Integer, nullable=False, default=0)
+    triplet_count = Column(Integer, nullable=False, default=0)
+    identifier_count = Column(Integer, nullable=False, default=0)
+    
+    # Version Tracking
+    extractor_version = Column(String(50), nullable=True, default="unified_extractor_v1")
+    schema_version = Column(String(50), nullable=True, default="1.0")
+    model_name = Column(String(100), nullable=True, default="deepseek-v3")
+    
+    # Resilience tracking
+    repair_count = Column(Integer, nullable=False, default=0)
+    retry_count = Column(Integer, nullable=False, default=0)
+    fallback_count = Column(Integer, nullable=False, default=0)
+    llm_calls = Column(Integer, nullable=False, default=0)
+    llm_input_tokens = Column(Integer, nullable=False, default=0)
+    llm_output_tokens = Column(Integer, nullable=False, default=0)
+    
+    # Advanced Telemetry
+    extraction_duration_ms = Column(Integer, nullable=False, default=0)
+    graph_write_duration_ms = Column(Integer, nullable=False, default=0)
+    total_duration_ms = Column(Integer, nullable=False, default=0)
+    nodes_created = Column(Integer, nullable=False, default=0)
+    relationships_created = Column(Integer, nullable=False, default=0)
+    nodes_merged = Column(Integer, nullable=False, default=0)
+    relationships_merged = Column(Integer, nullable=False, default=0)
+    
+    document_category = Column(String(100), nullable=False, default="general_document", index=True)
+    sample_entities = Column(JSON, nullable=True)
+    sample_triplets = Column(JSON, nullable=True)
+    
+    # Drift Detection Context
+    baseline_entities_per_chunk = Column(Float, nullable=True)
+    current_entities_per_chunk = Column(Float, nullable=True)
+    deviation_percent = Column(Float, nullable=True)
+    baseline_documents = Column(Integer, nullable=True)
+    
+    fallback_chunks = Column(JSON, nullable=True)
+    
+    status = Column(String(50), nullable=False, default="IN_PROGRESS") # COMPLETED, FAILED
+    error_message = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_ingestion_runs_tenant_id", "tenant_id"),
+        Index("ix_ingestion_runs_doc_id", "document_id"),
+        Index("ix_ingestion_runs_status", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DocumentIngestionRun id={self.id} doc={self.document_id} status={self.status}>"

@@ -59,3 +59,58 @@ class DashboardMetrics(BaseModel):
     avg_confidence: float
     trend_queries: List[dict] # {date: string, count: int}
     confidence_distribution: List[dict] # {bucket: string, count: int}
+
+# ================= OPERATIONAL ANALYTICS =================
+
+class OperationalDashboardResponse(BaseModel):
+    system_health: str # HEALTHY, DEGRADED, CRITICAL
+    slo_compliance_percent: float
+    documents_processed: int
+    failures: int
+    retries: int
+    fallbacks: int
+    repair_rate: float
+    avg_latency_ms: float
+    p95_latency_ms: float
+
+class OperationalTrendItem(BaseModel):
+    date: str
+    entities_per_chunk: float
+    triplets_per_chunk: float
+    fallback_rate: float
+    nodes_created: int
+    relationships_created: int
+
+class OperationalTrendResponse(BaseModel):
+    trends: List[OperationalTrendItem]
+
+# ================= COST GOVERNANCE =================
+
+class CostCategoryItem(BaseModel):
+    document_category: str
+    total_tokens: int
+    estimated_cost_usd: float
+
+class DailyTokenItem(BaseModel):
+    date: str
+    input_tokens: int
+    output_tokens: int
+
+class CostGovernanceResponse(BaseModel):
+    total_tokens_30d: int
+    total_cost_usd_30d: float
+    category_breakdown: List[CostCategoryItem]
+    daily_tokens: List[DailyTokenItem]
+
+# ================= CAPACITY PLANNING =================
+
+class CapacityProjection(BaseModel):
+    current_daily_chunks: float
+    projected_30d_daily_chunks: float
+    projected_90d_daily_chunks: float
+    avg_latency_ms: float
+    p95_latency_ms: float
+    documents_per_day: float
+
+class CapacityGovernanceResponse(BaseModel):
+    projection: CapacityProjection

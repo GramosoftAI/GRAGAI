@@ -15,7 +15,11 @@ from .schemas import (
     AnalyticsSummaryUpdate,
     AnalyticsQueryLogResponse,
     AnalyticsQueryLogCreate,
-    DashboardMetrics
+    DashboardMetrics,
+    OperationalDashboardResponse,
+    OperationalTrendResponse,
+    CostGovernanceResponse,
+    CapacityGovernanceResponse
 )
 from .repository import AnalyticsRepository
 from .service import AnalyticsService
@@ -89,6 +93,38 @@ async def list_query_logs(
 ):
     """Fetch paginated query analytics logs."""
     return await service.repo.get_query_logs(skip, limit)
+
+# ================= OPERATIONAL ANALYTICS APIs =================
+
+@router.get("/operational/dashboard", response_model=OperationalDashboardResponse)
+async def get_operational_dashboard(
+    service: AnalyticsService = Depends(get_analytics_service)
+):
+    """Get high-level KPIs for ingestion performance and fault tolerance."""
+    return await service.get_operational_dashboard()
+
+@router.get("/operational/trends", response_model=OperationalTrendResponse)
+async def get_operational_trends(
+    service: AnalyticsService = Depends(get_analytics_service)
+):
+    """Get time-series data for extraction quality and pipeline resilience."""
+    return await service.get_operational_trends()
+
+# ================= GOVERNANCE APIs =================
+
+@router.get("/governance/costs", response_model=CostGovernanceResponse)
+async def get_cost_governance(
+    service: AnalyticsService = Depends(get_analytics_service)
+):
+    """Get LLM token consumption and estimated costs."""
+    return await service.get_cost_governance()
+
+@router.get("/governance/capacity", response_model=CapacityGovernanceResponse)
+async def get_capacity_governance(
+    service: AnalyticsService = Depends(get_analytics_service)
+):
+    """Get capacity projections and scaling metrics."""
+    return await service.get_capacity_governance()
 
 # ================= SUMMARY APIs =================
 
