@@ -228,40 +228,32 @@ class PDFExtractor:
         Extract PDF content using Gdocz OCR server.
         """
         def _sync_gdocz_convert(pdf_data: bytes, fname: str) -> str:
-            import requests
-            url = "https://gdocz.gramopro.ai/ocr/ocr/pdf"
-            headers = {"X-API-Key": settings.gdocz_api_key}
-            files = {"file": (fname, pdf_data, "application/pdf")}
+            from gdocz_sdk import GdoczaiClient, ConvertOptions
+            import tempfile
+            import os
             
-            # Smart determination of document type
-            doc_type = "GENERAL"
-            fname_lower = fname.lower()
-            if "resume" in fname_lower or "cv" in fname_lower or "profile" in fname_lower:
-                doc_type = "resume"
-            elif "invoice" in fname_lower or "bill" in fname_lower:
-                doc_type = "INVOICE"
-            elif "quote" in fname_lower or "quotation" in fname_lower:
-                doc_type = "QUOTATION"
-            elif "price" in fname_lower:
-                doc_type = "PRICE_LIST"
-
-            data = {
-                "model": "chandra",
-                "output_format": "html",
-                "document_type": doc_type
-            }
-
-            logger.info(f"Calling Gdocz `/ocr/pdf` directly with document_type: {doc_type}")
-            response = requests.post(url, files=files, data=data, headers=headers, timeout=600)
+            client = GdoczaiClient(api_key=settings.gdocz_api_key)
+            options = ConvertOptions(mode="chandra")
             
-            if response.status_code != 200:
-                raise ValueError(f"Gdocz API returned status code {response.status_code}: {response.text}")
+            # The SDK requires a file path, so write bytes to a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(pdf_data)
+                tmp_path = tmp.name
                 
-            res_json = response.json()
-            if not res_json.get("success"):
-                raise ValueError(f"Gdocz API error: {res_json.get('error')}")
+            try:
+                logger.info(f"Calling Gdocz SDK convert directly for {fname}...")
+                result = client.convert(tmp_path, options=options)
                 
-            return res_json.get("markdown", "")
+                # Check if SDK returns error properties (depending on SDK implementation)
+                if hasattr(result, "success") and not getattr(result, "success", True):
+                     raise ValueError(f"Gdocz SDK logic error: {getattr(result, 'error', 'Unknown Error')}")
+                     
+                return getattr(result, "markdown", str(result))
+            except Exception as e:
+                raise ValueError(f"Gdocz SDK error: {str(e)}")
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
         loop = asyncio.get_event_loop()
         raw_markdown = await loop.run_in_executor(
