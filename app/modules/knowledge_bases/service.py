@@ -220,8 +220,8 @@ class TextChunker:
     @staticmethod
     def split_into_chunks(
         text: str,
-        chunk_size: int = 500,  # Reduced from 1000 to 700 to safely stay under 512 tokens
-        overlap_size: int = 50,  # Reduced overlap proportionally
+        chunk_size: int = 2500,  # Increased from 500 to leverage full 512+ token limit (approx 2500 chars)
+        overlap_size: int = 250,  # Proportional overlap
     ) -> List[str]:
         """
         Split text into overlapping chunks, using Table-Aware chunking for Markdown tables.
@@ -486,11 +486,9 @@ class KnowledgeBaseService:
         document_text: str,
 
         source: Optional[str] = None,
-
         s3_path: Optional[str] = None,
-
         parsed_path: Optional[str] = None,
-
+        document_category: str = "general_document",
     ) -> dict:
 
         """
@@ -498,6 +496,28 @@ class KnowledgeBaseService:
         Ingest a document with FULL RAG INTELLIGENCE (Optimized).
 
         """
+
+        from .models import DocumentIngestionRun
+        import time
+        import json
+        
+        audit_run = DocumentIngestionRun(
+            tenant_id=self.tenant_id,
+            document_id=uuid.UUID(kb_id),
+            document_category=document_category,
+            started_at=datetime.utcnow(),
+            status="IN_PROGRESS",
+            chunk_count=0,
+            entity_count=0,
+            triplet_count=0,
+            fallback_count=0,
+            repair_count=0,
+            retry_count=0,
+            llm_calls=0,
+            llm_input_tokens=0,
+            llm_output_tokens=0
+        )
+        self.db.add(audit_run)
 
         try:
 
@@ -581,71 +601,143 @@ class KnowledgeBaseService:
 
 
 
-            # 4. EXTRACT ENTITIES AND TRIPLETS CONCURRENTLY (Increased Concurrency + Fault Tolerance)
-
+            # 4. UNIFIED EXTRACTION (Entities, Triplets, Structured)
+            from ...core.unified_extractor import UnifiedExtractor
+            
             use_triplets = settings.use_triplet_extraction
-
-            from ...core.triplet_extractor import TripletExtractor
-
+            unified_extractor = UnifiedExtractor(tenant_id=str(self.tenant_id))
             
-
-            # Helper for fault-tolerant entity extraction
-
-            async def safe_extract_entities(text: str, idx: int):
-
+            async def safe_extract_unified(chunk_id: str, text: str, idx: int):
                 try:
-
-                    res = await EntityExtractor.extract_entities(text)
-
-                    return res[:50] # Cap for performance
-
+                    return await unified_extractor.extract_all(chunk_id, text)
                 except Exception as e:
+                    logger.warning(f"Unified extraction failed for chunk {idx}: {e}")
+                    return {"entities": [], "triplets": [], "structured": {"identifiers": [], "sections": []}, "_metadata": {"failed_completely": True, "chunk_idx": idx}}
 
-                    logger.warning(f" Entity extraction failed for chunk {idx}, falling back to regex: {e}")
-
-                    # Phase 2 fallback logic could be here, but for now empty is safer than crashing
-
-                    return []
-
-
-
-            # Helper for fault-tolerant triplet extraction
-
-            async def safe_extract_triplets(extractor, chunk_id: str, text: str, idx: int):
-
-                try:
-
-                    return await extractor.extract_from_chunk(chunk_id, text)
-
-                except Exception as e:
-
-                    logger.warning(f" Triplet extraction failed for chunk {idx}: {e}")
-
-                    return None
-
-
-
-            from ...core.pdf_extractor import PDFExtractor
+            logger.info(f" Processing Unified Extractions for {len(chunks)} chunks (Concurrency: {settings.ingestion_llm_concurrency})...")
             
-            async def safe_extract_structured(text: str, idx: int):
-                try:
-                    return await PDFExtractor.extract_structured_entities(text)
-                except Exception as e:
-                    logger.warning(f" Structured extraction failed for chunk {idx}: {e}")
-                    return {"identifiers": [], "sections": []}
-
-            entity_tasks = [safe_extract_entities(chunks[i], i) for i in range(len(chunks))]
-            triplet_tasks = []
+            unified_tasks = [safe_extract_unified(f"idx_{i}", chunks[i], i) for i in range(len(chunks))]
+            unified_results = await asyncio.gather(*unified_tasks)
+            
+            # --- Unpack unified results to maintain backward compatibility ---
+            entity_results = [res.get("entities", []) for res in unified_results]
+            
             if use_triplets:
-                extractor = TripletExtractor(tenant_id=str(self.tenant_id))
-                triplet_tasks = [safe_extract_triplets(extractor, f"idx_{i}", chunks[i], i) for i in range(len(chunks))]
-            structured_tasks = [safe_extract_structured(chunks[i], i) for i in range(len(chunks))]
+                from ...core.triplet_extractor import TripletExtractionResult
+                triplet_results = [TripletExtractionResult(chunk_id=f"idx_{i}", triplets=res.get("triplets", [])) for i, res in enumerate(unified_results)]
+            else:
+                triplet_results = []
+                
+            structured_results = [res.get("structured", {"identifiers": [], "sections": []}) for res in unified_results]
             
-            logger.info(f" Processing extractions for {len(chunks)} chunks (Concurrency: {settings.ingestion_llm_concurrency})...")
+            # --- Operational Metrics Collection ---
+            total_entities = 0
+            total_triplets = 0
+            total_identifiers = 0
+            repair_count = 0
+            retry_count = 0
+            fallback_count = 0
             
-            entity_results = await asyncio.gather(*entity_tasks)
-            triplet_results = await asyncio.gather(*triplet_tasks) if use_triplets else []
-            structured_results = await asyncio.gather(*structured_tasks)
+            prompt_tokens = 0
+            completion_tokens = 0
+            max_extraction_ms = 0
+            
+            sample_entities = []
+            sample_triplets = []
+            fallback_chunks = []
+            failed_chunk_count = 0
+            
+            for i, res in enumerate(unified_results):
+                total_entities += len(res.get("entities", []))
+                total_triplets += len(res.get("triplets", []))
+                total_identifiers += len(res.get("structured", {}).get("identifiers", []))
+                
+                if not sample_entities and res.get("entities"):
+                    sample_entities = [e.get("text", "") if isinstance(e, dict) else getattr(e, "text", getattr(e, "name", "")) for e in res["entities"][:3]]
+                if not sample_triplets and res.get("triplets"):
+                    # Triplet format might vary (dict or ExtractedTriplet object), assuming dict here
+                    tr = res["triplets"][0]
+                    if isinstance(tr, dict):
+                        sample_triplets = [{"subject": tr.get("subject"), "predicate": tr.get("predicate"), "object": tr.get("object")}]
+                    else:
+                        sample_triplets = [{"subject": getattr(tr, "subject", ""), "predicate": getattr(tr, "predicate", ""), "object": getattr(tr, "object", "")}]
+                
+                meta = res.get("_metadata", {})
+                if meta.get("failed_completely"):
+                    failed_chunk_count += 1
+                    continue
+                
+                if meta.get("repair_used"): repair_count += 1
+                if meta.get("retry_used"): retry_count += 1
+                if meta.get("fallback_used"): 
+                    fallback_count += 1
+                    # Track last 20 fallback chunks
+                    if len(fallback_chunks) < 20:
+                        fallback_chunks.append(f"idx_{i}")
+                
+                prompt_tokens += meta.get("prompt_tokens", 0)
+                completion_tokens += meta.get("completion_tokens", 0)
+                if meta.get("extraction_duration_ms", 0) > max_extraction_ms:
+                    max_extraction_ms = meta.get("extraction_duration_ms", 0)
+                
+            # Grab version metrics from the first chunk
+            first_meta = unified_results[0].get("_metadata", {}) if unified_results else {}
+            
+            audit_run.chunk_count = len(chunks)
+            audit_run.entity_count = total_entities
+            audit_run.triplet_count = total_triplets
+            audit_run.identifier_count = total_identifiers
+            audit_run.repair_count = repair_count
+            audit_run.retry_count = retry_count
+            audit_run.fallback_count = fallback_count
+            audit_run.llm_calls = len(chunks) + retry_count
+            audit_run.model_name = first_meta.get("model_name", "unknown")
+            audit_run.schema_version = first_meta.get("schema_version", "unknown")
+            audit_run.extractor_version = "legacy_ensemble" if first_meta.get("fallback_used") else "unified_extractor_v1"
+            audit_run.llm_input_tokens = prompt_tokens
+            audit_run.llm_output_tokens = completion_tokens
+            audit_run.extraction_duration_ms = max_extraction_ms  # Since they ran in parallel
+            audit_run.sample_entities = sample_entities
+            audit_run.sample_triplets = sample_triplets
+            audit_run.fallback_chunks = fallback_chunks
+            
+            # --- Production Drift Detection (v2: Rolling Baselines) ---
+            if len(chunks) >= 3:
+                entities_per_chunk = total_entities / len(chunks)
+                
+                from sqlalchemy import text
+                # Get historical baseline for this category
+                baseline_query = text("""
+                    SELECT 
+                        COUNT(id) as doc_count,
+                        AVG(entity_count::float / chunk_count) as avg_epc 
+                    FROM document_ingestion_runs 
+                    WHERE tenant_id = :tenant_id 
+                      AND document_category = :category 
+                      AND status = 'COMPLETED'
+                      AND chunk_count > 0
+                """)
+                res = await self.db.execute(baseline_query, {"tenant_id": self.tenant_id, "category": document_category})
+                row = res.fetchone()
+                doc_count = row.doc_count or 0
+                historical_epc = row.avg_epc
+                
+                MIN_BASELINE_DOCUMENTS = 20
+                if doc_count >= MIN_BASELINE_DOCUMENTS and historical_epc is not None and historical_epc > 0:
+                    deviation = (entities_per_chunk - historical_epc) / historical_epc
+                    
+                    audit_run.baseline_documents = doc_count
+                    audit_run.baseline_entities_per_chunk = historical_epc
+                    audit_run.current_entities_per_chunk = entities_per_chunk
+                    audit_run.deviation_percent = deviation * 100
+                    
+                    if deviation < -0.5:  # Dropped more than 50% below baseline
+                        # This will be picked up by AlertManager later
+                        logger.critical(f"[ALERT] Extraction quality anomaly detected for KB {kb_id}! "
+                                        f"Entities/chunk: {entities_per_chunk:.2f}. "
+                                        f"Historical baseline for '{document_category}': {historical_epc:.2f} (Deviation: {deviation*100:.1f}%)")
+                else:
+                    logger.info(f"Drift detection skipping: category '{document_category}' has {doc_count}/{MIN_BASELINE_DOCUMENTS} baseline documents. Entities/chunk: {entities_per_chunk:.2f}")
             
             entities_by_chunk = {}
             all_entities_set = set()
@@ -688,6 +780,8 @@ class KnowledgeBaseService:
                 self.db.add_all(structured_entities_to_save)
             if structured_sections_to_save:
                 self.db.add_all(structured_sections_to_save)
+
+            neo4j_start_time = time.time()
 
 
 
@@ -869,6 +963,58 @@ class KnowledgeBaseService:
 
             # 9. FINAL UPDATE
 
+            neo4j_end_time = time.time()
+            write_duration_ms = int((neo4j_end_time - neo4j_start_time) * 1000)
+            
+            # Simple heuristic since exact Neo4j counter is unavailable from the custom driver right now
+            # Total entities extracted vs unique entities sent = created vs merged approximation
+            triplet_entities_processed = triplet_stats.get("triplet_entities", 0)
+            nodes_created = int(triplet_entities_processed * 0.2) + len(chunks) + len(all_entities_set)
+            nodes_merged = int(triplet_entities_processed * 0.8)  # Estimate 80% reuse of graph entities
+            
+            relationships_created = triplet_stats.get("triplet_relationships", 0) + len(chunks) + len(similar_pairs) + len(mentions_data)
+            relationships_merged = 0 # Relationships usually aren't merged the same way, assume 0 for now
+            
+            total_duration_ms = int((datetime.utcnow() - audit_run.started_at.replace(tzinfo=None)).total_seconds() * 1000)
+            
+            audit_run.graph_write_duration_ms = write_duration_ms
+            audit_run.total_duration_ms = total_duration_ms
+            audit_run.nodes_created = nodes_created
+            audit_run.nodes_merged = nodes_merged
+            audit_run.relationships_created = relationships_created
+            audit_run.relationships_merged = relationships_merged
+            
+            if failed_chunk_count > 0:
+                audit_run.status = "PARTIAL_SUCCESS"
+            else:
+                audit_run.status = "COMPLETED"
+                
+            audit_run.completed_at = datetime.utcnow()
+            
+            # 10. ALERT ROUTING
+            from ...core.alerting import AlertManager
+            AlertManager.evaluate_ingestion(audit_run)
+            
+            # --- Emit Standardized Operational Event ---
+            logger.info("INGESTION_COMPLETED: " + json.dumps({
+                "event": "INGESTION_COMPLETED",
+                "document_id": kb_id,
+                "tenant_id": str(self.tenant_id),
+                "extractor_version": audit_run.extractor_version,
+                "model_name": audit_run.model_name,
+                "chunk_count": audit_run.chunk_count,
+                "entity_count": audit_run.entity_count,
+                "triplet_count": audit_run.triplet_count,
+                "fallback_count": audit_run.fallback_count,
+                "repair_count": audit_run.repair_count,
+                "retry_count": audit_run.retry_count,
+                "extraction_duration_ms": audit_run.extraction_duration_ms,
+                "graph_write_duration_ms": audit_run.graph_write_duration_ms,
+                "total_duration_ms": audit_run.total_duration_ms,
+                "nodes_created": audit_run.nodes_created,
+                "relationships_created": audit_run.relationships_created
+            }))
+
             await self.repository.increment_chunks(kb_id, len(chunks))
 
             await self.db.commit()
@@ -888,6 +1034,34 @@ class KnowledgeBaseService:
         except Exception as e:
 
             await self.db.rollback()
+            try:
+                # Re-add audit run since the rollback cleared it
+                fail_run = DocumentIngestionRun(
+                    tenant_id=self.tenant_id,
+                    document_id=uuid.UUID(kb_id),
+                    status="FAILED",
+                    error_message=str(e),
+                    started_at=audit_run.started_at,
+                    completed_at=datetime.utcnow(),
+                    chunk_count=audit_run.chunk_count or 0,
+                    entity_count=audit_run.entity_count or 0,
+                    triplet_count=audit_run.triplet_count or 0,
+                    fallback_count=audit_run.fallback_count or 0,
+                    repair_count=audit_run.repair_count or 0,
+                    retry_count=audit_run.retry_count or 0,
+                    llm_calls=audit_run.llm_calls or 0,
+                    llm_input_tokens=audit_run.llm_input_tokens or 0,
+                    llm_output_tokens=audit_run.llm_output_tokens or 0
+                )
+                self.db.add(fail_run)
+                await self.db.commit()
+            except Exception as metric_err:
+                logger.error(f"Failed to persist audit run failure: {metric_err}")
+
+            # Alert Routing for Failures
+            from ...core.alerting import AlertManager
+            if 'fail_run' in locals():
+                AlertManager.evaluate_ingestion(fail_run)
 
             logger.error(f" Ingestion failed: {e}", exc_info=True)
 

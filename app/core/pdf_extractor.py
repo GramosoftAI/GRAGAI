@@ -244,6 +244,7 @@ class PDFExtractor:
         Extract PDF content using Gdocz OCR server.
         """
         def _sync_gdocz_convert(pdf_data: bytes, fname: str) -> str:
+<<<<<<< HEAD
             import requests
             import os
             import time
@@ -323,6 +324,34 @@ class PDFExtractor:
                     raw_markdown = raw_markdown.replace(f"({img_name})", f"({img_base64})")
             
             return raw_markdown
+=======
+            from gdocz_sdk import GdoczaiClient, ConvertOptions
+            import tempfile
+            import os
+            
+            client = GdoczaiClient(api_key=settings.gdocz_api_key)
+            options = ConvertOptions(mode="chandra")
+            
+            # The SDK requires a file path, so write bytes to a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(pdf_data)
+                tmp_path = tmp.name
+                
+            try:
+                logger.info(f"Calling Gdocz SDK convert directly for {fname}...")
+                result = client.convert(tmp_path, options=options)
+                
+                # Check if SDK returns error properties (depending on SDK implementation)
+                if hasattr(result, "success") and not getattr(result, "success", True):
+                     raise ValueError(f"Gdocz SDK logic error: {getattr(result, 'error', 'Unknown Error')}")
+                     
+                return getattr(result, "markdown", str(result))
+            except Exception as e:
+                raise ValueError(f"Gdocz SDK error: {str(e)}")
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+>>>>>>> d69cf823da0794f2084373394a5d2fa5ce3779d5
 
         loop = asyncio.get_event_loop()
         raw_markdown = await loop.run_in_executor(

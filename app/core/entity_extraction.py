@@ -18,6 +18,8 @@ class Entity:
     text: str
     entity_type: str
     confidence: float = 1.0
+    start_char: int = None
+    end_char: int = None
 
     def __hash__(self):
         return hash(f"{self.text}:{self.entity_type}")
@@ -360,7 +362,7 @@ class EntityExtractor:
                             entity_type=e["type"].upper(),
                             confidence=1.0
                         ))
-                return cls._deduplicate_entities(entities)
+                return cls.deduplicate_entities(entities)
             
             logger.warning("No JSON found in LLM entity extraction response. Falling back to regex.")
             return cls._extract_entities_regex(text, entity_types)

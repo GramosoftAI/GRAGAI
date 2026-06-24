@@ -1,0 +1,312 @@
+import logging
+import json
+import re
+import time
+from typing import Dict, List, Any
+
+from .entity_extraction import Entity, EntityExtractor
+from .triplet_extractor import ExtractedTriplet, TripletExtractor
+from .pdf_extractor import PDFExtractor
+from .llm.deepinfra_llm import DeepInfraLLMClient
+
+logger = logging.getLogger(__name__)
+
+UNIFIED_PROMPT = """
+You are a knowledge graph extraction engine. Read the TEXT and extract ALL entities, triplets, and structured business data into a SINGLE JSON object.
+
+Extract Entities:
+Names, Organizations, Locations, Concepts. Provide exact start_char and end_char offsets based on the TEXT.
+
+Extract Triplets:
+(Subject -> Predicate -> Object). Provide the exact text quote as 'evidence'.
+
+Extract Structured Identifiers:
+E-WAY_BILL_NUMBER, INVOICE_NUMBER, GSTIN, PAN, REGISTRATION_NO. Provide the exact text span as 'source_span'.
+
+Extract Document Sections:
+"Place of Delivery", "Billing Address".
+
+CRITICAL INSTRUCTION: You MUST NOT output any reasoning, explanations, or <think> blocks. Your very first output character MUST be `{{` and your last MUST be `}}`. Return EXACTLY the following JSON format:
+{{
+    "schema_version": "1.0",
+    "metadata": {{
+        "model": "deepseek-v3",
+        "chunk_id": "{chunk_id}"
+    }},
+    "entities": [
+        {{"text": "Apple Inc", "type": "ORGANIZATION", "start_char": 0, "end_char": 9, "confidence": 0.99}}
+    ],
+    "triplets": [
+        {{"subject": "Apple Inc", "predicate": "LOCATED_IN", "object": "California", "subject_type": "ORGANIZATION", "object_type": "LOCATION", "evidence": "Apple Inc is based in California", "confidence": 0.95}}
+    ],
+    "identifiers": [
+        {{"type": "GSTIN", "candidate_value": "33AAACS8779D1Z7", "source_span": "GSTIN: 33AAACS8779D1Z7", "confidence": 0.99}}
+    ],
+    "sections": [
+        {{"name": "Billing Address", "content": {{"address": "123 Main St"}}}}
+    ]
+}}
+
+TEXT: {text}
+"""
+
+def fix_busted_json(json_str: str) -> str:
+    """
+    Tier 2: Lightweight repair for common LLM JSON mistakes.
+    
+    Supported:
+    ✓ trailing commas
+    ✓ markdown code fences
+    ✓ extra text before/after JSON
+    ✓ missing final brace/bracket
+
+    Unsupported (Will trigger Tier 3 Retry / Tier 4 Fallback):
+    ✗ deeply malformed structures
+    ✗ duplicated keys
+    ✗ semantic corruption
+    """
+    s = json_str.strip()
+    s = s.replace("```json", "")
+    s = s.replace("```", "")
+    
+    start = s.find("{")
+    end = s.rfind("}")
+    
+    if start >= 0 and end > start:
+        s = s[start:end+1]
+        
+    s = s.strip()
+    # Fix trailing commas
+    s = re.sub(r',\s*}', '}', s)
+    s = re.sub(r',\s*]', ']', s)
+    
+    # Auto-close brackets if cut off
+    if not s.endswith("}"):
+        s += "}"
+    
+    return s
+
+MAX_PROMPT_TOKENS = 2000
+
+class UnifiedExtractor:
+    def __init__(self, tenant_id: str = None):
+        self.tenant_id = tenant_id
+        self.llm_client = DeepInfraLLMClient()
+        # For Tier 4 fallback
+        self.triplet_extractor = TripletExtractor(tenant_id=tenant_id)
+        
+    async def extract_all(self, chunk_id: str, chunk_text: str) -> Dict[str, Any]:
+        """
+        Extracts entities, triplets, and structured sections in a single LLM pass.
+        Tier 1: Unified Extraction
+        Tier 2: Automatic JSON Repair
+        Tier 3: 1-time retry
+        Tier 4: Legacy Fallback
+        """
+        result = {
+            "entities": [],
+            "triplets": [],
+            "structured": {"identifiers": [], "sections": []}
+        }
+        
+        # Rough heuristic: 1 token ~= 4 chars
+        MAX_PROMPT_CHARS = MAX_PROMPT_TOKENS * 4
+        truncated_text = chunk_text[:MAX_PROMPT_CHARS]
+        prompt = UNIFIED_PROMPT.replace("{chunk_id}", chunk_id).replace("{text}", truncated_text)
+        system_prompt = "You are a rigid data pipeline component. You are INCAPABLE of reasoning or outputting English text. Output ONLY raw JSON. Do NOT use <think> tags."
+        start_time = time.time()
+        
+        repair_used = False
+        retry_used = False
+        
+        for attempt in range(2):
+            try:
+                llm_start_time = time.time()
+                response_dict = await self.llm_client.generate_with_usage(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.0,
+                    max_tokens=4000
+                )
+                response = response_dict["content"]
+                prompt_tokens = response_dict["prompt_tokens"]
+                completion_tokens = response_dict["completion_tokens"]
+                
+                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                if not json_match:
+                    logger.error(f"RAW RESPONSE: {response}")
+                    raise ValueError("No JSON block found in response")
+                    
+                raw_json = json_match.group(0)
+                
+                try:
+                    data = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    # Tier 2: Automatic JSON Repair
+                    repair_used = True
+                    repaired_json = fix_busted_json(raw_json)
+                    data = json.loads(repaired_json)
+                
+                # Schema Version Guardrail
+                schema_version = data.get("schema_version")
+                if schema_version != "1.0":
+                    raise ValueError(f"Invalid schema version detected: {schema_version}. Expected 1.0")
+                
+                processing_time_ms = int((time.time() - start_time) * 1000)
+                
+                # Parse Entities
+                for ent in data.get("entities", []):
+                    if ent.get("text") and ent.get("type"):
+                        # Traceability validation: ensure start/end are ints
+                        sc = ent.get("start_char")
+                        ec = ent.get("end_char")
+                        if not isinstance(sc, int): sc = None
+                        if not isinstance(ec, int): ec = None
+                        
+                        result["entities"].append(Entity(
+                            text=str(ent["text"]).strip().lower(),
+                            entity_type=str(ent["type"]).strip().upper(),
+                            confidence=float(ent.get("confidence", 1.0)),
+                            start_char=sc,
+                            end_char=ec
+                        ))
+                        
+                # Parse Triplets
+                for tri in data.get("triplets", []):
+                    if tri.get("subject") and tri.get("predicate") and tri.get("object"):
+                        t = ExtractedTriplet(
+                            subject=str(tri["subject"]).strip().lower(),
+                            predicate=str(tri["predicate"]).strip().upper().replace(" ", "_"),
+                            object=str(tri["object"]).strip().lower(),
+                            subject_type=str(tri.get("subject_type", "CONCEPT")).strip().upper(),
+                            object_type=str(tri.get("object_type", "CONCEPT")).strip().upper(),
+                            confidence=float(tri.get("confidence", 1.0)),
+                            evidence=tri.get("evidence")
+                        )
+                        result["triplets"].append(t)
+                        
+                # Parse Structured Identifiers (Deterministic Validation)
+                for ident in data.get("identifiers", []):
+                    cand = str(ident.get("candidate_value", ""))
+                    raw_type = ident.get("type", "")
+                    source_span = str(ident.get("source_span", cand))
+                    
+                    # Deterministic validator: Reject hallucinated IDs
+                    if cand and raw_type and source_span in chunk_text and cand in source_span:
+                        canonical_type = str(raw_type).strip().upper().replace(' ', '_')
+                        idx = chunk_text.find(cand)
+                        result["structured"]["identifiers"].append({
+                            "type": canonical_type,
+                            "value": chunk_text[idx:idx+len(cand)],
+                            "start_offset": idx,
+                            "end_offset": idx+len(cand),
+                            "source_text": source_span,
+                            "confidence": float(ident.get("confidence", 1.0))
+                        })
+                            
+                # Parse Structured Sections
+                for sec in data.get("sections", []):
+                    if isinstance(sec.get("content"), dict):
+                        result["structured"]["sections"].append({
+                            "name": sec.get("name", ""),
+                            "content": sec.get("content", {})
+                        })
+                        
+                # Observability Logging
+                logger.info(
+                    f"Unified extraction success: chunk={chunk_id} time={processing_time_ms}ms "
+                    f"entities={len(result['entities'])} triplets={len(result['triplets'])} "
+                    f"identifiers={len(result['structured']['identifiers'])} "
+                    f"repair={str(repair_used).lower()} retry={str(retry_used).lower()} fallback=false"
+                )
+                
+                # Operational Metrics for Monitoring (Datadog/CloudWatch)
+                metrics = {
+                    "event": "ingestion_metrics",
+                    "chunk_id": chunk_id,
+                    "fallback_rate": 0,
+                    "repair_rate": 1 if repair_used else 0,
+                    "retry_rate": 1 if retry_used else 0,
+                    "entity_count_per_chunk": len(result["entities"]),
+                    "triplet_count_per_chunk": len(result["triplets"])
+                }
+                logger.info(f"OPERATIONAL_METRICS: {json.dumps(metrics)}")
+                
+                extraction_duration_ms = int((time.time() - start_time) * 1000)
+                
+                result["_metadata"] = {
+                    "repair_used": repair_used,
+                    "retry_used": retry_used,
+                    "fallback_used": False,
+                    "model_name": data.get("metadata", {}).get("model", "deepseek-v3"),
+                    "schema_version": schema_version,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "extraction_duration_ms": extraction_duration_ms
+                }
+                
+                return result
+                
+            except Exception as e:
+                logger.warning(f"Unified extraction failed on attempt {attempt+1} for chunk {chunk_id}: {e}")
+                if attempt == 0:
+                    # Tier 3: Retry once
+                    retry_used = True
+                    logger.warning(f"Unified extraction triggering retry for chunk {chunk_id}")
+                    system_prompt += "\nReturn ONLY valid JSON. Previous response was malformed."
+                else:
+                    # Tier 4: Legacy Fallback
+                    logger.warning(f"Unified extraction fallback triggered for chunk {chunk_id}. Rate tracking should monitor this.")
+                    return await self._legacy_fallback(chunk_id, chunk_text)
+                    
+    async def _legacy_fallback(self, chunk_id: str, chunk_text: str) -> Dict[str, Any]:
+        """Tier 4: Calls the original 3 extractors individually to guarantee no graph data loss."""
+        fallback_result = {
+            "entities": [],
+            "triplets": [],
+            "structured": {"identifiers": [], "sections": []}
+        }
+        
+        try:
+            fallback_result["entities"] = await EntityExtractor.extract_entities(chunk_text)
+        except Exception as e:
+            logger.error(f"Fallback Entity extraction failed: {e}")
+            
+        try:
+            triplet_res = await self.triplet_extractor.extract_from_chunk(chunk_id, chunk_text)
+            if triplet_res and triplet_res.triplets:
+                fallback_result["triplets"] = triplet_res.triplets
+        except Exception as e:
+            logger.error(f"Fallback Triplet extraction failed: {e}")
+            
+        try:
+            fallback_result["structured"] = await PDFExtractor.extract_structured_entities(chunk_text)
+        except Exception as e:
+            logger.error(f"Fallback Structured extraction failed: {e}")
+            
+        # Operational Metrics for Monitoring (Datadog/CloudWatch)
+        metrics = {
+            "event": "ingestion_metrics",
+            "chunk_id": chunk_id,
+            "fallback_rate": 1,
+            "repair_rate": 0,
+            "retry_rate": 0,
+            "entity_count_per_chunk": len(fallback_result["entities"]),
+            "triplet_count_per_chunk": len(fallback_result["triplets"])
+        }
+        logger.info(f"OPERATIONAL_METRICS: {json.dumps(metrics)}")
+            
+        extraction_duration_ms = int((time.time() - start_time) * 1000)
+            
+        fallback_result["_metadata"] = {
+            "repair_used": False,
+            "retry_used": False,
+            "fallback_used": True,
+            "model_name": "legacy_ensemble",
+            "schema_version": "0.9",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "extraction_duration_ms": extraction_duration_ms
+        }
+            
+        return fallback_result

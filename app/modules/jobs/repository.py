@@ -40,6 +40,10 @@ class JobRepository(BaseRepository):
         error_message: str = None
     ) -> Optional[ProcessingJob]:
         
+        job = await self.get_job(job_id)
+        if not job:
+            return None
+            
         update_data = {"status": status, "updated_at": datetime.utcnow()}
         
         if progress is not None:
@@ -49,7 +53,7 @@ class JobRepository(BaseRepository):
         if error_message is not None:
             update_data["error_message"] = error_message
             
-        if status == "processing":
+        if status == "processing" and job.started_at is None:
             update_data["started_at"] = datetime.utcnow()
         elif status in ["completed", "failed"]:
             update_data["completed_at"] = datetime.utcnow()
