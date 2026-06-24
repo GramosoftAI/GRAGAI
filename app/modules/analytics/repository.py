@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import select, func, update, delete, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from .models import AnalyticsSummary, AnalyticsQueryLog, ResponseStatus
+from ..knowledge_bases.models import DocumentIngestionRun
 
 class AnalyticsRepository:
     def __init__(self, db: AsyncSession, tenant_id: UUID):
@@ -136,3 +137,125 @@ class AnalyticsRepository:
             else: distribution["0.8-1.0"] += count
             
         return [{"bucket": k, "count": v} for k, v in distribution.items()]
+
+    async def get_operational_dashboard_metrics(self) -> dict:
+        stmt = select(
+            func.count(DocumentIngestionRun.id).label("processed"),
+            func.count(DocumentIngestionRun.id).filter(DocumentIngestionRun.status == "FAILED").label("failures"),
+            func.sum(DocumentIngestionRun.retry_count).label("retries"),
+            func.sum(DocumentIngestionRun.fallback_count).label("fallbacks"),
+            func.sum(DocumentIngestionRun.repair_count).label("repairs"),
+            func.sum(DocumentIngestionRun.chunk_count).label("chunks"),
+            func.avg(DocumentIngestionRun.total_duration_ms).label("avg_latency"),
+            func.percentile_cont(0.95).within_group(DocumentIngestionRun.total_duration_ms.asc()).label("p95_latency"),
+            func.count(DocumentIngestionRun.id).filter(DocumentIngestionRun.total_duration_ms <= 60000).label("slo_met")
+        ).where(DocumentIngestionRun.tenant_id == self.tenant_id)
+        
+        result = await self.db.execute(stmt)
+        row = result.first()
+        
+        chunks = int(row.chunks or 1)
+        if chunks == 0: chunks = 1
+        
+        processed = int(row.processed or 0)
+        slo_met = int(row.slo_met or 0)
+        slo_percent = (slo_met / processed * 100) if processed > 0 else 100.0
+        
+        return {
+            "documents_processed": processed,
+            "failures": int(row.failures or 0),
+            "retries": int(row.retries or 0),
+            "fallbacks": int(row.fallbacks or 0),
+            "repair_rate": float(row.repairs or 0) / chunks,
+            "avg_latency_ms": float(row.avg_latency or 0.0),
+            "p95_latency_ms": float(row.p95_latency or 0.0),
+            "slo_compliance_percent": slo_percent
+        }
+
+    async def get_operational_trends(self) -> List[dict]:
+        stmt = select(
+            func.to_char(DocumentIngestionRun.created_at, 'YYYY-MM-DD').label("date"),
+            func.sum(DocumentIngestionRun.entity_count).label("entities"),
+            func.sum(DocumentIngestionRun.triplet_count).label("triplets"),
+            func.sum(DocumentIngestionRun.chunk_count).label("chunks"),
+            func.sum(DocumentIngestionRun.fallback_count).label("fallbacks"),
+            func.sum(DocumentIngestionRun.nodes_created).label("nodes"),
+            func.sum(DocumentIngestionRun.relationships_created).label("rels")
+        ).where(
+            DocumentIngestionRun.tenant_id == self.tenant_id
+        ).group_by("date").order_by("date").limit(30)
+        
+        result = await self.db.execute(stmt)
+        rows = result.all()
+        
+        trends = []
+        for row in rows:
+            c = int(row.chunks or 1)
+            if c == 0: c = 1
+            trends.append({
+                "date": row.date,
+                "entities_per_chunk": float(row.entities or 0) / c,
+                "triplets_per_chunk": float(row.triplets or 0) / c,
+                "fallback_rate": float(row.fallbacks or 0) / c,
+                "nodes_created": int(row.nodes or 0),
+                "relationships_created": int(row.rels or 0)
+            })
+        return trends
+
+    async def get_cost_governance_data(self) -> dict:
+        # Category breakdown
+        cat_stmt = select(
+            DocumentIngestionRun.document_category,
+            func.sum(DocumentIngestionRun.llm_input_tokens).label("inp"),
+            func.sum(DocumentIngestionRun.llm_output_tokens).label("out")
+        ).where(DocumentIngestionRun.tenant_id == self.tenant_id).group_by(DocumentIngestionRun.document_category)
+        
+        cat_res = await self.db.execute(cat_stmt)
+        categories = []
+        for row in cat_res.all():
+            inp = int(row.inp or 0)
+            out = int(row.out or 0)
+            categories.append({
+                "document_category": row.document_category,
+                "input_tokens": inp,
+                "output_tokens": out
+            })
+            
+        # Daily token trends
+        day_stmt = select(
+            func.to_char(DocumentIngestionRun.created_at, 'YYYY-MM-DD').label("date"),
+            func.sum(DocumentIngestionRun.llm_input_tokens).label("inp"),
+            func.sum(DocumentIngestionRun.llm_output_tokens).label("out")
+        ).where(DocumentIngestionRun.tenant_id == self.tenant_id).group_by("date").order_by("date").limit(30)
+        
+        day_res = await self.db.execute(day_stmt)
+        daily_tokens = []
+        for row in day_res.all():
+            daily_tokens.append({
+                "date": row.date,
+                "input_tokens": int(row.inp or 0),
+                "output_tokens": int(row.out or 0)
+            })
+            
+        return {
+            "categories": categories,
+            "daily_tokens": daily_tokens
+        }
+
+    async def get_capacity_planning_data(self) -> dict:
+        stmt = select(
+            func.to_char(DocumentIngestionRun.created_at, 'YYYY-MM-DD').label("date"),
+            func.sum(DocumentIngestionRun.chunk_count).label("chunks"),
+            func.count(DocumentIngestionRun.id).label("docs")
+        ).where(DocumentIngestionRun.tenant_id == self.tenant_id).group_by("date").order_by("date").limit(30)
+        
+        res = await self.db.execute(stmt)
+        daily_stats = []
+        for row in res.all():
+            daily_stats.append({
+                "date": row.date,
+                "chunks": int(row.chunks or 0),
+                "docs": int(row.docs or 0)
+            })
+            
+        return {"daily_stats": daily_stats}

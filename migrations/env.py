@@ -19,7 +19,8 @@ if config.config_file_name is not None:
 from app.models.base import Base
 from app.modules.auth.models import User, Tenant, APIKey, TokenBlacklist
 from app.modules.agents.models import Agent
-from app.modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk
+from app.modules.knowledge_bases.models import *
+from app.modules.jobs.models import *
 from app.modules.chats.models import ChatSession, ChatMessage
 from app.modules.personalities.models import Personality
 from app.modules.connectors.google.models import GmailMessage, GmailSyncState

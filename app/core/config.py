@@ -56,6 +56,9 @@ class Settings(BaseSettings):
 
 
 
+    # ============= EXTERNAL ALERTS =============
+    slack_webhook_url: Optional[str] = None
+    
     # ============= REDIS (ARQ) =============
     redis_url: str = "redis://localhost:6379"
 
@@ -215,7 +218,7 @@ class Settings(BaseSettings):
 
     deepinfra_api_url: str = "https://api.deepinfra.com/v1/openai"
     
-    deepinfra_llm_model: str = "Qwen/Qwen3-32B"
+    deepinfra_llm_model: str = "Qwen/Qwen2.5-7B-Instruct"
 
     gdocz_api_key: Optional[str] = None  # For PDF  Markdown extraction (primary)
 
@@ -304,10 +307,8 @@ class Settings(BaseSettings):
 
 
 
-    # ============= INGESTION & PERFORMANCE =============
-
-    ingestion_llm_concurrency: int = 15  # Max parallel LLM extractions (Phase 4A)
-
+    # ============= LLM OPTIMIZATIONS =============
+    ingestion_llm_concurrency: int = 30  # Max parallel LLM extractions
     ingestion_llm_timeout: float = 60.0  # Extended timeout for complex extractions
 
     

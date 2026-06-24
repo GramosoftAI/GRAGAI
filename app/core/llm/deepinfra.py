@@ -70,7 +70,7 @@ class DeepInfraEmbeddingClient:
         self.api_key = settings.deepinfra_api_key
         self.base_url = "https://api.deepinfra.com/v1/openai/embeddings"
         self.model = "BAAI/bge-large-en-v1.5"
-        self.timeout = 10.0  # Request timeout in seconds
+        self.timeout = 30.0  # Request timeout in seconds
         self.max_retries = 3  # Number of retry attempts
         self.max_text_length = 500  # Prevent API overload (approx 125 tokens)
         self.expected_dimension = EXPECTED_EMBEDDING_DIMENSION  # 1024
@@ -329,26 +329,47 @@ class DeepInfraEmbeddingClient:
                     "input": chunk,
                 }
                 
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(self.base_url, headers=headers, json=payload)
+                last_error = None
+                for attempt in range(self.max_retries):
                     try:
-                        response.raise_for_status()
+                        async with httpx.AsyncClient(timeout=self.timeout) as client:
+                            response = await client.post(self.base_url, headers=headers, json=payload)
+                            response.raise_for_status()
+                            data = response.json()
+                            
+                            # Extract embeddings: {"data": [{"embedding": [...], "index": 0}, ...]}
+                            new_batch = [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
+                            all_new_embeddings.extend(new_batch)
+                            
+                            # Update cache
+                            for j, emb in enumerate(new_batch):
+                                orig_text = chunk[j]
+                                t_hash = hashlib.sha256(orig_text.encode()).hexdigest()
+                                _embedding_cache[t_hash] = emb
+                                if t_hash not in _embedding_cache_insertion_order:
+                                    _embedding_cache_insertion_order.append(t_hash)
+                            break  # Success, exit retry loop
+                            
+                    except httpx.TimeoutException:
+                        last_error = TimeoutError(f"API timeout after {self.timeout}s (attempt {attempt + 1})")
+                        logger.warning(f"  Batch API timeout on attempt {attempt + 1}/{self.max_retries}")
                     except httpx.HTTPStatusError as e:
-                        logger.error(f" DeepInfra API Error ({response.status_code}): {response.text}")
-                        raise
-                    data = response.json()
+                        last_error = e
+                        logger.warning(f"  Batch HTTP {e.response.status_code} on attempt {attempt + 1}: {e.response.text}")
+                    except (ValueError, KeyError) as e:
+                        last_error = e
+                        logger.warning(f"  Batch response parsing error on attempt {attempt + 1}: {e}")
+                    except Exception as e:
+                        last_error = e
+                        logger.warning(f"  Batch unexpected error on attempt {attempt + 1}: {e}")
                     
-                    # Extract embeddings: {"data": [{"embedding": [...], "index": 0}, ...]}
-                    new_batch = [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
-                    all_new_embeddings.extend(new_batch)
-                    
-                    # Update cache
-                    for j, emb in enumerate(new_batch):
-                        orig_text = chunk[j]
-                        t_hash = hashlib.sha256(orig_text.encode()).hexdigest()
-                        _embedding_cache[t_hash] = emb
-                        if t_hash not in _embedding_cache_insertion_order:
-                            _embedding_cache_insertion_order.append(t_hash)
+                    if attempt < self.max_retries - 1:
+                        wait_time = 2 ** attempt
+                        logger.debug(f"Retrying batch in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f" All {self.max_retries} attempts failed for batch. Last error: {last_error}")
+                    raise last_error or Exception("Failed to generate batch embeddings after all retries")
 
         # 3. Reconstruct full list in original order
         for i, idx in enumerate(to_embed_indices):

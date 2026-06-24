@@ -81,6 +81,7 @@ class ExtractedTriplet:
     subject_type: str = "CONCEPT"
     object_type: str = "CONCEPT"
     confidence: float = 1.0
+    evidence: str = None
 
     @property
     def text(self) -> str:
@@ -233,7 +234,7 @@ class TripletExtractor:
 
             response_text = await self.llm_client.generate(
                 prompt=prompt,
-                system_prompt="You are a knowledge graph extraction engine. Return only valid JSON.",
+                system_prompt="You are a strict extraction system. Return ONLY valid JSON. DO NOT use <think> tags or explanations.",
                 temperature=0.1,
                 max_tokens=1024,
             )

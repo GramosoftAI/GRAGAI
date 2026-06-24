@@ -341,6 +341,7 @@ async def init_rls_policies():
         "analytics_query_log",
         "document_entities",
         "document_sections",
+        "document_ingestion_runs",
     ]
 
 
@@ -594,6 +595,7 @@ async def verify_rls_enabled():
         "analytics_query_log",
         "document_entities",
         "document_sections",
+        "document_ingestion_runs",
      ]
 
 
@@ -720,7 +722,7 @@ async def init_db():
 
         from ..modules.agents.models import Agent
 
-        from ..modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk, DocumentTableRow, DocumentEntity, DocumentSection
+        from ..modules.knowledge_bases.models import KnowledgeBase, DatabaseConnection, DocumentChunk, DocumentTableRow, DocumentEntity, DocumentSection, DocumentIngestionRun
 
         from ..modules.chats.models import ChatSession, ChatMessage
 

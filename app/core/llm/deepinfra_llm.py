@@ -424,7 +424,7 @@ class DeepInfraLLMClient:
 
                 async with _llm_semaphore:
 
-                    response = await client.post(self.base_url, headers=headers, json=payload)
+                    response = await client.post(self.base_url, headers=headers, json=payload, timeout=self.timeout)
 
                 response.raise_for_status()
 
@@ -453,6 +453,58 @@ class DeepInfraLLMClient:
 
         raise last_error
 
+    async def generate_with_usage(
+        self,
+        prompt: str,
+        system_prompt: str = "You are a helpful assistant.",
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Similar to generate() but returns token usage alongside content.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": temperature if temperature is not None else self.temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+        }
+        
+        last_error = None
+        for attempt in range(3):
+            try:
+                client = await self.get_client()
+                async with _llm_semaphore:
+                    response = await client.post(self.base_url, headers=headers, json=payload, timeout=self.timeout)
+                response.raise_for_status()
+                data = response.json()
+                content = data["choices"][0]["message"]["content"].strip()
+                if "<think>" in content and "</think>" in content:
+                    content = content.split("</think>", 1)[1].strip()
+                    
+                usage = data.get("usage", {})
+                return {
+                    "content": content,
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0)
+                }
+            except Exception as e:
+                last_error = e
+                logger.warning(f"generate_with_usage() attempt {attempt+1}/3 failed: {e}")
+                if attempt < 2:
+                    import asyncio
+                    await asyncio.sleep(2 ** attempt)
+        
+        logger.error(f"generate_with_usage() all 3 attempts failed. Last error: {last_error}")
+        raise last_error
 
 
     async def stream_answer(
