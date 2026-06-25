@@ -34,6 +34,10 @@ class KBCreate(BaseModel):
         max_length=50,
         description="Document type classification (e.g. PRICE_LIST, INVOICE)",
     )
+    dataset_schema: Optional[dict] = Field(
+        None,
+        description="Schema definition of the tabular dataset",
+    )
     s3_path: Optional[str] = Field(
         None,
         max_length=1024,

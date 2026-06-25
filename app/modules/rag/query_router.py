@@ -60,10 +60,6 @@ class QueryRouter:
 
         # Pre-compile regex patterns for high performance
         self.patterns = {
-            SearchType.TABLE_ANALYTICS: re.compile(
-                r'\b(below|above|greater than|less than|between|top \d+|highest|lowest|average|count|sum|total of|cheapest|most expensive|all products where|price under|price over|mrp)\b',
-                re.IGNORECASE
-            ),
             SearchType.SUPPORT_INTENT: re.compile(
                 r'\b(help|support|complaint|human|call me|contact support|representative|agent|operator)\b',
                 re.IGNORECASE
@@ -270,7 +266,7 @@ Choose exactly one of the following intents:
 - MEMORY_ONLY: Personal history/preferences
 - ENTITY_CONNECTION: Relationship between two things
 - SOCIAL: Greetings, thanks, or small talk
-- TABLE_ANALYTICS: Database-style filtering on tables
+- TABLE_ANALYTICS: Database-style filtering or aggregations on structured tabular data (COUNT, AVG, MIN, MAX, GROUP BY, SORT, highest, lowest)
 - EXTRACTIVE: Strict exact value retrieval without generation (e.g., "Give me the GSTIN", "What is the invoice number and engine number")
 - GRAPH_COMPLETION: General default.
 

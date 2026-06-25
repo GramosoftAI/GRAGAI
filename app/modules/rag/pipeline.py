@@ -1589,76 +1589,222 @@ class RAGPipeline:
 
     async def _execute_table_analytics(self, query: str, kb_ids: list[str]) -> Optional[str]:
         """
-        Text-to-SQL engine for JSONB tables.
-        Uses LLM to convert natural language query into PostgreSQL JSONB query, executes it (read-only), and returns results.
+        Text-to-JSON Structured Query Planner.
+        Uses LLM to convert natural language query into a JSON AST, executes it securely, and returns results.
         """
         from sqlalchemy import text
         import json
         
-        # 1. First, retrieve 1 sample row to give the LLM the JSON schema
-        sample_query = "SELECT row_data FROM document_table_rows WHERE kb_id = ANY(:kb_ids) LIMIT 1;"
-        
+        # 1. Fetch schema
+        schema_query = "SELECT dataset_schema FROM knowledge_bases WHERE id = ANY(CAST(:kb_ids AS uuid[])) AND dataset_schema IS NOT NULL LIMIT 1;"
         async with self.db_session_maker() as db:
-            result = await db.execute(text(sample_query), {"kb_ids": kb_ids})
-            sample_row = result.scalar()
+            result = await db.execute(text(schema_query), {"kb_ids": kb_ids})
+            dataset_schema = result.scalar()
             
-            if not sample_row:
-                return None  # No table data exists for this KB
+        if not dataset_schema:
+            sample_query = "SELECT row_data FROM document_table_rows WHERE kb_id = ANY(CAST(:kb_ids AS uuid[])) LIMIT 1;"
+            async with self.db_session_maker() as db:
+                result = await db.execute(text(sample_query), {"kb_ids": kb_ids})
+                sample_row = result.scalar()
+            if sample_row:
+                dataset_schema = {k: "unknown" for k in sample_row.keys()}
+            else:
+                return None
                 
-        # 2. Ask LLM to generate SQL
-        schema_keys = list(sample_row.keys()) if isinstance(sample_row, dict) else []
-        
-        prompt = f"""You are a PostgreSQL expert. Convert the user's natural language query into a secure PostgreSQL query to filter a JSONB column.
+        # 2. Ask LLM to generate JSON AST
+        prompt = f"""You are a Structured Query Planner. Convert the user's natural language query into a JSON Abstract Syntax Tree (AST) for tabular analytics.
 
-TABLE NAME: document_table_rows
-TARGET COLUMN: row_data (type JSONB)
-
-AVAILABLE JSON KEYS in row_data:
-{json.dumps(schema_keys, indent=2)}
+AVAILABLE COLUMNS & TYPES:
+{json.dumps(dataset_schema, indent=2)}
 
 USER QUERY: {query}
 
 INSTRUCTIONS:
-1. Return ONLY the raw SQL query, no markdown blocks, no explanations.
-2. The query MUST be a SELECT statement.
-3. Query the `row_data` column.
-4. Use standard Postgres JSONB operators. E.g., `(row_data->>'price')::numeric < 5000`
-5. MUST include the clause: `kb_id = ANY(:kb_ids)` to filter by Knowledge Base.
-6. Limit the results to 50 rows maximum to prevent memory issues.
+Return ONLY valid JSON matching this schema exactly:
+{{
+  "operation": "string", // MUST be one of: "COUNT", "AVG", "MAX", "MIN", "SUM", "GROUP", "SORT", "FILTER"
+  "target_field": "string | null", // The field to aggregate or target, or null
+  "filters": [
+    {{
+      "field": "string", // The exact column name
+      "operator": "string", // MUST be one of: "=", "!=", ">", "<", ">=", "<=", "ILIKE", "LIKE". Use ILIKE for case-insensitive substring searches (e.g., %Action%).
+      "value": "string | number" // The value to compare. For ILIKE, wrap in % like "%Action%".
+    }}
+  ],
+  "group_by": "string | null", // Field to group by
+  "sort_by": "string | null", // Field to sort by
+  "sort_dir": "string", // "ASC" or "DESC"
+  "limit": 50 // Integer limit
+}}
 
-EXAMPLE OUTPUT:
-SELECT row_data FROM document_table_rows WHERE kb_id = ANY(:kb_ids) AND (row_data->>'mrp')::numeric < 5000 LIMIT 50;
+Return ONLY JSON, no markdown formatting.
 """
 
-        generated_sql = await self.llm_client.generate(
+        generated_ast_str = await self.llm_client.generate(
             prompt=prompt,
-            system_prompt="You are a SQL engine. Return only SQL.",
+            system_prompt="You are a Structured Query Planner. Return only JSON.",
             temperature=0.0,
-            max_tokens=300
+            max_tokens=4000
         )
         
-        clean_sql = generated_sql.strip().strip('`').removeprefix('sql\n')
-        
-        # Security checks
-        if not clean_sql.upper().startswith("SELECT") or "INSERT" in clean_sql.upper() or "UPDATE" in clean_sql.upper() or "DELETE" in clean_sql.upper() or "DROP" in clean_sql.upper():
-            logger.error(f" Unsafe SQL generated: {clean_sql}")
+        import re
+        try:
+            # Extract JSON block even if there is a <think> tag
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', generated_ast_str, re.DOTALL)
+            if json_match:
+                clean_json = json_match.group(1)
+            else:
+                # Fallback to finding the first { and last }
+                start_idx = generated_ast_str.find('{')
+                end_idx = generated_ast_str.rfind('}')
+                if start_idx != -1 and end_idx != -1:
+                    clean_json = generated_ast_str[start_idx:end_idx+1]
+                else:
+                    clean_json = generated_ast_str
+            ast = json.loads(clean_json)
+        except Exception as e:
+            logger.error(f" Failed to parse JSON AST: {e} - String: {generated_ast_str}")
             return None
             
-        logger.info(f" Generated Text-to-SQL: {clean_sql}")
+        logger.info(f" Structured Query AST: {json.dumps(ast)}")
         
-        # 3. Execute the generated SQL
+        # 2.5 AST Validation Layer
+        operation = str(ast.get("operation", "FILTER")).upper()
+        target_field = ast.get("target_field")
+        
+        valid_operations = {"COUNT", "AVG", "MAX", "MIN", "SUM", "GROUP", "FILTER"}
+        if operation not in valid_operations:
+            return f"Validation Error: Unsupported operation '{operation}'."
+            
+        numeric_types = ["float", "integer", "currency", "percentage"]
+        if operation in ["AVG", "MAX", "MIN", "SUM"]:
+            if not target_field:
+                return f"Validation Error: Operation '{operation}' requires a target_field."
+            if target_field not in dataset_schema:
+                return f"Validation Error: Unknown target field '{target_field}'."
+            if dataset_schema[target_field] not in numeric_types:
+                return f"Validation Error: Cannot perform {operation} on non-numeric field '{target_field}' (type: {dataset_schema[target_field]})."
+                
+        if operation == "GROUP":
+            group_by = ast.get("group_by")
+            if not group_by or group_by not in dataset_schema:
+                return f"Validation Error: Unknown or missing group_by field '{group_by}'."
+                
+        sort_by = ast.get("sort_by")
+        if sort_by and sort_by not in dataset_schema:
+            return f"Validation Error: Unknown sort_by field '{sort_by}'."
+            
+        for f in ast.get("filters", []):
+            field = f.get("field")
+            if not field or field not in dataset_schema:
+                return f"Validation Error: Unknown filter field '{field}'."
+            op = str(f.get("operator", "=")).upper()
+            if op not in ["=", "!=", ">", "<", ">=", "<=", "ILIKE", "LIKE", "CONTAINS"]:
+                return f"Validation Error: Unsupported filter operator '{op}' for field '{field}'."
+
+        # 3. Secure Backend Query Builder
+        select_clause = "row_data"
+        if operation == "COUNT":
+            select_clause = "COUNT(*)"
+        elif operation in ["AVG", "MAX", "MIN", "SUM"] and target_field:
+            select_clause = f"{operation}((row_data->>'{target_field}')::numeric)"
+        elif operation == "GROUP" and ast.get("group_by"):
+            group_field = ast.get("group_by")
+            select_clause = f"row_data->>'{group_field}' as group_key, COUNT(*) as count"
+            
+        where_clauses = ["kb_id = ANY(CAST(:kb_ids AS uuid[]))"]
+        params = {"kb_ids": kb_ids}
+        
+        # Build explainability parts
+        explain_filters = []
+        for i, f in enumerate(ast.get("filters", [])):
+            field = f.get("field")
+            op = str(f.get("operator", "=")).upper()
+            val = f.get("value")
+            
+            # Translate contains to ILIKE
+            if op == "CONTAINS":
+                op = "ILIKE"
+                if isinstance(val, str) and not val.startswith("%"):
+                    val = f"%{val}%"
+                    
+            field_type = dataset_schema.get(field, "string")
+            if field_type in numeric_types and op in [">", "<", ">=", "<=", "=", "!="]:
+                where_clauses.append(f"(row_data->>'{field}')::numeric {op} :val_{i}")
+            else:
+                where_clauses.append(f"row_data->>'{field}' {op} :val_{i}")
+                
+            params[f"val_{i}"] = val
+            explain_filters.append(f"{field} {op} {val}")
+            
+        where_str = " AND ".join(where_clauses)
+        query_str = f"SELECT {select_clause} FROM document_table_rows WHERE {where_str}"
+        
+        if operation == "GROUP" and ast.get("group_by"):
+            query_str += f" GROUP BY row_data->>'{ast['group_by']}'"
+            
+        if ast.get("sort_by"):
+            sort_dir = "ASC" if str(ast.get("sort_dir", "DESC")).upper() == "ASC" else "DESC"
+            sort_field = ast["sort_by"]
+            
+            if dataset_schema.get(sort_field) in numeric_types:
+                query_str += f" ORDER BY (row_data->>'{sort_field}')::numeric {sort_dir}"
+            else:
+                query_str += f" ORDER BY row_data->>'{sort_field}' {sort_dir}"
+        elif operation == "GROUP":
+            query_str += " ORDER BY count DESC"
+            
+        limit = min(int(ast.get("limit", 50) or 50), 100)
+        if operation not in ["COUNT"]:
+            query_str += f" LIMIT {limit}"
+            
+        logger.info(f" Executing Parameterized SQL: {query_str} with {params}")
+        
+        # 4. Execute the generated SQL
         async with self.db_session_maker() as db:
             try:
-                # Use a read-only transaction implicitly by just executing SELECT
-                result = await db.execute(text(clean_sql), {"kb_ids": kb_ids})
-                rows = result.scalars().all()
+                result = await db.execute(text(query_str), params)
+                rows = result.all()
                 
                 if not rows:
                     return "No matching records found in the structured tables."
                     
-                # 4. Format output
-                formatted = json.dumps([dict(r) if hasattr(r, 'keys') else r for r in rows], indent=2)
-                return formatted
+                from decimal import Decimal
+                formatted_rows = []
+                for r in rows:
+                    if hasattr(r, '_mapping'):
+                        row_dict = dict(r._mapping)
+                    elif hasattr(r, 'keys'):
+                        row_dict = dict(r)
+                    else:
+                        row_dict = {"value": r[0]}
+                        
+                    # Convert Decimals to float
+                    for k, v in row_dict.items():
+                        if isinstance(v, Decimal):
+                            row_dict[k] = float(v)
+                            
+                    formatted_rows.append(row_dict)
+                        
+                formatted = json.dumps(formatted_rows, indent=2)
+                
+                # 5. Explainability Layer
+                explanation = "\n\n---\nComputed using:\n"
+                if operation in ["AVG", "MAX", "MIN", "SUM"]:
+                    explanation += f"- Operation: {operation} on '{target_field}'\n"
+                elif operation == "GROUP":
+                    explanation += f"- Operation: GROUP BY '{ast.get('group_by')}'\n"
+                else:
+                    explanation += f"- Operation: {operation}\n"
+                    
+                if explain_filters:
+                    explanation += f"- Filters: {', '.join(explain_filters)}\n"
+                else:
+                    explanation += f"- Filters: None\n"
+                    
+                explanation += f"- Records returned: {len(formatted_rows)}\n"
+                
+                return formatted + explanation
                 
             except Exception as e:
                 logger.error(f" SQL Execution Failed: {e}")
@@ -2964,169 +3110,5 @@ SELECT row_data FROM document_table_rows WHERE kb_id = ANY(:kb_ids) AND (row_dat
 
             return {}
 
-    async def _execute_table_analytics(self, query: str, kb_ids: list[str]) -> Optional[str]:
-        """
-        Deterministic Table Analytics engine.
-        Uses LLM to extract JSON parameters, builds a safe SQLAlchemy query against typed columns,
-        enforces column whitelisting, supports deterministic aggregations, and maintains an audit trail.
-        """
-        from sqlalchemy import text
-        import json
-        import time
-        import uuid
-        
-        start_time = time.time()
-        
-        ALLOWED_COLUMNS = {"mrp", "gst", "part_number", "product_name", "hsn_code"}
-        
-        prompt = f"""Extract the search parameters from the user's query into JSON format.
 
-USER QUERY: {query}
-
-AVAILABLE COLUMNS:
-- mrp (numeric): price, cost, mrp, rate
-- gst (numeric): tax, gst
-- part_number (string): part number, item code
-- product_name (string): product, item description, name
-- hsn_code (string): hsn
-
-JSON SCHEMA:
-{{
-    "intent": "filter", // "filter" or "aggregate"
-    "metric": null, // If aggregate: "average", "max", "min", "sum", "count"
-    "column": "mrp", // Must be one of the AVAILABLE COLUMNS, or null
-    "operator": "<", // Valid operators for filter: <, >, <=, >=, =, or null
-    "value": 5000, // Numeric value or string, or null
-    "keyword": "alternator" // Any specific text search keyword, or null
-}}
-
-Return ONLY valid JSON. Do not invent column names.
-"""
-        generated_json = await self.llm_client.generate(
-            prompt=prompt,
-            system_prompt="You are a parameter extraction engine. Return only JSON.",
-            temperature=0.0,
-            max_tokens=150
-        )
-        
-        # Parse JSON intent
-        try:
-            clean_json = generated_json.strip().strip('`').removeprefix('json\n')
-            intent = json.loads(clean_json)
-        except json.JSONDecodeError:
-            logger.error(f" Failed to parse intent JSON: {generated_json}")
-            return None
-            
-        logger.info(f" Parsed Table Analytics Intent: {intent}")
-        
-        col = intent.get("column")
-        if col and col not in ALLOWED_COLUMNS:
-            logger.error(f" LLM Hallucinated column: {col}")
-            return f"Error: Cannot query unauthorized column '{col}'."
-            
-        intent_type = intent.get("intent", "filter")
-        metric = intent.get("metric")
-        op = intent.get("operator")
-        val = intent.get("value")
-        kw = intent.get("keyword")
-        
-        valid_ops = ["<", ">", "<=", ">=", "="]
-        
-        params = {"kb_ids": kb_ids}
-        where_clauses = ["kb_id = ANY(:kb_ids)"]
-        
-        if col and op in valid_ops and val is not None and intent_type == "filter":
-            where_clauses.append(f"{col} {op} :val")
-            params["val"] = val
-            
-        if kw:
-            where_clauses.append(f"(product_name ILIKE :kw OR row_data::text ILIKE :kw)")
-            params["kw"] = f"%{kw}%"
-            
-        where_sql = " AND ".join(where_clauses)
-        
-        # Build deterministic SQLAlchemy query
-        if intent_type == "aggregate" and metric and col:
-            agg_funcs = {
-                "average": f"AVG({col})",
-                "max": f"MAX({col})",
-                "min": f"MIN({col})",
-                "sum": f"SUM({col})",
-                "count": f"COUNT({col})"
-            }
-            if metric not in agg_funcs:
-                metric = "count"
-                col = "*"
-                agg_func_sql = "COUNT(*)"
-            else:
-                agg_func_sql = agg_funcs[metric]
-                
-            final_sql = f"SELECT {agg_func_sql} AS agg_result FROM document_table_rows WHERE {where_sql};"
-        else:
-            final_sql = f"SELECT part_number, product_name, mrp, gst, hsn_code, row_data FROM document_table_rows WHERE {where_sql} LIMIT 50;"
-        
-        logger.info(f" Executing Deterministic SQL: {final_sql} with params {params}")
-        
-        async with self.db_session_maker() as db:
-            try:
-                await db.execute(text("SET TRANSACTION READ ONLY;"))
-                result = await db.execute(text(final_sql), params)
-                rows = result.mappings().all()
-                
-                rows_returned = len(rows)
-                
-                if not rows:
-                    final_response = "No matching records found in the structured tables."
-                else:
-                    if intent_type == "aggregate":
-                        # Aggregations don't need constraint validation
-                        validated_rows = [dict(row) for row in rows]
-                        final_response = json.dumps(validated_rows, indent=2, default=str)
-                    else:
-                        # Validation Layer for filters
-                        validated_rows = []
-                        for row in rows:
-                            if col in ["mrp", "gst"] and op in valid_ops and val is not None:
-                                row_val = row.get(col)
-                                if row_val is None: continue
-                                
-                                v = float(row_val)
-                                target = float(val)
-                                if op == "<" and not (v < target): continue
-                                if op == ">" and not (v > target): continue
-                                if op == "<=" and not (v <= target): continue
-                                if op == ">=" and not (v >= target): continue
-                                if op == "=" and not (v == target): continue
-                                
-                            validated_rows.append(dict(row))
-                            
-                        if not validated_rows:
-                            final_response = f"Found rows, but they failed the validation constraint ({col} {op} {val})."
-                        else:
-                            final_response = json.dumps(validated_rows, indent=2, default=str)
-                            rows_returned = len(validated_rows)
-                
-                # Write to Analytics Query Log
-                execution_time_ms = int((time.time() - start_time) * 1000)
-                from app.modules.knowledge_bases.models import AnalyticsQueryLog
-                
-                log_entry = AnalyticsQueryLog(
-                    tenant_id=self.tenant_id,
-                    kb_id=uuid.UUID(kb_ids[0]) if kb_ids else uuid.uuid4(),
-                    query_text=query,
-                    intent_json=intent,
-                    generated_sql=final_sql,
-                    rows_returned=rows_returned,
-                    execution_time_ms=execution_time_ms
-                )
-                db.add(log_entry)
-                # Must end read only transaction and start new one for insert
-                await db.execute(text("COMMIT;"))
-                await db.commit()
-                
-                return final_response
-                
-            except Exception as e:
-                logger.error(f" SQL Execution Failed: {e}", exc_info=True)
-                return None
 

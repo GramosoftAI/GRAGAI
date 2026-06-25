@@ -319,9 +319,8 @@ class KnowledgeBaseService:
                 description=request.description,
 
                 source=request.source or "user_upload",
-
                 s3_path=request.s3_path,
-
+                dataset_schema=request.dataset_schema,
             )
 
             kb_id = str(pg_kb.id)

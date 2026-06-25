@@ -11,6 +11,7 @@ from app.modules.knowledge_bases.service import KnowledgeBaseService
 from app.modules.agents.service import AgentService
 from app.modules.knowledge_bases.schemas import KBCreate
 from app.core.pdf_extractor import PDFExtractor
+from app.core.excel_extractor import ExcelExtractor
 from app.core.llm.deepinfra_llm import DeepInfraLLMClient
 
 logger = logging.getLogger(__name__)
@@ -40,18 +41,26 @@ async def run_pdf_ingestion_job(
             # Update status to processing
             await job_service.update_job_progress(job_id, status="processing", progress=5, current_step="Starting PDF Extraction (OCR)")
             
-            # Step 1: PDF Extraction (OCR)
-            logger.info(f"Job {job_id}: Starting PDF extraction for {filename}")
+            # Step 1: Document Extraction
+            logger.info(f"Job {job_id}: Starting extraction for {filename}")
             try:
-                document_text = await PDFExtractor.extract(
-                    pdf_bytes=content,
-                    filename=filename,
-                    tenant_id=tenant_id,
-                    agent_id=agent_id,
-                )
+                table_rows = []
+                dataset_schema = None
+                if filename.lower().endswith(('.csv', '.xls', '.xlsx')):
+                    document_text, table_rows, dataset_schema = await ExcelExtractor.extract(
+                        file_bytes=content,
+                        filename=filename,
+                    )
+                else:
+                    document_text = await PDFExtractor.extract(
+                        pdf_bytes=content,
+                        filename=filename,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                    )
             except Exception as e:
-                logger.error(f"Job {job_id}: PDF extraction failed: {e}")
-                await job_service.update_job_progress(job_id, status="failed", progress=5, current_step="PDF Extraction", error_message=f"Failed to extract text from PDF: {str(e)}")
+                logger.error(f"Job {job_id}: Extraction failed: {e}")
+                await job_service.update_job_progress(job_id, status="failed", progress=5, current_step="Extraction", error_message=f"Failed to extract text: {str(e)}")
                 return
                 
             if not document_text.strip():
@@ -70,9 +79,10 @@ async def run_pdf_ingestion_job(
                 
             await job_service.update_job_progress(job_id, status="processing", progress=25, current_step="Extracting Structured Tables")
             
-            # Step 1.5: Table Extraction
-            logger.info(f"Job {job_id}: Extracting structured tables")
-            table_rows = await PDFExtractor.extract_tables_to_json(pdf_bytes=content)
+            # Step 1.5: Table Extraction (PDF only)
+            if not filename.lower().endswith(('.csv', '.xls', '.xlsx')):
+                logger.info(f"Job {job_id}: Extracting structured tables")
+                table_rows = await PDFExtractor.extract_tables_to_json(pdf_bytes=content)
             
             await job_service.update_job_progress(job_id, status="processing", progress=40, current_step="Creating Knowledge Base Entry")
 
@@ -88,6 +98,7 @@ async def run_pdf_ingestion_job(
                 agent_id=uuid.UUID(agent_id),
                 source="pdf_upload",
                 document_type=document_type,
+                dataset_schema=dataset_schema,
                 s3_path=s3_url
             )
             

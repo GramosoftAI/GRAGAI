@@ -82,6 +82,8 @@ class KnowledgeBaseRepository(BaseRepository):
 
         s3_path: Optional[str] = None,
 
+        dataset_schema: Optional[dict] = None,
+
     ) -> KnowledgeBase:
 
         """
@@ -143,7 +145,7 @@ class KnowledgeBaseRepository(BaseRepository):
             is_active=True,
 
             s3_path=s3_path,
-
+            dataset_schema=dataset_schema,
         )
 
 

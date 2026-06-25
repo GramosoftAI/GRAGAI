@@ -86,6 +86,9 @@ class KnowledgeBase(Base):
         default="user_upload",
     )  # user_upload, api, database, etc.
 
+    from sqlalchemy.dialects.postgresql import JSONB
+    dataset_schema = Column(JSONB, nullable=True)
+
     # ============= CONTENT TRACKING =============
     total_chunks = Column(
         Integer,
@@ -303,6 +306,7 @@ class DocumentTableRow(Base):
         Index("ix_tablerows_tenant_id", "tenant_id"),
         Index("ix_tablerows_kb_id", "kb_id"),
         Index("ix_tablerows_page_idx", "page_number"),
+        Index("ix_tablerows_row_data_gin", "row_data", postgresql_using="gin"),
     )
     
     def __repr__(self) -> str:
