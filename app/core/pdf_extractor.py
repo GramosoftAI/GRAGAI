@@ -176,6 +176,13 @@ class PDFExtractor:
                     )
                     # Clean page markers if present in HTML
                     raw_html_clean = re.sub(r"<---- Page \d+ ---->\r?\n?", "", raw_html)
+                    
+                    # LLM-based HTML repair
+                    try:
+                        raw_html_clean = await PDFExtractor._repair_html_with_llm(raw_html_clean)
+                    except Exception as llm_err:
+                        logger.warning(f"LLM HTML repair failed, using raw HTML: {llm_err}")
+                        
                     # Clean markdown / HTML for RAG
                     cleaned = PDFExtractor._clean_markdown_for_rag(raw_html_clean)
                     logger.info(
@@ -208,6 +215,15 @@ class PDFExtractor:
                     f" pdfplumber extraction success: {filename} "
                     f"({len(extracted_text)} chars)"
                 )
+                # LLM-based reconstruction of raw text to clean semantic HTML
+                try:
+                    reconstructed_html = await PDFExtractor._reconstruct_text_to_html_with_llm(extracted_text)
+                    cleaned = PDFExtractor._clean_markdown_for_rag(reconstructed_html)
+                    logger.info("Successfully reconstructed pdfplumber plain text to HTML via LLM")
+                    return ExtractedText(cleaned, reconstructed_html, is_html=True)
+                except Exception as llm_err:
+                    logger.warning(f"LLM text reconstruction to HTML failed: {llm_err}. Returning raw plain text.")
+                
                 return ExtractedText(extracted_text, extracted_text, is_html=False)
         except Exception as e:
             logger.error(f" pdfplumber also failed for {filename}: {e}")
@@ -228,6 +244,87 @@ class PDFExtractor:
         Extract PDF content using Gdocz OCR server.
         """
         def _sync_gdocz_convert(pdf_data: bytes, fname: str) -> str:
+<<<<<<< HEAD
+            import requests
+            import os
+            import time
+            url = "https://gdocz.gramopro.ai/ocr/ocr/pdf"
+            headers = {"X-API-Key": settings.gdocz_api_key}
+            files = {"file": (fname, pdf_data, "application/pdf")}
+            
+            # Smart determination of document type 
+            doc_type = "GENERAL"
+            fname_lower = fname.lower()
+            if "resume" in fname_lower or "cv" in fname_lower or "profile" in fname_lower:
+                doc_type = "resume"
+            elif "invoice" in fname_lower or "bill" in fname_lower:
+                doc_type = "INVOICE"
+            elif "quote" in fname_lower or "quotation" in fname_lower:
+                doc_type = "QUOTATION"
+            elif "price" in fname_lower:
+                doc_type = "PRICE_LIST"
+
+            data = {
+                "model": "chandra",
+                "output_format": "html",
+                "document_type": doc_type
+            }
+
+            max_retries = 3
+            last_err = None
+            res_json = None
+            
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Calling Gdocz `/ocr/pdf` directly with document_type: {doc_type} (attempt {attempt + 1}/{max_retries})")
+                    response = requests.post(url, files=files, data=data, headers=headers, timeout=600)
+                    
+                    if response.status_code != 200:
+                        raise ValueError(f"Gdocz API returned status code {response.status_code}: {response.text}")
+                        
+                    res_json = response.json()
+                    if not res_json.get("success"):
+                        raise ValueError(f"Gdocz API error: {res_json.get('error')}")
+                        
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"Gdocz attempt {attempt + 1} failed: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+            else:
+                raise last_err
+                
+            raw_markdown = res_json.get("markdown", "")
+            
+            # Post-process to embed base64 images from 'images' or 'image_map'
+            images = res_json.get("images") or res_json.get("image_map") or {}
+            if images:
+                logger.info(f"Embedding {len(images)} base64 images into HTML/markdown content")
+                for img_name, img_base64 in images.items():
+                    if not img_base64:
+                        continue
+                    # Ensure base64 has data URI prefix
+                    if not img_base64.startswith("data:image/"):
+                        ext = os.path.splitext(img_name.lower())[1]
+                        mime = "image/jpeg"
+                        if ext == ".png":
+                            mime = "image/png"
+                        elif ext == ".gif":
+                            mime = "image/gif"
+                        elif ext == ".webp":
+                            mime = "image/webp"
+                        img_base64 = f"data:{mime};base64,{img_base64}"
+                    
+                    # Replace in HTML format: src="img_name", src='img_name', src=img_name
+                    raw_markdown = raw_markdown.replace(f'src="{img_name}"', f'src="{img_base64}"')
+                    raw_markdown = raw_markdown.replace(f"src='{img_name}'", f"src='{img_base64}'")
+                    raw_markdown = raw_markdown.replace(f'src={img_name}', f'src="{img_base64}"')
+                    # Also replace in markdown format: ![](img_name) -> ![](base64)
+                    raw_markdown = raw_markdown.replace(f"({img_name})", f"({img_base64})")
+            
+            return raw_markdown
+=======
             from gdocz_sdk import GdoczaiClient, ConvertOptions
             import tempfile
             import os
@@ -254,6 +351,7 @@ class PDFExtractor:
             finally:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
+>>>>>>> d69cf823da0794f2084373394a5d2fa5ce3779d5
 
         loop = asyncio.get_event_loop()
         raw_markdown = await loop.run_in_executor(
@@ -535,3 +633,141 @@ class PDFExtractor:
             except:
                 pass
             return {"identifiers": [], "sections": []}
+
+    @staticmethod
+    async def _repair_html_with_llm(html_content: str) -> str:
+        """
+        Use the LLM (Qwen/GPT) to post-process and repair the Gdocz raw HTML:
+        - Fix broken tables and merge header/rows
+        - Restore decimal quantities (e.g., preserving dots in quantities/prices)
+        - Merge split words (e.g., "Maintenanc e" -> "Maintenance")
+        - Keep all values/text unchanged (do not summarize or omit data)
+        - Return valid HTML only
+        """
+        if not html_content or not html_content.strip():
+            return html_content
+
+        # Placeholder strategy for base64 images to save tokens and prevent corruption
+        image_placeholders = {}
+        placeholder_html = html_content
+        
+        # Match base64 data URIs
+        data_uri_pattern = re.compile(r'(data:image/[^\s"\'>\)]+)')
+        matches = data_uri_pattern.findall(html_content)
+        
+        for idx, base64_str in enumerate(matches):
+            placeholder = f"__IMG_BASE64_PLACEHOLDER_{idx}__"
+            image_placeholders[placeholder] = base64_str
+            placeholder_html = placeholder_html.replace(base64_str, placeholder)
+
+        from .llm.deepinfra_llm import DeepInfraLLMClient
+        
+        system_prompt = (
+            "You are an expert document reconstruction and HTML repair assistant. "
+            "Your task is to take a raw, imperfectly extracted HTML document and return a cleaned, "
+            "semantically correct, and structurally valid HTML version.\n\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "1. Fix broken table structures. Ensure tables have proper thead/tbody/tr/td/th structure.\n"
+            "2. Merge separated table headers and data if they were split into separate tables.\n"
+            "3. Restore decimal quantities (e.g., if a quantity or rate lost its dot and became 9000 instead of 9.000, correct it based on the invoice context).\n"
+            "4. Merge split words (e.g., merge 'Maintenanc e' into 'Maintenance', 'elnvoice' to 'eInvoice').\n"
+            "5. Keep all document values, numbers, names, and text content completely unchanged. Do not summarize or omit any information.\n"
+            "6. DO NOT modify, remove, or corruption any image placeholders like __IMG_BASE64_PLACEHOLDER_0__. Keep them exactly in their original tags and positions.\n"
+            "7. Return ONLY the valid HTML. Do not include markdown code fences (like ```html), do not write any introductory or concluding text."
+        )
+
+        user_prompt = (
+            "Here is the raw HTML content to repair:\n\n"
+            f"{placeholder_html}"
+        )
+
+        try:
+            logger.info("Starting LLM-based HTML repair...")
+            llm_client = DeepInfraLLMClient()
+            # Set a high token limit since the HTML can be large
+            max_tokens = min(16384, len(placeholder_html) * 3 + 2000)
+            repaired_html = await llm_client.generate(
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                temperature=0.0,
+                max_tokens=max_tokens
+            )
+            repaired_html = repaired_html.strip()
+            
+            # Remove markdown fences if the LLM outputted them despite instructions
+            if repaired_html.startswith("```"):
+                # Strip leading ```html or ```
+                repaired_html = re.sub(r"^```(?:html)?\r?\n", "", repaired_html)
+                repaired_html = re.sub(r"\r?\n```$", "", repaired_html)
+                repaired_html = repaired_html.strip()
+
+            if repaired_html:
+                logger.info(f"LLM HTML repair success: original length {len(html_content)} -> repaired length {len(repaired_html)}")
+                
+                # Restore original base64 images
+                for placeholder, base64_str in image_placeholders.items():
+                    repaired_html = repaired_html.replace(placeholder, base64_str)
+                    
+                return repaired_html
+        except Exception as e:
+            logger.error(f"Failed to repair HTML with LLM: {e}")
+            
+        return html_content
+
+    @staticmethod
+    async def _reconstruct_text_to_html_with_llm(raw_text: str) -> str:
+        """
+        Use the LLM (Qwen/GPT) to reconstruct messy, layout-scrambled plain text
+        from pdfplumber/OCR into clean, semantic, and well-structured HTML.
+        """
+        if not raw_text or not raw_text.strip():
+            return raw_text
+
+        from .llm.deepinfra_llm import DeepInfraLLMClient
+        
+        system_prompt = (
+            "You are an expert document reconstruction assistant. Your task is to take messy, "
+            "scrambled plain text extracted from a PDF (where tables, columns, and sections are interleaved "
+            "or flattened) and reconstruct it into clean, well-formatted, and semantically correct HTML.\n\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "1. Identify and reconstruct tables. Group headers and data rows correctly. Look for numeric sequences "
+            "that represent rows (e.g. quantities, prices, taxes) and align them with descriptions and codes.\n"
+            "2. Preserve decimal quantities. Ensure quantities, rates, and values do not lose their decimal points "
+            "(e.g., '9.000' should remain '9.000' or '9.0', do not convert it to '9000').\n"
+            "3. Merge split words (e.g., 'Maintenanc e' -> 'Maintenance', 'elnvoice' -> 'eInvoice').\n"
+            "4. Retain all original information, including names, dates, amounts, invoice numbers, and line items. "
+            "Do not omit, summarize, or truncate any data.\n"
+            "5. Reconstruct the document hierarchy logically using semantic HTML tags: <h1>, <h2>, <h3>, <p>, <table>, <tr>, <th>, <td>.\n"
+            "6. Return ONLY the valid HTML. Do not include markdown code fences (like ```html), do not write any introductory or concluding text."
+        )
+
+        user_prompt = (
+            "Here is the raw text to reconstruct into structured HTML:\n\n"
+            f"{raw_text}"
+        )
+
+        try:
+            logger.info("Starting LLM-based text to HTML reconstruction...")
+            llm_client = DeepInfraLLMClient()
+            max_tokens = min(16384, len(raw_text) * 4 + 2000)
+            reconstructed_html = await llm_client.generate(
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                temperature=0.0,
+                max_tokens=max_tokens
+            )
+            reconstructed_html = reconstructed_html.strip()
+            
+            # Remove markdown code fences if outputted
+            if reconstructed_html.startswith("```"):
+                reconstructed_html = re.sub(r"^```(?:html)?\r?\n", "", reconstructed_html)
+                reconstructed_html = re.sub(r"\r?\n```$", "", reconstructed_html)
+                reconstructed_html = reconstructed_html.strip()
+
+            if reconstructed_html:
+                logger.info(f"LLM text reconstruction success: original length {len(raw_text)} -> html length {len(reconstructed_html)}")
+                return reconstructed_html
+        except Exception as e:
+            logger.error(f"Failed to reconstruct text with LLM: {e}")
+            
+        return raw_text
