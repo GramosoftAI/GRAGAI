@@ -498,6 +498,7 @@ class KnowledgeBaseService:
         s3_path: Optional[str] = None,
         parsed_path: Optional[str] = None,
         document_category: str = "general_document",
+        structured_records: Optional[list] = None,
     ) -> dict:
 
         """
@@ -588,7 +589,15 @@ class KnowledgeBaseService:
 
             # 2. CHUNK THE TEXT
 
-            chunks = TextChunker.split_into_chunks(document_text)
+            chunk_metadata_list = []
+            if structured_records:
+                from app.core.structured_chunker import StructuredChunker
+                structured_chunks = StructuredChunker.chunk(structured_records)
+                chunks = [sc.text for sc in structured_chunks]
+                chunk_metadata_list = [sc.metadata for sc in structured_chunks]
+            else:
+                chunks = TextChunker.split_into_chunks(document_text)
+                chunk_metadata_list = [{} for _ in chunks]
 
             if not chunks:
 
@@ -806,7 +815,9 @@ class KnowledgeBaseService:
 
                 "embedding": embeddings[i], "created_at": datetime.utcnow().isoformat(),
 
-                "source": source
+                "source": source,
+                
+                "metadata": json.dumps(chunk_metadata_list[i]) if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else "{}"
 
             } for i in range(len(chunks))]
 
@@ -852,7 +863,7 @@ class KnowledgeBaseService:
 
                 embedding: data.embedding, created_at: data.created_at,
 
-                source: data.source
+                source: data.source, metadata: data.metadata
 
             })
 

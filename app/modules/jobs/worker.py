@@ -46,11 +46,27 @@ async def run_pdf_ingestion_job(
             try:
                 table_rows = []
                 dataset_schema = None
+                structured_records = None
+                
                 if filename.lower().endswith(('.csv', '.xls', '.xlsx')):
                     document_text, table_rows, dataset_schema = await ExcelExtractor.extract(
                         file_bytes=content,
                         filename=filename,
                     )
+                    if table_rows:
+                        from app.core.structured_chunker import StructuredRecord
+                        columns = list(dataset_schema.get("columns", {}).keys()) if dataset_schema else []
+                        structured_records = [
+                            StructuredRecord(
+                                document_type="spreadsheet",
+                                source_file=filename,
+                                group_name="Sheet1", # Simplified for now
+                                row_index=row.get("row_index", i),
+                                columns=columns,
+                                values=row.get("row_data", {})
+                            )
+                            for i, row in enumerate(table_rows)
+                        ]
                 else:
                     document_text = await PDFExtractor.extract(
                         pdf_bytes=content,
@@ -139,7 +155,8 @@ async def run_pdf_ingestion_job(
                 document_text, 
                 source=s3_url, 
                 s3_path=s3_url,
-                parsed_path=parsed_url
+                parsed_path=parsed_url,
+                structured_records=structured_records
             )
 
 
