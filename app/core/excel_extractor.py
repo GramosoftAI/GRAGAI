@@ -275,7 +275,7 @@ class ExcelExtractor:
                     
                     if row_details:
                         row_str = f"- Row {index + header_idx + 2}: " + ", ".join(row_details)
-                        sheet_text += row_str + "\n"
+                        sheet_text += row_str + "\n\n"
                         
                 extracted_text_blocks.append(sheet_text)
                 

@@ -158,53 +158,63 @@ class TextChunker:
 
     @staticmethod
     def chunk_text(text: str, chunk_size: int, overlap_size: int) -> List[str]:
-        """Helper to chunk normal text preserving sentences."""
+        """Helper to chunk normal text preserving sentences and block formatting."""
         chunks = []
         if len(text) <= chunk_size:
             return [text.strip()]
 
-        # Split by sentences or double newlines when possible
-        sentences = re.split(r"(?<=[.!?])\s+|\n\n+", text)
+        # Split by double newlines to preserve blocks, then by sentences
+        # We use a non-consuming split for sentences and standard split for blocks where we don't mind losing the exact whitespace
+        blocks = [b.strip() for b in re.split(r"\n\n+", text) if b.strip()]
+        
         current_chunk = ""
+        current_blocks = []
 
-        for sentence in sentences:
-            if not sentence:
+        def build_overlap(prev_blocks: List[str], max_overlap: int) -> List[str]:
+            overlap_blocks = []
+            current_len = 0
+            for b in reversed(prev_blocks):
+                if current_len + len(b) > max_overlap and overlap_blocks:
+                    break
+                overlap_blocks.insert(0, b)
+                current_len += len(b) + 2
+            return overlap_blocks
+
+        for block in blocks:
+            # Forcefully break massive blocks
+            if len(block) > chunk_size:
+                if current_blocks:
+                    chunks.append("\n\n".join(current_blocks))
+                    current_blocks = []
+                
+                while len(block) > chunk_size:
+                    chunks.append(block[:chunk_size])
+                    block = block[chunk_size:]
+                
+                if block:
+                    current_blocks = [block]
                 continue
 
-            # Forcefully break massive sentences to avoid 400 Bad Request
-            while len(sentence) > chunk_size:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                    current_chunk = ""
-                
-                part = sentence[:chunk_size]
-                chunks.append(part.strip())
-                sentence = sentence[chunk_size:]
-
-            if not sentence:
-                continue
-                
-            test_chunk = current_chunk + " " + sentence if current_chunk else sentence
-
-            if len(test_chunk) <= chunk_size:
-                current_chunk = test_chunk
+            test_len = sum(len(b) for b in current_blocks) + (len(current_blocks) * 2) + len(block)
+            
+            if test_len <= chunk_size:
+                current_blocks.append(block)
             else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-
+                if current_blocks:
+                    chunks.append("\n\n".join(current_blocks))
+                
                 if chunks and overlap_size > 0:
-                    overlap = chunks[-1][-overlap_size:] if len(chunks[-1]) > overlap_size else chunks[-1]
-                    current_chunk = overlap + " " + sentence
+                    current_blocks = build_overlap(current_blocks, overlap_size)
+                    current_blocks.append(block)
                     
-                    # Safety check: if overlap + sentence still > chunk_size
-                    if len(current_chunk) > chunk_size:
-                        chunks.append(current_chunk[:chunk_size].strip())
-                        current_chunk = current_chunk[chunk_size:]
+                    # Safety check
+                    if sum(len(b) for b in current_blocks) + (len(current_blocks) * 2) > chunk_size:
+                        current_blocks = [block] # Drop overlap if it pushes us over immediately
                 else:
-                    current_chunk = sentence
+                    current_blocks = [block]
 
-        if current_chunk:
-            chunks.append(current_chunk.strip())
+        if current_blocks:
+            chunks.append("\n\n".join(current_blocks))
 
         # Final safety pass to ensure ABSOLUTELY NO CHUNK exceeds chunk_size
         safe_chunks = []
