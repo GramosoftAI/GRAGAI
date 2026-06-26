@@ -1594,6 +1594,15 @@ class RAGPipeline:
         """
         from sqlalchemy import text
         import json
+        import time
+        import os
+        
+        debug_mode = os.environ.get("DEBUG_ANALYTICS", "False").lower() == "true"
+        trace_log = []
+        if debug_mode:
+            trace_log.append(f"User Query:\n{query}\n\nIntent:\nTABLE_ANALYTICS\n")
+            
+        t_start = time.perf_counter()
         
         # 1. Fetch schema
         schema_query = "SELECT dataset_schema FROM knowledge_bases WHERE id = ANY(CAST(:kb_ids AS uuid[])) AND dataset_schema IS NOT NULL LIMIT 1;"
@@ -1612,6 +1621,7 @@ class RAGPipeline:
                 return None
                 
         # 2. Ask LLM to generate JSON AST
+        t_ast_start = time.perf_counter()
         prompt = f"""You are a Structured Query Planner. Convert the user's natural language query into a JSON Abstract Syntax Tree (AST) for tabular analytics.
 
 AVAILABLE COLUMNS & TYPES:
@@ -1666,13 +1676,17 @@ Return ONLY JSON, no markdown formatting.
             logger.error(f" Failed to parse JSON AST: {e} - String: {generated_ast_str}")
             return None
             
+        t_ast_gen = time.perf_counter() - t_ast_start
         logger.info(f" Structured Query AST: {json.dumps(ast)}")
+        if debug_mode:
+            trace_log.append(f"Generated AST:\n{json.dumps(ast, indent=2)}\n")
         
         # 2.5 AST Validation Layer
+        t_val_start = time.perf_counter()
         operation = str(ast.get("operation", "FILTER")).upper()
         target_field = ast.get("target_field")
         
-        valid_operations = {"COUNT", "AVG", "MAX", "MIN", "SUM", "GROUP", "FILTER"}
+        valid_operations = {"COUNT", "AVG", "MAX", "MIN", "SUM", "GROUP", "SORT", "FILTER"}
         if operation not in valid_operations:
             return f"Validation Error: Unsupported operation '{operation}'."
             
@@ -1681,9 +1695,9 @@ Return ONLY JSON, no markdown formatting.
             if not target_field:
                 return f"Validation Error: Operation '{operation}' requires a target_field."
             if target_field not in dataset_schema:
-                return f"Validation Error: Unknown target field '{target_field}'."
+                return f"Validation Error: Field '{target_field}' does not exist in this dataset."
             if dataset_schema[target_field] not in numeric_types:
-                return f"Validation Error: Cannot perform {operation} on non-numeric field '{target_field}' (type: {dataset_schema[target_field]})."
+                return f"Validation Error: {operation} cannot be applied to string field '{target_field}'"
                 
         if operation == "GROUP":
             group_by = ast.get("group_by")
@@ -1702,7 +1716,12 @@ Return ONLY JSON, no markdown formatting.
             if op not in ["=", "!=", ">", "<", ">=", "<=", "ILIKE", "LIKE", "CONTAINS"]:
                 return f"Validation Error: Unsupported filter operator '{op}' for field '{field}'."
 
+        t_ast_val = time.perf_counter() - t_val_start
+        if debug_mode:
+            trace_log.append(f"Validated AST:\n{json.dumps(ast, indent=2)}\n")
+
         # 3. Secure Backend Query Builder
+        t_sql_start = time.perf_counter()
         select_clause = "row_data"
         if operation == "COUNT":
             select_clause = "COUNT(*)"
@@ -1759,12 +1778,24 @@ Return ONLY JSON, no markdown formatting.
             query_str += f" LIMIT {limit}"
             
         logger.info(f" Executing Parameterized SQL: {query_str} with {params}")
+        t_sql_gen = time.perf_counter() - t_sql_start
         
+        if debug_mode:
+            trace_log.append(f"Generated SQL:\n{query_str}\n\nParameters:\n{json.dumps(params, default=str)}\n")
+            
         # 4. Execute the generated SQL
+        t_exec_start = time.perf_counter()
         async with self.db_session_maker() as db:
             try:
                 result = await db.execute(text(query_str), params)
                 rows = result.all()
+                t_exec = time.perf_counter() - t_exec_start
+                t_total = time.perf_counter() - t_start
+                
+                if debug_mode:
+                    trace_log.append(f"Execution Time:\n{int(t_total*1000)} ms (AST: {int(t_ast_gen*1000)}ms, Val: {int(t_ast_val*1000)}ms, SQL Gen: {int(t_sql_gen*1000)}ms, DB Exec: {int(t_exec*1000)}ms)\n")
+                    trace_log.append(f"Rows Returned:\n{len(rows)}\n")
+                    logger.info("\n--- DEBUG_ANALYTICS TRACE ---\n" + "\n".join(trace_log) + "\n------------------------------")
                 
                 if not rows:
                     return "No matching records found in the structured tables."
@@ -1804,13 +1835,14 @@ Return ONLY JSON, no markdown formatting.
                     
                 explanation += f"- Records returned: {len(formatted_rows)}\n"
                 
+                if debug_mode:
+                    explanation += "\n\n---\n**Analytics Debug Trace:**\n```text\n" + "\n".join(trace_log) + "\n```"
+                
                 return formatted + explanation
                 
             except Exception as e:
                 logger.error(f" SQL Execution Failed: {e}")
                 return None
-
-
 
     async def _expand_via_graph(
 
