@@ -95,6 +95,10 @@ class QueryRouter:
             SearchType.SOCIAL: re.compile(
                 r'\b(hi|hello|hey|greetings|good morning|good afternoon|good evening|how are you|who are you|thanks|thank you|bye|goodbye)\b',
                 re.IGNORECASE
+            ),
+            SearchType.TABLE_ANALYTICS: re.compile(
+                r'\b(average|avg|sum|total|count|how many|highest|lowest|max|min|group by|top \d+|bottom \d+|order by)\b',
+                re.IGNORECASE
             )
         }
         self.llm_client = DeepInfraLLMClient()
@@ -233,7 +237,17 @@ Return ONLY valid JSON in this exact format, with no markdown formatting or back
                 max_tokens=1024
             )
             # Clean up markdown if present
-            cleaned = result.replace('```json', '').replace('```', '').strip()
+            import re
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', result, re.DOTALL)
+            if json_match:
+                cleaned = json_match.group(1)
+            else:
+                start_idx = result.find('{')
+                end_idx = result.rfind('}')
+                if start_idx != -1 and end_idx != -1:
+                    cleaned = result[start_idx:end_idx+1]
+                else:
+                    cleaned = result.replace('```json', '').replace('```', '').strip()
             return json.loads(cleaned)
         except Exception as e:
             logger.warning(f"Failed to rewrite query: {e}")
@@ -293,7 +307,17 @@ Query:
                 temperature=0.0,
                 max_tokens=1024
             )
-            cleaned = response.replace('```json', '').replace('```', '').strip()
+            import re
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
+            if json_match:
+                cleaned = json_match.group(1)
+            else:
+                start_idx = response.find('{')
+                end_idx = response.rfind('}')
+                if start_idx != -1 and end_idx != -1:
+                    cleaned = response[start_idx:end_idx+1]
+                else:
+                    cleaned = response.replace('```json', '').replace('```', '').strip()
             data = json.loads(cleaned)
             
             intent_str = data.get("intent", "GRAPH_COMPLETION").upper()
