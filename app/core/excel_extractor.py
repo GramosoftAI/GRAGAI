@@ -29,7 +29,7 @@ class ExcelExtractor:
         logger.info(f" Excel Extraction starting: {filename} ({len(file_bytes)} bytes)")
         
         loop = asyncio.get_event_loop()
-        extracted_markdown, table_rows = await loop.run_in_executor(
+        extracted_markdown, table_rows, dataset_schema = await loop.run_in_executor(
             None, ExcelExtractor._sync_extract, file_bytes, filename
         )
         
@@ -37,7 +37,7 @@ class ExcelExtractor:
             logger.warning(f" ExcelExtractor returned empty result for {filename}.")
             
         logger.info(f" Excel Extraction success: {filename} ({len(extracted_markdown)} chars)")
-        return ExtractedText(extracted_markdown, extracted_markdown, is_html=False), table_rows
+        return ExtractedText(extracted_markdown, extracted_markdown, is_html=False), table_rows, dataset_schema
 
     @staticmethod
     def _normalize_header(header: str) -> str:
