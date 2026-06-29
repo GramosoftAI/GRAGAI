@@ -1,6 +1,6 @@
-from pydantic import BaseModel, UUID4, computed_field
+from pydantic import BaseModel, UUID4, computed_field, field_validator
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 class JobResponse(BaseModel):
     id: UUID4
@@ -13,6 +13,13 @@ class JobResponse(BaseModel):
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
+
+    @field_validator("created_at", "started_at", "completed_at", mode="before")
+    @classmethod
+    def make_tz_aware(cls, v):
+        if isinstance(v, datetime) and v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v
 
     @computed_field
     @property

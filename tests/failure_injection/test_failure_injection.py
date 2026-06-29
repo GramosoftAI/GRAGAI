@@ -213,3 +213,32 @@ async def test_run_excel_ingestion_job_sets_correct_kb_fields():
         assert kb_request.source == "spreadsheet_upload"
         assert "spreadsheet" in kb_request.description
 
+def test_job_response_datetime_timezone_awareness():
+    """Verify that JobResponse serialization forces naive datetimes to UTC timezone aware."""
+    from app.modules.jobs.schemas import JobResponse
+    from datetime import datetime, timezone
+    import uuid
+
+    naive_dt = datetime(2026, 6, 29, 12, 55, 24, 839792)
+    job = JobResponse(
+        id=uuid.uuid4(),
+        job_type="pdf_ingestion",
+        status="processing",
+        progress=5,
+        current_step="Starting PDF Extraction (OCR)",
+        file_name="sample-100kb.pdf",
+        error_message=None,
+        created_at=naive_dt,
+        started_at=naive_dt,
+        completed_at=None
+    )
+
+    data = job.model_dump()
+    assert data["created_at"].tzinfo == timezone.utc
+    assert data["started_at"].tzinfo == timezone.utc
+    
+    # Verify serialization output format has 'Z' suffix or UTC offset
+    json_str = job.model_dump_json()
+    assert "2026-06-29T12:55:24.839792Z" in json_str or "2026-06-29T12:55:24.839792+00:00" in json_str
+
+
