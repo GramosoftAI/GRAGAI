@@ -158,3 +158,58 @@ async def test_scenario_5_partial_ingestion_failure():
                         added_objects = [call[0][0] for call in db_mock.add.call_args_list]
                         audit_run = next(obj for obj in added_objects if hasattr(obj, "status") and hasattr(obj, "document_id"))
                         assert audit_run.status == "PARTIAL_SUCCESS"
+
+@pytest.mark.asyncio
+async def test_run_excel_ingestion_job_sets_correct_kb_fields():
+    """Verify that run_pdf_ingestion_job sets 'Spreadsheet: ' name and 'spreadsheet_upload' source for excel files."""
+    db_mock = AsyncMock()
+    
+    # Mock AsyncSessionLocal context manager
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = db_mock
+    
+    with patch("app.modules.jobs.worker.AsyncSessionLocal", return_value=session_cm), \
+         patch("app.modules.jobs.worker.JobService") as mock_job_service, \
+         patch("app.modules.jobs.worker.ExcelExtractor.extract", new_callable=AsyncMock) as mock_excel_extract, \
+         patch("app.modules.jobs.worker.DeepInfraLLMClient", new_callable=MagicMock) as mock_llm_client_cls, \
+         patch("app.core.s3.S3StorageService") as mock_s3_service_cls, \
+         patch("app.modules.jobs.worker.KnowledgeBaseService") as mock_kb_service_cls:
+         
+        mock_excel_extract.return_value = ("Extracted spreadsheet text", [{"row_index": 0, "row_data": {"col1": "val1"}}], {"columns": {"col1": {}}})
+        
+        mock_job_service.return_value.update_job_progress = AsyncMock()
+        
+        mock_llm_client = AsyncMock()
+        mock_llm_client.generate.return_value = "GENERAL"
+        mock_llm_client_cls.return_value = mock_llm_client
+        
+        mock_s3_service = MagicMock()
+        mock_s3_service.get_s3_url.return_value = "https://s3.amazonaws.com/bucket/tenant/test.xlsx"
+        mock_s3_service.store_parsed_content = MagicMock(return_value="https://s3.amazonaws.com/bucket/tenant/test.xlsx/content.txt")
+        mock_s3_service_cls.return_value = mock_s3_service
+        
+        mock_kb_service = AsyncMock()
+        mock_kb_service.create_knowledge_base.return_value = {"success": True, "data": {"kb": MagicMock(id=uuid.uuid4())}}
+        mock_kb_service.save_table_rows = AsyncMock()
+        mock_kb_service.ingest_document = AsyncMock(return_value={"success": True})
+        mock_kb_service_cls.return_value = mock_kb_service
+        
+        from app.modules.jobs.worker import run_pdf_ingestion_job
+        
+        await run_pdf_ingestion_job(
+            tenant_id=str(uuid.uuid4()),
+            user_id=str(uuid.uuid4()),
+            agent_id=str(uuid.uuid4()),
+            job_id=str(uuid.uuid4()),
+            filename="test.xlsx",
+            content=b"dummy excel data"
+        )
+        
+        # Verify the KBCreate request object passed to create_knowledge_base
+        assert mock_kb_service.create_knowledge_base.call_count == 1
+        kb_request = mock_kb_service.create_knowledge_base.call_args[0][1]
+        
+        assert kb_request.name == "Spreadsheet: test.xlsx"
+        assert kb_request.source == "spreadsheet_upload"
+        assert "spreadsheet" in kb_request.description
+
