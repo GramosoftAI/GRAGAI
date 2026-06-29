@@ -90,7 +90,8 @@ class S3StorageService:
     async def store_file_if_not_duplicate(self, tenant_id: str, filename: str, file_bytes: bytes) -> None:
         """
         Asynchronously checks for duplicates and stores the file in S3.
-        Raises HTTPException if duplicate or error occurs.
+        If a duplicate is detected (same file exists in S3), it proceeds gracefully
+        to allow importing/linking the file to other agents or retrying.
         """
         if not self.client:
             # If S3 is not configured, we might want to skip or raise error. 
@@ -103,10 +104,8 @@ class S3StorageService:
             )
             
             if is_duplicate:
-                raise HTTPException(
-                    status_code=409, 
-                    detail="Duplicate file detected. This exact file has already been uploaded to your Knowledge Base."
-                )
+                logger.info(f"Duplicate file detected in S3 for tenant {tenant_id}: {filename}. Skipping upload and proceeding gracefully.")
+                return
             
             if error_msg:
                 raise HTTPException(status_code=500, detail=f"Failed to store file in S3: {error_msg}")
@@ -177,6 +176,42 @@ class S3StorageService:
         except Exception as e:
             logger.error(f"Failed to upload parsed content to S3: {e}")
             raise e
+
+    def _parse_s3_key_from_url(self, url: str) -> Optional[str]:
+        if not url:
+            return None
+        if ".amazonaws.com/" in url:
+            return url.split(".amazonaws.com/", 1)[1]
+        try:
+            parts = url.split("/", 3)
+            if len(parts) >= 4:
+                return parts[3]
+        except Exception:
+            pass
+        return None
+
+    async def delete_file_by_url(self, url: str) -> bool:
+        """
+        Asynchronously deletes an object from S3 using its URL.
+        """
+        if not self.client or not url:
+            return False
+            
+        key = self._parse_s3_key_from_url(url)
+        if not key:
+            logger.warning(f"Could not parse S3 key from URL: {url}")
+            return False
+            
+        def _delete():
+            try:
+                self.client.delete_object(Bucket=self.bucket_name, Key=key)
+                logger.info(f"Successfully deleted key {key} from S3 bucket {self.bucket_name}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to delete S3 key {key}: {e}")
+                return False
+                
+        return await asyncio.to_thread(_delete)
 
 
 

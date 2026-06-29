@@ -1042,7 +1042,6 @@ async def instant_ingest_pdf(
         from app.modules.jobs.service import JobService
         from app.modules.jobs.schemas import JobCreate
         from app.modules.jobs.worker import run_pdf_ingestion_job
-        from app.core.database import AsyncSessionLocal
         from ...core.pdf_extractor import PDFExtractor
 
         async with AsyncSessionLocal() as db:

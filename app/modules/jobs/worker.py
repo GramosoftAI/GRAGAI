@@ -38,8 +38,11 @@ async def run_pdf_ingestion_job(
             
             job_service = JobService(db, tenant_id)
             
+            is_spreadsheet = filename.lower().endswith(('.csv', '.xls', '.xlsx'))
+            
             # Update status to processing
-            await job_service.update_job_progress(job_id, status="processing", progress=5, current_step="Starting PDF Extraction (OCR)")
+            step_name = "Starting Spreadsheet Extraction" if is_spreadsheet else "Starting PDF Extraction (OCR)"
+            await job_service.update_job_progress(job_id, status="processing", progress=5, current_step=step_name)
             
             # Step 1: Document Extraction
             logger.info(f"Job {job_id}: Starting extraction for {filename}")
@@ -80,7 +83,9 @@ async def run_pdf_ingestion_job(
                 return
                 
             if not document_text.strip():
-                await job_service.update_job_progress(job_id, status="failed", progress=5, current_step="PDF Extraction", error_message="PDF appears to be empty or contains no extractable text.")
+                err_step = "Spreadsheet Extraction" if is_spreadsheet else "PDF Extraction"
+                err_msg = "Spreadsheet appears to be empty or contains no extractable text." if is_spreadsheet else "PDF appears to be empty or contains no extractable text."
+                await job_service.update_job_progress(job_id, status="failed", progress=5, current_step=err_step, error_message=err_msg)
                 return
                 
             # Classify Document Type
@@ -108,11 +113,15 @@ async def run_pdf_ingestion_job(
             s3_url = s3_service.get_s3_url(str(tenant_id), filename)
 
             kb_service = KnowledgeBaseService(db, tenant_id)
+            kb_name = f"Spreadsheet: {filename}" if is_spreadsheet else f"PDF: {filename}"
+            kb_description = f"Automated spreadsheet upload source (Table extraction)" if is_spreadsheet else f"Automated PDF upload source (Gdocz extraction)"
+            kb_source = "spreadsheet_upload" if is_spreadsheet else "pdf_upload"
+
             kb_request = KBCreate(
-                name=f"PDF: {filename}",
-                description=f"Automated PDF upload source (Gdocz extraction)",
+                name=kb_name,
+                description=kb_description,
                 agent_id=uuid.UUID(agent_id),
-                source="pdf_upload",
+                source=kb_source,
                 document_type=document_type,
                 dataset_schema=dataset_schema,
                 s3_path=s3_url

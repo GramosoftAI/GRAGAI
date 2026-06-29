@@ -233,9 +233,29 @@ class ChatMessage(Base):
         default=0,
     )
 
-    # ============= TIMESTAMPS =============
     created_at = Column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    # ============= FEEDBACK =============
+    feedback_type = Column(
+        String(20),
+        nullable=True,
+    )  # thumbs_up / thumbs_down
+
+    feedback_reason = Column(
+        String(255),
+        nullable=True,
+    )
+
+    feedback_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    feedback_score = Column(
+        Integer,
+        nullable=True,
     )
 
     # ============= INDEXES =============

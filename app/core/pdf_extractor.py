@@ -262,13 +262,13 @@ class PDFExtractor:
                 doc_type = "QUOTATION"
             elif "price" in fname_lower:
                 doc_type = "PRICE_LIST"
-
+ 
             data = {
                 "model": "chandra",
                 "output_format": "html",
                 "document_type": doc_type
             }
-
+ 
             max_retries = 3
             last_err = None
             res_json = None
@@ -323,7 +323,6 @@ class PDFExtractor:
                     raw_markdown = raw_markdown.replace(f"({img_name})", f"({img_base64})")
             
             return raw_markdown
-
 
         loop = asyncio.get_event_loop()
         raw_markdown = await loop.run_in_executor(
@@ -458,6 +457,9 @@ class PDFExtractor:
         text = re.sub(r"```[\w]*\n?", "", text)
 
         # ============= STEP 4: REMOVE HTML TAGS =============
+        # Convert block level tags to newlines to avoid merging text
+        text = re.sub(r"</?(?:h[1-6]|p|div|tr|li|table|thead|tbody|ol|ul|br|section|article)[^>]*>", "\n", text)
+        # Convert any other tags to empty string
         text = re.sub(r"<[^>]+>", "", text)
 
         # ============= STEP 5: CONVERT HEADERS TO PLAIN TEXT =============

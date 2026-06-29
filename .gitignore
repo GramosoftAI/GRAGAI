@@ -1,26 +1,36 @@
-# Environment and Configs
+# ==========================================================
+# Environment & Secrets
+# ==========================================================
 .env
+.env.*
+!.env.example
+!.env.template
 .env.local
 .env.*.local
 .env.production
 config.yaml
 
-# Virtual Environments
+# ==========================================================
+# Python Virtual Environments
+# ==========================================================
 .venv/
 venv/
-ENV/
 env/
+ENV/
 mind/
 
-# Python Cache and Build
+# ==========================================================
+# Python Cache & Build
+# ==========================================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
 build/
-develop-eggs/
 dist/
+develop-eggs/
 downloads/
 eggs/
 .eggs/
@@ -30,35 +40,49 @@ parts/
 sdist/
 var/
 wheels/
+
 *.egg-info/
 .installed.cfg
 *.egg
 
+# ==========================================================
 # Logs
+# ==========================================================
 logs/
 *.log
 
-# IDEs and Tools
+# ==========================================================
+# IDE / Editor
+# ==========================================================
 .vscode/
 .idea/
 .streamlit/
 .DS_Store
 Thumbs.db
+
+# ==========================================================
+# Database / Local Config
+# ==========================================================
 alembic.ini
 
-# Project specific ignores
+# ==========================================================
+# Temporary / Scratch
+# ==========================================================
 tmp/
 scratch/
-scripts/
 tester_zone/
 poc/
 evaluation/
 vector_extracted/
+
 *.zip
+scratch*.py
 scratch_mod*.py
 test_chunk*.py
 
-# Analysis & Docs (Local)
+# ==========================================================
+# Documentation / Analysis (Local Only)
+# ==========================================================
 docs/analysis/
 *.pptx
 *.xlsx
@@ -67,18 +91,28 @@ docs/analysis/
 *.docx
 *.sql
 ~$*.docx
-test_db.py
-test_llm.py
 RAG_Test_Analytics_Report.md
-
-# Deploy keys
-graphmind_deploy_key*
-*deploy_key*
 
 README_old.md
 README (1) (1).md
+response.md
 
-# Testing/Patching/Temporary Root Scripts
+cognee_full_analysis_part*.md
+competitor_strategic_analysis.md
+API_DOCUMENTATION.md
+graphmind_memory_architecture_analysis.md
+Cognee_Infrastructure_Blueprint.pptx
+
+
+# ==========================================================
+# Deployment Keys
+# ==========================================================
+graphmind_deploy_key*
+*deploy_key*
+
+# ==========================================================
+# Local Debug / Patch Scripts
+# ==========================================================
 apply_disconnect_fix.py
 apply_ui.py
 check_user_columns.py
@@ -94,25 +128,32 @@ insert_route.py
 patch_db.py
 patch_routes.py
 patch_service.py
+rewrite.py
+
+# ==========================================================
+# Local Test Scripts (NOT project tests)
+# ==========================================================
 test_generate.py
 test_integrated_agents.py
 test_labels.py
-test_passlib.txt
 test_pipeline.py
 test_query.py
 test_triplet_diag.py
 test_ws_embed.py
-temp_page.tsx
-rewrite.py
-requirements-1.txt
-scratch.py
-scratch_ingest_res.json
-deploy_test.txt
-response.md
+test_db.py
+test_llm.py
 
-# Analysis & Documentation
-cognee_full_analysis_part*.md
-competitor_strategic_analysis.md
-API_DOCUMENTATION.md
-graphmind_memory_architecture_analysis.md
-Cognee_Infrastructure_Blueprint.pptx
+test_passlib.txt
+deploy_test.txt
+requirements-1.txt
+temp_page.tsx
+scratch_ingest_res.json
+
+# ==========================================================
+# Keep Project Source & Tests
+# ==========================================================
+# Do NOT ignore:
+# app/**
+# migrations/**
+# docker-compose.yml
+# tests/**
