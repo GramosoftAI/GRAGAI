@@ -1,8 +1,8 @@
 "use client";
 
-import { Flex, Typography, Button, Input, Tooltip, Avatar, Drawer, Grid, Upload, message, Spin, Table, Dropdown } from "antd";
+import { Flex, Typography, Button, Input, Tooltip, Avatar, Drawer, Grid, Upload, message, Spin, Table, Dropdown, Modal, Radio } from "antd";
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { LuBot, LuHistory, LuSearch, LuPlus, LuPaperclip, LuFileText, LuDownload, LuBookOpen, LuBell, LuSettings } from "react-icons/lu";
+import { LuBot, LuHistory, LuSearch, LuPlus, LuPaperclip, LuFileText, LuDownload, LuBookOpen, LuBell, LuSettings, LuSparkles, LuGlobe, LuArrowRight } from "react-icons/lu";
 import { FaBrain } from "react-icons/fa";
 import {
   FiUser,
@@ -51,6 +51,7 @@ type SourceMetadata = {
 };
 
 type Message = {
+  id?: string;
   role: "user" | "assistant";
   content: string;
   confidence?: number;
@@ -63,6 +64,7 @@ type Message = {
     type: string;
     url: string;
   };
+  feedback?: "thumbs_up" | "thumbs_down";
 };
 
 type ChatSession = {
@@ -100,6 +102,24 @@ async function fetchSessions(agent: Agents): Promise<ChatSession[]> {
     return result.data ?? [];
   } catch (e) {
     console.error("fetchSessions failed:", e);
+    return [];
+  }
+}
+
+
+// Fetch full session detail (with per-message message_id) from backend
+// Endpoint: GET /chats/{agentId}/sessions/{sessionId}
+async function fetchSessionMessages(agentId: string, sessionId: string): Promise<any[]> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/chats/${agentId}/sessions/${sessionId}`, {
+      headers: authHeaders(),
+    });
+    if (!res.ok) throw new Error(`${res.status}`);
+    const result = await res.json();
+    const payload = result.data ?? result;
+    return Array.isArray(payload) ? payload : (payload?.messages ?? []);
+  } catch (e) {
+    console.error('fetchSessionMessages failed:', e);
     return [];
   }
 }
@@ -146,6 +166,159 @@ async function getFilePreview(kb_id: string): Promise<string> {
   return URL.createObjectURL(blob);
 }
 
+function parsePythonDict(str: string): any {
+  let i = 0;
+  const len = str.length;
+
+  function skipWhitespace() {
+    while (i < len && /\s/.test(str[i])) {
+      i++;
+    }
+  }
+
+  function parseValue(): any {
+    skipWhitespace();
+    if (i >= len) return null;
+
+    const char = str[i];
+
+    // Parse String
+    if (char === "'" || char === '"') {
+      const quoteChar = char;
+      i++; // skip quote
+      let val = "";
+      while (i < len) {
+        if (str[i] === "\\") {
+          i++;
+          if (i < len) {
+            const nextChar = str[i];
+            if (nextChar === "n") val += "\n";
+            else if (nextChar === "t") val += "\t";
+            else if (nextChar === "r") val += "\r";
+            else if (nextChar === "b") val += "\b";
+            else if (nextChar === "f") val += "\f";
+            else val += nextChar;
+            i++;
+          }
+        } else if (str[i] === quoteChar) {
+          i++; // skip close quote
+          return val;
+        } else {
+          val += str[i];
+          i++;
+        }
+      }
+      return val;
+    }
+
+    // Parse Object / Dict
+    if (char === "{") {
+      i++; // skip '{'
+      const obj: any = {};
+      while (i < len) {
+        skipWhitespace();
+        if (str[i] === "}") {
+          i++;
+          return obj;
+        }
+        const key = parseValue();
+        skipWhitespace();
+        if (str[i] !== ":") {
+          return obj;
+        }
+        i++; // skip ':'
+        const val = parseValue();
+        obj[key] = val;
+        skipWhitespace();
+        if (str[i] === ",") {
+          i++; // skip ','
+        }
+      }
+      return obj;
+    }
+
+    // Parse List
+    if (char === "[") {
+      i++; // skip '['
+      const arr: any[] = [];
+      while (i < len) {
+        skipWhitespace();
+        if (str[i] === "]") {
+          i++;
+          return arr;
+        }
+        const val = parseValue();
+        arr.push(val);
+        skipWhitespace();
+        if (str[i] === ",") {
+          i++; // skip ','
+        }
+      }
+      return arr;
+    }
+
+    // Parse True, False, None, or numbers
+    let word = "";
+    while (i < len && /[a-zA-Z0-9_\.\+-]/.test(str[i])) {
+      word += str[i];
+      i++;
+    }
+
+    if (word === "True") return true;
+    if (word === "False") return false;
+    if (word === "None") return null;
+
+    const num = Number(word);
+    if (!isNaN(num)) return num;
+
+    return word;
+  }
+
+  try {
+    return parseValue();
+  } catch (e) {
+    console.error("Failed to parse Python dict:", e);
+    return null;
+  }
+}
+
+function cleanExtractedText(raw: string): string {
+  if (!raw) return "";
+
+  let processed = raw.trim();
+
+  if (processed.startsWith("{") && processed.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(processed);
+      if (parsed) {
+        processed = parsed.markdown || parsed.text || parsed.content || processed;
+      }
+    } catch (jsonErr) {
+      try {
+        const parsed = parsePythonDict(processed);
+        if (parsed) {
+          processed = parsed.markdown || parsed.text || parsed.content || processed;
+        }
+      } catch (pyErr) {
+        console.error("Failed to parse as Python dict:", pyErr);
+      }
+    }
+  }
+
+  if (typeof processed !== "string") {
+    processed = String(processed);
+  }
+
+  processed = processed
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\r/g, "\r")
+    .replace(/\\'/g, "'")
+    .replace(/\\"/g, '"');
+
+  return processed;
+}
+
 async function getCleanTextContent(kb_id: string): Promise<string> {
   const response = await fetch(
     `${API_BASE_URL}/files/${kb_id}/content`,
@@ -183,6 +356,20 @@ function getFileName(sourceUrlOrName: string): string {
   }
 }
 
+// Classify a source by its extension / URL pattern
+// If the source object has a kb_id it's always a downloadable file (clickable)
+function getSourceType(source: string, kb_id?: string): 'url' | 'pdf' | 'excel' | 'csv' | 'image' | 'text' {
+  const s = source.toLowerCase();
+  if (s.startsWith('http://') || s.startsWith('https://') || s.includes('www.')) return 'url';
+  if (s.endsWith('.pdf')) return 'pdf';
+  if (s.endsWith('.xls') || s.endsWith('.xlsx')) return 'excel';
+  if (s.endsWith('.csv')) return 'csv';
+  if (s.endsWith('.png') || s.endsWith('.jpg') || s.endsWith('.jpeg') || s.endsWith('.gif') || s.endsWith('.webp')) return 'image';
+  // If kb_id is present, this is a real file in the KB — default to pdf behavior (clickable)
+  if (kb_id) return 'pdf';
+  return 'text';
+}
+
 // Extract source references from answer text to filter backend sources
 function extractCitedFilenames(text: string): string[] {
   const regex = /(?:\[Source:\s*|\(Source:\s*)([^\]\)]+)[\]\)]/gi;
@@ -204,12 +391,23 @@ function extractCitedFilenames(text: string): string[] {
   return Array.from(filenames);
 }
 
+function stripThinking(content: string): string {
+  if (!content) return "";
+  let cleaned = content.replace(/<think>[\s\S]*?<\/think>/g, "");
+  const openThinkIndex = cleaned.indexOf("<think>");
+  if (openThinkIndex !== -1) {
+    cleaned = cleaned.substring(0, openThinkIndex);
+  }
+  return cleaned;
+}
+
 function cleanAndExtractSources(content: string, existingSources?: SourceMetadata[]): { cleanedContent: string, sources: SourceMetadata[] } {
-  if (!content) return { cleanedContent: "", sources: [] };
+  const stripped = stripThinking(content);
+  if (!stripped) return { cleanedContent: "", sources: [] };
 
-  const citedFilenames = extractCitedFilenames(content);
+  const citedFilenames = extractCitedFilenames(stripped);
 
-  const cleanedContent = content
+  const cleanedContent = stripped
     .replace(/(?:\[Source:\s*.+?\]|\(Source:\s*.+?\))/g, "")
     .trim();
 
@@ -232,9 +430,9 @@ type AgentListResponse = {
   };
 };
 
-const GragLogoAvatar = ({ size = 32 }: { size?: number }) => {
+const GSearchLogoAvatar = ({ size = 32 }: { size?: number }) => {
   return (
-    <div 
+    <div
       className="rounded-xl flex items-center justify-center bg-[#285d91] text-white shrink-0 border border-[#285d91]/20 shadow-none font-bold"
       style={{ width: `${size}px`, height: `${size}px` }}
     >
@@ -243,11 +441,146 @@ const GragLogoAvatar = ({ size = 32 }: { size?: number }) => {
   );
 };
 
+// Helper functions for parsing and rendering messages with custom styles for bold headings and clickable links
+const renderBoldText = (text: string, key: any, isUser: boolean) => {
+  if (!text) return null;
+  const boldRegex = /(\*\*.*?\*\*)/g;
+  const subparts = text.split(boldRegex);
+  return (
+    <span key={key}>
+      {subparts.map((subpart, subIndex) => {
+        if (subpart.startsWith("**") && subpart.endsWith("**")) {
+          const content = subpart.slice(2, -2);
+          return (
+            <strong
+              key={subIndex}
+              className={`font-extrabold ${isUser ? "text-white" : "text-[var(--app-text)] font-black"}`}
+            >
+              {content}
+            </strong>
+          );
+        }
+        return subpart;
+      })}
+    </span>
+  );
+};
+
+const renderTextWithLinks = (text: string, isUser: boolean) => {
+  if (!text) return null;
+  const urlRegex = /(https?:\/\/[^\s]+)/gi;
+  const parts = text.split(urlRegex);
+  return parts.map((part, index) => {
+    if (part.match(urlRegex)) {
+      return (
+        <a
+          key={index}
+          href={part}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`underline break-all transition-all font-bold ${isUser
+            ? "text-sky-200 hover:text-white"
+            : "text-[#285d91] hover:text-sky-500 dark:text-sky-400 dark:hover:text-sky-300"
+            }`}
+        >
+          {part}
+        </a>
+      );
+    }
+    return renderBoldText(part, index, isUser);
+  });
+};
+
+const renderFormattedContent = (content: string, isUser: boolean) => {
+  const stripped = stripThinking(content).trim();
+  if (!stripped) return null;
+  const lines = stripped.split('\n');
+  return lines.map((line, index) => {
+    const headingWithColonRegex = /^\*\*(.*?)\*\*:\s*(.*)$/;
+    const headingOnlyRegex = /^\*\*(.*?)\*\*\s*$/;
+    const bulletRegex = /^(\s*[-*•]\s+)(.*)$/;
+    const numberListRegex = /^(\s*\d+\.\s+)(.*)$/;
+
+    let match = line.match(headingWithColonRegex);
+    if (match) {
+      const headingText = match[1];
+      const restText = match[2];
+      return (
+        <div key={index} className="mb-3 mt-2">
+          <div className={`font-extrabold text-sm md:text-base tracking-tight ${isUser ? "text-white" : "text-[#285d91] dark:text-sky-400"}`}>
+            {headingText}
+          </div>
+          {restText && (
+            <div className={`text-xs md:text-sm mt-1 leading-relaxed font-normal ${isUser ? "text-white/95" : "text-[var(--app-text)] opacity-95"}`}>
+              {renderTextWithLinks(restText, isUser)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    match = line.match(headingOnlyRegex);
+    if (match) {
+      const headingText = match[1];
+      return (
+        <div key={index} className={`font-extrabold text-sm md:text-base tracking-tight mb-2 mt-2 ${isUser ? "text-white" : "text-[#285d91] dark:text-sky-400"}`}>
+          {headingText}
+        </div>
+      );
+    }
+
+    let bulletMatch = line.match(bulletRegex);
+    if (bulletMatch) {
+      return (
+        <div key={index} className="flex items-start gap-2 pl-2 my-1">
+          <span className={`shrink-0 ${isUser ? "text-white/80" : "text-[var(--app-text-soft)]"}`}>•</span>
+          <span className="flex-1 text-xs md:text-sm leading-relaxed">
+            {renderTextWithLinks(bulletMatch[2], isUser)}
+          </span>
+        </div>
+      );
+    }
+
+    let numberMatch = line.match(numberListRegex);
+    if (numberMatch) {
+      const prefix = numberMatch[1].trim();
+      return (
+        <div key={index} className="flex items-start gap-2 pl-2 my-1">
+          <span className={`shrink-0 font-bold text-xs md:text-sm ${isUser ? "text-white/80" : "text-[var(--app-text-soft)]"}`}>{prefix}</span>
+          <span className="flex-1 text-xs md:text-sm leading-relaxed">
+            {renderTextWithLinks(numberMatch[2], isUser)}
+          </span>
+        </div>
+      );
+    }
+
+    return (
+      <div key={index} className="min-h-[1.5rem] leading-relaxed text-xs md:text-sm">
+        {renderTextWithLinks(line, isUser)}
+      </div>
+    );
+  });
+};
+
 export default function ChatPlaygroundPage() {
   const [agent, setAgent] = useState<{ id: string; name: string } | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<any>([]);
+  const [showSources, setShowSources] = useState(true);
+
+  // Selector states
+  const botsCache = useStore((state) => state.botsCache);
+  const [activeMode, setActiveMode] = useState<'search' | 'agent'>('agent');
+  const [selectedModel, setSelectedModel] = useState<'Flash' | 'Pro' | 'Ultra'>('Flash');
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // Feedback states
+  const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
+  const [feedbackMessageId, setFeedbackMessageId] = useState<string | null>(null);
+  const [selectedReason, setSelectedReason] = useState<string>("Incorrect Answer");
+  const [customReason, setCustomReason] = useState<string>("");
   const { data: sessionData } = useSession();
   const [userName, setUserName] = useState("Srivishnus");
 
@@ -259,6 +592,22 @@ export default function ChatPlaygroundPage() {
       setUserName(sessionData.user.name);
     }
   }, [sessionData]);
+
+  useEffect(() => {
+    const handleShortcut = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        const nextMode = activeMode === 'search' ? 'agent' : 'search';
+        setActiveMode(nextMode);
+        if (nextMode === 'search') {
+          setTimeout(() => searchRef.current?.focus(), 50);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, [activeMode]);
+
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const screen = Grid.useBreakpoint();
@@ -272,6 +621,7 @@ export default function ChatPlaygroundPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const ws = useRef<WebSocket | null>(null);
   const streamingTextRef = useRef<string>("");
+  const streamingMessageIdRef = useRef<string | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [isEnabled, setIsEnabled] = useState(true);
   const wsSourcesRef = useRef<SourceMetadata[]>([]);
@@ -360,10 +710,12 @@ export default function ChatPlaygroundPage() {
                 const mappedMessages = (matchedSession.messages || []).map((msg: any) => {
                   const { cleanedContent, sources } = cleanAndExtractSources(msg.content, msg.sources);
                   return {
+                    id: msg.message_id || msg.id || msg.messageId || msg.msg_id || msg._id || msg.msgId,
                     role: msg.role,
                     content: cleanedContent,
                     file: msg.file,
                     sources: sources.length > 0 ? sources : undefined,
+                    feedback: msg.feedback_type || msg.feedback,
                     timestamp: msg.created_at
                       ? new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
                       : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -389,6 +741,11 @@ export default function ChatPlaygroundPage() {
             return;
           }
         }
+
+        // Default path: if no agentId is specified in URL, start empty (as requested)
+        setAgent(null);
+        setSessions([]);
+        setMessages([]);
       }
       setInitialLoadDone(true);
     });
@@ -433,6 +790,8 @@ export default function ChatPlaygroundPage() {
 
   // URL Search Parameters Syncer Effect
   useEffect(() => {
+    if (!initialLoadDone) return;
+
     if (typeof window !== "undefined") {
       const url = new URL(window.location.href);
       if (agent?.id) {
@@ -449,7 +808,7 @@ export default function ChatPlaygroundPage() {
 
       window.history.replaceState({}, "", url.toString());
     }
-  }, [agent?.id, currentSessionId]);
+  }, [agent?.id, currentSessionId, initialLoadDone]);
 
   // ─── WebSocket Logic ────────────────────────────────────────────────────────
 
@@ -496,6 +855,13 @@ export default function ChatPlaygroundPage() {
       try {
         const data = JSON.parse(rawData);
 
+        const parsedId = data.message_id || data.messageId || data.id ||
+          (data.message && (data.message.id || data.message.message_id || data.message.messageId)) ||
+          (data.data && (data.data.id || data.data.message_id || data.data.messageId));
+        if (parsedId && typeof parsedId === "string") {
+          streamingMessageIdRef.current = parsedId;
+        }
+
         // Accumulate sources from any WebSocket packet
         let incomingSources: SourceMetadata[] = [];
         if (Array.isArray(data.sources)) {
@@ -536,7 +902,7 @@ export default function ChatPlaygroundPage() {
               const inCitations = citedFilenames.some(cf => srcName.includes(cf) || cf.includes(srcName));
               return inText || inCitations;
             });
-            
+
             // If we found specific matches, use them. Else, fallback to all backend sources.
             if (matchedSources.length > 0) {
               finalSources = matchedSources;
@@ -556,6 +922,7 @@ export default function ChatPlaygroundPage() {
             setMessages((prev: any) => [
               ...prev,
               {
+                id: data.message_id || data.messageId || data.id || data.msg_id || data._id || streamingMessageIdRef.current,
                 role: "assistant",
                 content: textContent,
                 sources: finalSources.length > 0 ? finalSources : undefined,
@@ -582,9 +949,43 @@ export default function ChatPlaygroundPage() {
             (async () => {
               const freshSessions = await fetchSessions(agent);
               setSessions(freshSessions);
+
+              let finalSessionId = backendSessionId || currentSessionIdRef.current;
               if (!backendSessionId && currentSessionIdRef.current && currentSessionIdRef.current.startsWith("session_") && freshSessions.length > 0) {
-                setCurrentSessionId(freshSessions[0].id);
-                currentSessionIdRef.current = freshSessions[0].id;
+                finalSessionId = freshSessions[0].id;
+                setCurrentSessionId(finalSessionId);
+                currentSessionIdRef.current = finalSessionId;
+              }
+
+              // Robust retry logic to fetch correct message IDs from detail endpoint
+              let rawMsgs: any[] = [];
+              let attempts = 0;
+              while (attempts < 5) {
+                rawMsgs = await fetchSessionMessages(agent.id, finalSessionId);
+                const hasAssistantMsg = rawMsgs.some(m => m.role === "assistant");
+                if (hasAssistantMsg) {
+                  break;
+                }
+                attempts++;
+                await new Promise((resolve) => setTimeout(resolve, 500));
+              }
+
+              if (rawMsgs.length > 0) {
+                const mappedMessages = rawMsgs.map((msg: any) => {
+                  const { cleanedContent, sources } = cleanAndExtractSources(msg.content, msg.sources);
+                  return {
+                    id: msg.id || msg.message_id || msg.messageId || msg.msg_id || msg._id || msg.msgId,
+                    role: msg.role,
+                    content: cleanedContent,
+                    file: msg.file,
+                    sources: sources.length > 0 ? sources : undefined,
+                    feedback: msg.feedback_type || msg.feedback,
+                    timestamp: msg.created_at
+                      ? new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                      : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                  };
+                });
+                setMessages(mappedMessages);
               }
             })();
           }
@@ -639,7 +1040,7 @@ export default function ChatPlaygroundPage() {
 
   const startNewChat = (selectedAgent: { id: string; name: string }, currentSessionsList?: ChatSession[]) => {
     const listToSearch = currentSessionsList || sessions;
-    const existingEmptySession = listToSearch.find(s => 
+    const existingEmptySession = listToSearch.find(s =>
       (s.agentId === selectedAgent.id || s.agent_id === selectedAgent.id) &&
       s.id.startsWith("session_") &&
       (!s.messages || s.messages.length === 0)
@@ -670,7 +1071,7 @@ export default function ChatPlaygroundPage() {
     setAgent(selectedAgent);
   };
 
-  const loadSession = (session: ChatSession) => {
+  const loadSession = async (session: ChatSession) => {
     if (isTyping) {
       connectWs();
     }
@@ -679,13 +1080,23 @@ export default function ChatPlaygroundPage() {
     setCurrentSessionId(session.id);
     currentSessionIdRef.current = session.id;
 
-    const mappedMessages = (session.messages || []).map((msg: any) => {
+    // Fetch real message_id values from session detail endpoint
+    const agentId = session.agent_id || session.agentId;
+    let rawMessages: any[] = session.messages || [];
+    if (agentId && !session.id.startsWith("session_")) {
+      const fetched = await fetchSessionMessages(agentId, session.id);
+      if (fetched.length > 0) rawMessages = fetched;
+    }
+
+    const mappedMessages = rawMessages.map((msg: any) => {
       const { cleanedContent, sources } = cleanAndExtractSources(msg.content, msg.sources);
       return {
+        id: msg.message_id || msg.id || msg.messageId || msg.msg_id || msg._id || msg.msgId,
         role: msg.role,
         content: cleanedContent,
         file: msg.file,
         sources: sources.length > 0 ? sources : undefined,
+        feedback: msg.feedback_type || msg.feedback,
         timestamp: msg.created_at
           ? new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
           : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -693,21 +1104,61 @@ export default function ChatPlaygroundPage() {
     });
 
     setMessages(mappedMessages);
-    setAgent({
-      id: session.agent_id || session.agentId,
-      name: session.title || session.agentName
-    });
+    if (agentId) {
+      const matched = botsCache?.find(b => b.id === agentId);
+      if (matched) {
+        setAgent({ id: matched.id, name: matched.name });
+      } else {
+        setAgent({ id: agentId, name: session.agentName || "Select Agent" });
+      }
+    }
     setMobileSidebarOpen(false);
   };
 
-  const deleteSession = (e: React.MouseEvent, id: string) => {
+  const deleteSession = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+
+    // Optimistically update local session list
     setSessions(prev => prev.filter(s => s.id !== id));
+
     if (currentSessionId === id) {
       setCurrentSessionId(null);
       currentSessionIdRef.current = null;
       setMessages([]);
-      setAgent(null);
+      // Keep the agent selected, DO NOT set it to null!
+    }
+
+    try {
+      const token = getCookie(AUTH_COOKIE_KEY);
+      // Attempt standard session deletion endpoint
+      const res = await fetch(`${API_BASE_URL}/chats/sessions/${id}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (res.ok) {
+        message.success("Session deleted successfully.");
+      } else {
+        console.warn("DELETE /chats/sessions failed, trying fallback...", res.status);
+        if (agent?.id) {
+          const resFallback = await fetch(`${API_BASE_URL}/chats/${agent.id}/sessions/${id}`, {
+            method: "DELETE",
+            headers: {
+              Authorization: `Bearer ${token}`
+            }
+          });
+          if (resFallback.ok) {
+            message.success("Session deleted successfully.");
+            return;
+          }
+        }
+        message.error("Failed to delete session on server.");
+      }
+    } catch (err) {
+      console.error("Delete session error:", err);
+      message.error("Failed to delete session on server.");
     }
   };
 
@@ -730,23 +1181,24 @@ export default function ChatPlaygroundPage() {
         break;
       }
     }
-    
+
     if (userMessageIndex === -1 || !agent?.id) return;
-    
+
     activeQuerySessionIdRef.current = currentSessionId;
-    
+
     const userMsg = messages[userMessageIndex];
-    
+
     const updatedMessages = messages.slice(0, userMessageIndex + 1);
     setMessages(updatedMessages);
-    
+
     ws.current?.send(JSON.stringify({
       query: userMsg.content,
       file: userMsg.file ? { name: userMsg.file.name, type: userMsg.file.type } : null,
       session_id: currentSessionId && !currentSessionId.startsWith("session_") ? currentSessionId : null
     }));
-    
+
     wsSourcesRef.current = [];
+    streamingMessageIdRef.current = null;
     setStreamingText("");
     setIsTyping(true);
   };
@@ -756,9 +1208,9 @@ export default function ChatPlaygroundPage() {
       message.warning("No active session to share.");
       return;
     }
-    
+
     const shareUrl = `${window.location.origin}${window.location.pathname}?agentId=${agent.id}&sessionId=${currentSessionId}`;
-    
+
     navigator.clipboard.writeText(shareUrl)
       .then(() => {
         message.success("Share link copied to clipboard!");
@@ -820,7 +1272,7 @@ export default function ChatPlaygroundPage() {
         }
         return prev.map(s => {
           if (s.id === targetSessionId) {
-            const hasNoTitle = !s.title || s.title === "Untitled Session";
+            const hasNoTitle = !s.title || s.title.toLowerCase().includes("untitled");
             return {
               ...s,
               title: hasNoTitle ? displayTitle : s.title,
@@ -859,6 +1311,7 @@ export default function ChatPlaygroundPage() {
     setInput("");
     setAttachedFile(null); // Clear dock frame tracking parameters
     streamingTextRef.current = "";
+    streamingMessageIdRef.current = null;
     wsSourcesRef.current = [];
     setStreamingText("");
     activeQuerySessionIdRef.current = targetSessionId;
@@ -871,6 +1324,354 @@ export default function ChatPlaygroundPage() {
       message.success("Copied");
     } catch {
       message.error("Copy failed");
+    }
+  };
+
+  const handleOpenSource = async (src: SourceMetadata) => {
+    let currentSources = agentSources;
+    if (agent?.id && currentSources.length === 0) {
+      currentSources = await fetchAgentSources(agent.id);
+      setAgentSources(currentSources);
+    }
+
+    let kbId = src.kb_id;
+    if (!kbId && currentSources.length > 0) {
+      const fname = getFileName(src.source).toLowerCase();
+      const matched = currentSources.find(as => {
+        const asName = (as.name || as.source || as.filename || '').toLowerCase();
+        return asName.includes(fname) || fname.includes(asName) || cleanCompare(asName, fname);
+      });
+      if (matched) {
+        kbId = matched.id || matched.kb_id || matched.kbId || '';
+      }
+    }
+
+    const stype = getSourceType(src.source, kbId);
+    if (stype === 'url') {
+      const rawSrc = src.source || '';
+      const urlMatch = rawSrc.match(/(https?:\/\/[^\s]+)/i);
+      const openUrl = urlMatch ? urlMatch[1] : (rawSrc.startsWith('http') ? rawSrc : `https://${rawSrc}`);
+      window.open(openUrl, '_blank', 'noopener,noreferrer');
+    } else if (kbId) {
+      try {
+        const blobUrl = await getFilePreview(kbId);
+        const filename = getFileName(src.source);
+        const nameLower = filename.toLowerCase();
+
+        // 1. Fetch blob to determine content type and parse binary spreadsheets
+        const blobRes = await fetch(blobUrl);
+        const blob = await blobRes.blob();
+        const contentType = blob.type.toLowerCase();
+
+        const isPdf = contentType.includes('pdf') || nameLower.endsWith('.pdf');
+        const isImage = contentType.includes('image/') || nameLower.endsWith('.png') || nameLower.endsWith('.jpg') || nameLower.endsWith('.jpeg') || nameLower.endsWith('.webp') || nameLower.endsWith('.gif');
+        const isTxt = contentType.includes('text/plain') || nameLower.endsWith('.txt');
+        const isCSV = contentType.includes('csv') || nameLower.endsWith('.csv');
+        const isExcel = contentType.includes('excel') || contentType.includes('spreadsheet') ||
+          contentType.includes('vnd.ms-excel') || contentType.includes('vnd.openxmlformats-officedocument.spreadsheetml.sheet') ||
+          nameLower.endsWith('.xls') || nameLower.endsWith('.xlsx');
+
+        if (isPdf || isImage || isTxt) {
+          const viewBlobUrl = URL.createObjectURL(blob);
+          const newWindow = window.open('', '_blank');
+          if (newWindow) {
+            newWindow.document.title = filename || 'Source Preview';
+            newWindow.document.body.style.margin = '0';
+            newWindow.document.body.style.padding = '0';
+            newWindow.document.body.style.height = '100vh';
+            newWindow.document.body.style.overflow = 'hidden';
+
+            const iframe = newWindow.document.createElement('iframe');
+            iframe.src = viewBlobUrl;
+            iframe.style.width = '100%';
+            iframe.style.height = '100%';
+            iframe.style.border = 'none';
+            newWindow.document.body.appendChild(iframe);
+          } else {
+            message.error('Popup blocked. Please allow popups for this site.');
+          }
+        } else if (isCSV || isExcel) {
+          // Parse spreadsheet array buffer using xlsx
+          const arrayBuffer = await blob.arrayBuffer();
+          const XLSX = await import("xlsx");
+          const workbook = XLSX.read(arrayBuffer, { type: "array" });
+
+          const sheetsData: { [sheetName: string]: string[][] } = {};
+          workbook.SheetNames.forEach((sheetName) => {
+            const worksheet = workbook.Sheets[sheetName];
+            const jsonData = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1 });
+            sheetsData[sheetName] = jsonData.map((row: any) =>
+              Array.isArray(row)
+                ? row.map((cell) => (cell !== null && cell !== undefined ? String(cell) : ""))
+                : []
+            );
+          });
+          const sheetNames = workbook.SheetNames;
+
+          const viewBlobUrl = URL.createObjectURL(blob);
+          const newWindow = window.open('', '_blank');
+          if (newWindow) {
+            newWindow.document.write(`
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <meta charset="utf-8">
+                <title>${filename || 'Spreadsheet Preview'}</title>
+                <style>
+                  body {
+                    margin: 0;
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                    background: #f9fafb;
+                    color: #374151;
+                    display: flex;
+                    flex-direction: column;
+                    height: 100vh;
+                  }
+                  header {
+                    background: #ffffff;
+                    border-bottom: 1px solid #e5e7eb;
+                    padding: 16px 24px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    flex-shrink: 0;
+                  }
+                  h1 {
+                    margin: 0;
+                    font-size: 18px;
+                    font-weight: 600;
+                    color: #111827;
+                  }
+                  .tabs-container {
+                    background: #f3f4f6;
+                    border-bottom: 1px solid #e5e7eb;
+                    padding: 8px 16px;
+                    display: flex;
+                    gap: 8px;
+                    overflow-x: auto;
+                    flex-shrink: 0;
+                  }
+                  .tab-btn {
+                    background: #ffffff;
+                    border: 1px solid #d1d5db;
+                    border-radius: 6px;
+                    padding: 6px 12px;
+                    font-size: 13px;
+                    font-weight: 500;
+                    cursor: pointer;
+                    color: #4b5563;
+                    white-space: nowrap;
+                    transition: all 0.2s;
+                  }
+                  .tab-btn:hover {
+                    background: #f9fafb;
+                    color: #111827;
+                  }
+                  .tab-btn.active {
+                    background: #285d91;
+                    color: #ffffff;
+                    border-color: #285d91;
+                  }
+                  .table-wrapper {
+                    flex-grow: 1;
+                    overflow: auto;
+                    padding: 16px;
+                  }
+                  table {
+                    border-collapse: collapse;
+                    width: 100%;
+                    background: #ffffff;
+                    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                    border-radius: 8px;
+                    overflow: hidden;
+                    font-size: 13px;
+                  }
+                  th, td {
+                    border: 1px solid #e5e7eb;
+                    padding: 10px 14px;
+                    text-align: left;
+                  }
+                  th {
+                    background: #f9fafb;
+                    font-weight: 600;
+                    color: #374151;
+                    position: sticky;
+                    top: 0;
+                    z-index: 10;
+                  }
+                  tr:nth-child(even) {
+                    background: #f9fafb;
+                  }
+                  tr:hover {
+                    background: #f3f4f6;
+                  }
+                </style>
+              </head>
+              <body>
+                <header>
+                  <h1>${filename}</h1>
+                  <button id="download-btn" style="background: #285d91; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1em" width="1em" xmlns="http://www.w3.org/2000/svg"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    Download File
+                  </button>
+                </header>
+                <div class="tabs-container" id="tabs"></div>
+                <div class="table-wrapper">
+                  <table id="sheet-table"></table>
+                </div>
+                <script>
+                  const sheetsData = ${JSON.stringify(sheetsData)};
+                  const sheetNames = ${JSON.stringify(sheetNames)};
+                  
+                  function renderSheet(sheetName) {
+                    const rows = sheetsData[sheetName] || [];
+                    const table = document.getElementById('sheet-table');
+                    table.innerHTML = '';
+                    
+                    if (rows.length === 0) {
+                      table.innerHTML = '<tr><td style="text-align:center; padding: 20px; color: #9ca3af;">Empty Sheet</td></tr>';
+                      return;
+                    }
+                    
+                    // Render headers
+                    const headerRow = rows[0];
+                    const thead = document.createElement('thead');
+                    const trHead = document.createElement('tr');
+                    
+                    // Let's draw row index as column 0
+                    const thIdx = document.createElement('th');
+                    thIdx.innerText = '#';
+                    thIdx.style.width = '40px';
+                    thIdx.style.textAlign = 'center';
+                    trHead.appendChild(thIdx);
+
+                    headerRow.forEach((cellText, idx) => {
+                      const th = document.createElement('th');
+                      th.innerText = cellText || ('Column ' + (idx + 1));
+                      trHead.appendChild(th);
+                    });
+                    thead.appendChild(trHead);
+                    table.appendChild(thead);
+                    
+                    // Render rows
+                    const tbody = document.createElement('tbody');
+                    for (let r = 1; r < rows.length; r++) {
+                      const rowData = rows[r];
+                      const tr = document.createElement('tr');
+                      
+                      const tdIdx = document.createElement('td');
+                      tdIdx.innerText = r;
+                      tdIdx.style.textAlign = 'center';
+                      tdIdx.style.background = '#f9fafb';
+                      tdIdx.style.color = '#9ca3af';
+                      tdIdx.style.fontWeight = 'bold';
+                      tr.appendChild(tdIdx);
+
+                      headerRow.forEach((_, colIdx) => {
+                        const td = document.createElement('td');
+                        td.innerText = rowData[colIdx] !== undefined ? rowData[colIdx] : '';
+                        tr.appendChild(td);
+                      });
+                      tbody.appendChild(tr);
+                    }
+                    table.appendChild(tbody);
+                  }
+                  
+                  // Render tabs
+                  const tabsContainer = document.getElementById('tabs');
+                  if (sheetNames.length > 1) {
+                    sheetNames.forEach((name, idx) => {
+                      const btn = document.createElement('button');
+                      btn.className = 'tab-btn' + (idx === 0 ? ' active' : '');
+                      btn.innerText = name;
+                      btn.onclick = () => {
+                        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                        btn.classList.add('active');
+                        renderSheet(name);
+                      };
+                      tabsContainer.appendChild(btn);
+                    });
+                  } else {
+                    tabsContainer.style.display = 'none';
+                  }
+                  
+                  // Initial render
+                  if (sheetNames.length > 0) {
+                    renderSheet(sheetNames[0]);
+                  }
+
+                  document.getElementById('download-btn').onclick = () => {
+                    const link = document.createElement('a');
+                    link.href = '${viewBlobUrl}';
+                    link.download = '${filename}';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                  };
+                </script>
+              </body>
+              </html>
+            `);
+            newWindow.document.close();
+          } else {
+            message.error('Popup blocked. Please allow popups for this site.');
+          }
+        } else {
+          // fallback direct download
+          const link = document.createElement('a');
+          link.href = blobUrl;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        }
+      } catch (err) {
+        console.error(err);
+        message.error('Unable to open file preview');
+      }
+    } else {
+      // Text citation / other fallback
+      const filename = getFileName(src.source);
+      const citationText = src.text || src.source || 'No citation text available.';
+      const newWindow = window.open('', '_blank');
+      if (newWindow) {
+        newWindow.document.title = filename || 'Source Text Citation';
+        newWindow.document.body.style.margin = '0';
+        newWindow.document.body.style.padding = '24px';
+        newWindow.document.body.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        newWindow.document.body.style.background = '#f9fafb';
+        newWindow.document.body.style.color = '#111827';
+        newWindow.document.body.style.lineHeight = '1.6';
+
+        const container = newWindow.document.createElement('div');
+        container.style.maxWidth = '800px';
+        container.style.margin = '40px auto';
+        container.style.background = '#ffffff';
+        container.style.padding = '32px';
+        container.style.borderRadius = '12px';
+        container.style.boxShadow = '0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)';
+        container.style.border = '1px solid #e5e7eb';
+
+        const heading = newWindow.document.createElement('h2');
+        heading.innerText = `Citation: ${filename}`;
+        heading.style.marginTop = '0';
+        heading.style.borderBottom = '2px solid #285d91';
+        heading.style.paddingBottom = '12px';
+        heading.style.color = '#1f2937';
+        container.appendChild(heading);
+
+        const contentParagraph = newWindow.document.createElement('p');
+        contentParagraph.innerText = citationText;
+        contentParagraph.style.whiteSpace = 'pre-wrap';
+        contentParagraph.style.fontSize = '15px';
+        contentParagraph.style.color = '#374151';
+        contentParagraph.style.marginTop = '20px';
+        container.appendChild(contentParagraph);
+
+        newWindow.document.body.appendChild(container);
+      } else {
+        message.error('Popup blocked. Please allow popups for this site.');
+      }
     }
   };
   const handleEditMessage = (index: number, content: string) => {
@@ -899,8 +1700,98 @@ export default function ChatPlaygroundPage() {
     }));
 
     wsSourcesRef.current = [];
+    streamingMessageIdRef.current = null;
     activeQuerySessionIdRef.current = currentSessionId;
     setIsTyping(true);
+  };
+
+  const handleThumbsUp = async (msgId?: string) => {
+    if (!msgId) {
+      message.error("Message ID not available for feedback.");
+      return;
+    }
+
+    try {
+      const token = getCookie(AUTH_COOKIE_KEY);
+      const res = await fetch(`${API_BASE_URL}/chats/messages/feedback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          message_id: msgId,
+          feedback_type: "thumbs_up",
+          feedback_reason: "Correct response",
+        }),
+      });
+
+      if (res.ok) {
+        message.success("Thank you for your feedback!");
+        setMessages((prev: any) =>
+          prev.map((m: any) => {
+            const isMatch = m.id === msgId;
+            return isMatch ? { ...m, feedback: "thumbs_up" } : m;
+          })
+        );
+      } else {
+        message.error("Failed to submit feedback.");
+      }
+    } catch (err) {
+      console.error(err);
+      message.error("An error occurred while sending feedback.");
+    }
+  };
+
+  const handleThumbsDown = (msgId?: string) => {
+    if (!msgId) {
+      message.error("Message ID not available for feedback.");
+      return;
+    }
+    setFeedbackMessageId(msgId);
+    setFeedbackModalOpen(true);
+  };
+
+  const submitThumbsDownFeedback = async () => {
+    if (!feedbackMessageId) return;
+
+    const finalReason = selectedReason === "Other" ? customReason.trim() || "Other" : selectedReason;
+
+    try {
+      const token = getCookie(AUTH_COOKIE_KEY);
+      const res = await fetch(`${API_BASE_URL}/chats/messages/feedback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          message_id: feedbackMessageId,
+          feedback_type: "thumbs_down",
+          feedback_reason: finalReason,
+        }),
+      });
+
+      if (res.ok) {
+        message.success("Thank you for your feedback!");
+        setMessages((prev: any) =>
+          prev.map((m: any) => {
+            const isMatch = m.id === feedbackMessageId;
+            return isMatch ? { ...m, feedback: "thumbs_down" } : m;
+          })
+        );
+      } else {
+        message.error("Failed to submit feedback.");
+      }
+    } catch (err) {
+      console.error(err);
+      message.error("An error occurred while sending feedback.");
+    } finally {
+      setFeedbackModalOpen(false);
+      setFeedbackMessageId(null);
+      setCustomReason("");
+      setSelectedReason("Incorrect Answer");
+    }
   };
 
   const cleanCompare = (name1: string, name2: string) => {
@@ -914,7 +1805,7 @@ export default function ChatPlaygroundPage() {
     if (!sourcesToEnhance || sourcesToEnhance.length === 0) return [];
     return sourcesToEnhance.map(src => {
       if (src.kb_id) {
-        const matched = currentAgentSources.find(as => 
+        const matched = currentAgentSources.find(as =>
           (as.id === src.kb_id || as.kb_id === src.kb_id) ||
           cleanCompare(as.name || as.source || "", src.source)
         );
@@ -929,8 +1820,8 @@ export default function ChatPlaygroundPage() {
         }
         return src;
       }
-      
-      const matched = currentAgentSources.find(as => 
+
+      const matched = currentAgentSources.find(as =>
         cleanCompare(as.name || as.source || "", src.source)
       );
 
@@ -998,7 +1889,7 @@ export default function ChatPlaygroundPage() {
         try {
           setParsedTextLoading(true);
           const cleanText = await getCleanTextContent(source.kb_id);
-          setParsedTextContent(cleanText);
+          setParsedTextContent(cleanExtractedText(cleanText));
         } catch (err) {
           console.error("Clean text fetch error:", err);
           setParsedTextContent("Unable to load extracted text content.");
@@ -1077,6 +1968,15 @@ export default function ChatPlaygroundPage() {
     }
   }, [parsedTextContent]);
 
+  // Search query filters the messages within the active conversation instead of sidebar sessions
+  const displayedMessages = React.useMemo(() => {
+    if (!searchQuery) return messages;
+    const query = searchQuery.toLowerCase();
+    return messages.filter((msg: any) =>
+      msg.content && msg.content.toLowerCase().includes(query)
+    );
+  }, [messages, searchQuery]);
+
   const renderSidebar = () => {
     return (
       <div className="w-full h-full flex flex-col bg-[var(--app-surface-muted)]/80 backdrop-blur-md overflow-hidden">
@@ -1088,28 +1988,6 @@ export default function ChatPlaygroundPage() {
               {wsStatus === "open" ? "LINK STABILIZED" : "SYNCING LINK CORE..."}
             </span>
           </Flex>
-          <Switch
-            size="small"
-            checked={isEnabled}
-            onChange={(checked) => {
-              setIsEnabled(checked);
-              console.log(checked);
-            }}
-            className="shrink-0"
-          />
-        </div>
-
-        {/* Sidebar Top: Operational Node / AgentList */}
-        <div className="p-4 border-b border-[var(--app-border)]/40 bg-[var(--app-surface-muted)]/50">
-          <span className="text-[10px] font-extrabold uppercase tracking-widest text-[var(--app-text-soft)] block mb-2 opacity-80">
-            Select Agent
-          </span>
-          <div className="w-full">
-            <AgentList
-              selectedId={agent?.id}
-              onChange={handleAgentChange}
-            />
-          </div>
         </div>
 
         {/* New Chat Button */}
@@ -1133,10 +2011,10 @@ export default function ChatPlaygroundPage() {
         {/* Chats History Section */}
         <div className="flex-1 flex flex-col min-h-0 px-2">
           <div className="px-3 py-2 flex items-center justify-between">
-            <span className="text-[10px] font-extrabold uppercase tracking-widest text-[var(--app-text-soft)] opacity-80">
+            <span className="text-[10px] font-extrabold uppercase tracking-widest text-[var(--app-text-muted)] ">
               Chats
             </span>
-            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-[var(--app-border)]/30 text-[var(--app-text-soft)]">
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-[var(--app-border)]/30 text-[var(--app-text-muted)]">
               {sessions.length} sessions
             </span>
           </div>
@@ -1152,16 +2030,15 @@ export default function ChatPlaygroundPage() {
                       loadSession(s);
                       setMobileSidebarOpen(false);
                     }}
-                    className={`group relative p-2.5 rounded-xl cursor-pointer transition-all border flex items-center justify-between ${
-                      isActiveSession
-                        ? "bg-[#285d91]/15 text-[#285d91] border-transparent font-extrabold"
-                        : "bg-transparent hover:bg-[var(--app-hover)] text-[var(--app-text-soft)] border-transparent"
-                    }`}
+                    className={`group relative p-2.5 rounded-xl cursor-pointer transition-all border flex items-center justify-between ${isActiveSession
+                      ? "bg-[#285d91]/20 text-[var(--app-text)] border-transparent font-extrabold"
+                      : "bg-transparent hover:bg-[var(--app-hover)] text-[var(--app-text-soft)] border-transparent"
+                      }`}
                   >
                     <div className="flex items-center gap-2.5 min-w-0 flex-1">
                       <span className="text-sm shrink-0">💬</span>
                       <span className="text-xs truncate block pr-2">
-                        {s.title || "Untitled Session"}
+                        {(!s.title || s.title.toLowerCase().includes("untitled")) ? "New Chat" : s.title}
                       </span>
                     </div>
 
@@ -1210,7 +2087,7 @@ export default function ChatPlaygroundPage() {
     <div className="h-[calc(100vh-96px)] w-full flex bg-[var(--app-surface)] antialiased selection:bg-[#285d91]/20 overflow-hidden relative">
       {/* Desktop Left Sidebar */}
       {screen.md && (
-        <div 
+        <div
           className="h-full border-r border-[var(--app-border)]/40 flex flex-col bg-[var(--app-surface-muted)] shrink-0 transition-all duration-300 overflow-hidden"
           style={{ width: desktopSidebarOpen ? "260px" : "0px", borderRightWidth: desktopSidebarOpen ? "1px" : "0px" }}
         >
@@ -1240,12 +2117,12 @@ export default function ChatPlaygroundPage() {
         {/* Top Header */}
         <div className="w-full px-4 md:px-8 py-3 border-b border-[var(--app-border)]/40 backdrop-blur-md bg-[var(--app-surface)]/50 sticky top-0 z-40 transition-all shrink-0">
           <Flex justify="space-between" align="center" className="gap-2 w-full">
-            
+
             {/* Left side: Hamburger and Logo */}
             <Flex align="center" gap={4} className="min-w-0">
-              <Button 
-                type="text" 
-                icon={<FiMenu className="text-lg text-[var(--app-text-soft)]" />} 
+              <Button
+                type="text"
+                icon={<FiMenu className="text-lg text-[var(--app-text-soft)]" />}
                 onClick={() => {
                   if (screen.md) {
                     setDesktopSidebarOpen(!desktopSidebarOpen);
@@ -1255,7 +2132,7 @@ export default function ChatPlaygroundPage() {
                 }}
                 className="hover:bg-[var(--app-hover)] !rounded-xl w-9 h-9 flex items-center justify-center transition-colors"
               />
-              
+
               <Flex align="center" gap={8} className="select-none ml-1 shrink-0">
                 <span className="font-extrabold text-sm tracking-tight text-[var(--app-text)] hidden xs:inline shrink-0">
                   AI Assist
@@ -1268,20 +2145,39 @@ export default function ChatPlaygroundPage() {
               </Flex>
             </Flex>
 
+            {/* Right side: Show Sources Switch */}
+            <Flex align="center" gap={8} className="shrink-0 select-none">
+              <span className="text-xs font-semibold text-[var(--app-text-soft)]">
+                Show Sources
+              </span>
+              <Switch
+                size="small"
+                checked={showSources}
+                onChange={(checked) => setShowSources(checked)}
+                className="shrink-0 text-emerald-500"
+              />
+            </Flex>
+
           </Flex>
         </div>
 
         {/* Conversation Stream */}
         <div className="flex-1 overflow-y-auto px-4 md:px-12 py-6 md:py-10 space-y-6 custom-scrollbar bg-dots-pattern">
           {messages.length === 0 && !isTyping && (
-            <Flex vertical align="center" justify="center" className="h-full select-none my-auto">
+            <Flex vertical align="center" justify="center" className="h-full select-none my-auto space-y-4">
               <h1 className="m-0 text-[var(--app-text)] font-extrabold text-xl sm:text-2xl md:text-4xl tracking-tight text-center max-w-xl px-4 animate-in fade-in duration-500">
                 Hello {userName}! What can I do for you?
               </h1>
+              {/* {agent && (
+                <p className="text-xs font-semibold text-[var(--app-text-soft)]/50 uppercase tracking-widest text-center animate-in fade-in duration-700">
+                  Active Agent: <span className="text-[#285d91] font-bold">{agent.name}</span>
+                  • Model: <span className="text-[#285d91] font-bold">{selectedModel}</span>
+                </p>
+              )} */}
             </Flex>
           )}
 
-          {messages.map((msg: any, i: any) => {
+          {displayedMessages.map((msg: any, i: any) => {
             const isUser = msg.role === "user";
             const hasImage = msg.file?.type?.startsWith("image/");
             const hasDoc = msg.file && !hasImage;
@@ -1290,13 +2186,20 @@ export default function ChatPlaygroundPage() {
               <div key={i} className={`flex w-full ${isUser ? "justify-end" : "justify-start"} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
                 <div className={`flex gap-3 transition-all duration-300 ${editingMessageIndex === i ? "w-full max-w-[95%] md:max-w-[85%]" : "max-w-[88%] md:max-w-[75%]"} ${isUser ? "flex-row-reverse" : "flex-row"}`}>
                   {isUser ? (
-                    <Avatar
-                      size={32}
-                      icon={<FiUser />}
-                      className="bg-emerald-500/10 !text-emerald-600 shadow-none shrink-0 border border-current/10 font-bold"
-                    />
+                    <div className="relative shrink-0">
+                      <Avatar
+                        size={32}
+                        className="bg-gradient-to-br from-[#285d91] to-[#163a5f] text-white shadow-md font-extrabold flex items-center justify-center border border-white/10"
+                      >
+                        <span style={{ fontSize: "14px", fontWeight: 800, letterSpacing: "0.1em" }}>
+                          {userName
+                            ? userName.split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2)
+                            : <FiUser />}
+                        </span>
+                      </Avatar>
+                    </div>
                   ) : (
-                    <GragLogoAvatar size={32} />
+                    <GSearchLogoAvatar size={32} />
                   )}
 
                   <div className={`flex flex-col space-y-1 ${editingMessageIndex === i ? "flex-1 min-w-0" : ""}`}>
@@ -1304,71 +2207,92 @@ export default function ChatPlaygroundPage() {
                       {msg.timestamp}
                     </span>
 
-                    {/* <div className={`p-4 md:p-5 rounded-2xl transition-all duration-200 shadow-sm border ${ */}
                     <div
-                      className={`group relative p-4 md:p-5 rounded-2xl transition-all duration-200 shadow-sm border ${isUser
-                          ? "bg-[#285d91] text-white rounded-tr-none border-[#285d91]/20 font-medium"
-                          : "bg-[var(--app-surface-muted)] text-[var(--app-text)] rounded-tl-none border-[var(--app-border)]/40 font-normal"
+                      className={`group relative p-4 md:p-5 rounded-2xl transition-all duration-200 shadow-sm border mb-6 ${isUser
+                        ? "bg-[#285d91] text-white rounded-tr-none border-[#285d91]/20 font-medium"
+                        : "bg-[var(--app-surface-muted)] text-[var(--app-text)] rounded-tl-none border-[var(--app-border)]/40 font-normal"
                         }`}
                     >
                       {/* Dynamic File Rendering UI Framework */}
-                      <div className={`absolute -bottom-10 ${isUser ? "right-0" : "left-0"} opacity-0 group-hover:opacity-100 transition-all duration-200 flex gap-2 z-20`}>
-                          <Tooltip title="Copy message" placement="bottom">
+                      <div className={`absolute -bottom-10 left-0 right-0 pt-3 transition-all duration-200 flex gap-2 z-20 ${isUser ? "opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto" : "opacity-100 pointer-events-auto"}`}>
+                        <Tooltip title="Copy message" placement="bottom">
+                          <button
+                            onClick={() => handleCopyMessage(msg.content)}
+                            className="text-[var(--app-text)] p-2 cursor-pointer font-bold transition-colors hover:opacity-80"
+                          >
+                            <FiCopy size={16} strokeWidth={2} />
+                          </button>
+                        </Tooltip>
+
+                        {isUser ? (
+                          <Tooltip title="Edit message" placement="bottom">
                             <button
-                              onClick={() => handleCopyMessage(msg.content)}
-                              className="text-[var(--app-text)] p-2 cursor-pointer font-bold transition-colors hover:opacity-80"
+                              onClick={() => handleEditMessage(i, msg.content)}
+                              className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80"
                             >
-                              <FiCopy size={16} strokeWidth={2} />
+                              <FiEdit2 size={16} strokeWidth={2} />
                             </button>
                           </Tooltip>
-
-                          {isUser ? (
-                            <Tooltip title="Edit message" placement="bottom">
+                        ) : (
+                          <>
+                            <Tooltip title="Helpful" placement="bottom">
                               <button
-                                onClick={() => handleEditMessage(i, msg.content)}
-                                className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80"
+                                onClick={() => handleThumbsUp(msg.id)}
+                                className={`p-2 cursor-pointer transition-colors hover:opacity-80 ${msg.feedback === "thumbs_up" ? "text-emerald-500 font-bold" : "text-[var(--app-text)] font-bold"}`}
                               >
-                                <FiEdit2 size={16} strokeWidth={2} />
+                                <FiThumbsUp size={16} strokeWidth={msg.feedback === "thumbs_up" ? 2.5 : 2} fill="none" />
                               </button>
                             </Tooltip>
-                          ) : (
-                            <>
-                              <Tooltip title="Helpful" placement="bottom">
-                                <button className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80">
-                                  <FiThumbsUp size={16} strokeWidth={2} />
-                                </button>
-                              </Tooltip>
-                              <Tooltip title="Not helpful" placement="bottom">
-                                <button className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80">
-                                  <FiThumbsDown size={16} strokeWidth={2} />
-                                </button>
-                              </Tooltip>
-                              {/* <Tooltip title="Share" placement="bottom">
-                                <button 
-                                  onClick={handleShareSession}
-                                  className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80"
-                                >
-                                  <FiUpload size={16} strokeWidth={2} />
-                                </button>
-                              </Tooltip> */}
-                              <Tooltip title="Regenerate" placement="bottom">
-                                <button 
-                                  onClick={() => handleRegenerate(i)}
-                                  className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80"
-                                >
-                                  <FiRotateCw size={16} strokeWidth={2} />
-                                </button>
-                              </Tooltip>
-                              {msg.sources && msg.sources.length > 0 && (
-                                <Tooltip title="View sources" placement="bottom">
-                                  <button onClick={() => handleOpenSourcesDrawer(msg.sources)} className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80">
+                            <Tooltip title="Not helpful" placement="bottom">
+                              <button
+                                onClick={() => handleThumbsDown(msg.id)}
+                                className={`p-2 cursor-pointer transition-colors hover:opacity-80 ${msg.feedback === "thumbs_down" ? "text-rose-500 font-bold" : "text-[var(--app-text)] font-bold"}`}
+                              >
+                                <FiThumbsDown size={16} strokeWidth={msg.feedback === "thumbs_down" ? 2.5 : 2} fill="none" />
+                              </button>
+                            </Tooltip>
+                            <Tooltip title="Regenerate" placement="bottom">
+                              <button
+                                onClick={() => handleRegenerate(i)}
+                                className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80"
+                              >
+                                <FiRotateCw size={16} strokeWidth={2} />
+                              </button>
+                            </Tooltip>
+                            {showSources && msg.sources && msg.sources.length > 0 && (
+                              <div className="ml-auto flex items-center">
+                                {msg.sources.length === 1 ? (
+                                  <button
+                                    onClick={() => handleOpenSource(msg.sources![0])}
+                                    className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80 hover:text-[#285d91] flex items-center gap-1 text-xs shrink-0"
+                                  >
                                     <LuBookOpen size={16} strokeWidth={2} />
+                                    <span>Source</span>
                                   </button>
-                                </Tooltip>
-                              )}
-                            </>
-                          )}
-                        </div>
+                                ) : (
+                                  <Dropdown
+                                    menu={{
+                                      items: msg.sources.map((src: any, idx: number) => ({
+                                        key: idx.toString(),
+                                        label: getFileName(src.source),
+                                        onClick: () => handleOpenSource(src),
+                                      })),
+                                    }}
+                                    placement="bottomLeft"
+                                    trigger={['click']}
+                                  >
+                                    <button className="text-[var(--app-text)] font-bold p-2 cursor-pointer transition-colors hover:opacity-80 hover:text-[#285d91] flex items-center gap-1 text-xs shrink-0">
+                                      <LuBookOpen size={16} strokeWidth={2} />
+                                      <span>Sources</span>
+                                    </button>
+                                  </Dropdown>
+                                )}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+
                       {hasImage && (
                         <div className="mb-3 overflow-hidden rounded-xl max-w-[280px] border border-white/10 shadow-sm">
                           <img src={msg.file.url} alt={msg.file.name} className="w-full h-auto object-cover max-h-52 dynamic-img-render" />
@@ -1410,13 +2334,13 @@ export default function ChatPlaygroundPage() {
                               <div className="flex gap-2 justify-end">
                                 <Button
                                   className="!bg-transparent rounded-full !border-none hover:!bg-white/10 px-4 h-9 font-medium transition-all"
-                                  style={{ WebkitTextFillColor: "rgba(255,255,255,0.8)", fontWeight: "normal" ,boxShadow: "none",borderRadius: "9999px"}}
+                                  style={{ WebkitTextFillColor: "rgba(255,255,255,0.8)", fontWeight: "normal", boxShadow: "none", borderRadius: "9999px" }}
                                   onClick={() => setEditingMessageIndex(null)}
                                 >
                                   Cancel
                                 </Button>
-                                <Button 
-                                  type="primary" 
+                                <Button
+                                  type="primary"
                                   className="!rounded-full !bg-[var(--neutral)] hover:opacity-90 !border-none px-5 h-9 font-semibold shadow-sm transition-all"
                                   style={{ WebkitTextFillColor: "black", fontWeight: "bold", boxShadow: "none", borderRadius: "9999px" }}
                                   onClick={() => handleSaveEdit(i)}
@@ -1427,7 +2351,9 @@ export default function ChatPlaygroundPage() {
                             </div>
                           ) : (
                             // Normal Display Mode
-                            <span className="whitespace-pre-wrap mr-2 leading-7">{msg.content}</span>
+                            <div className="mr-2 leading-7 flex flex-col gap-1.5">
+                              {renderFormattedContent(msg.content, isUser)}
+                            </div>
                           )}
 
                         </div>}
@@ -1447,8 +2373,8 @@ export default function ChatPlaygroundPage() {
                           )}
                         </div>
                       )}
-                    </div>
 
+                    </div>
 
                   </div>
 
@@ -1460,7 +2386,7 @@ export default function ChatPlaygroundPage() {
           {isTyping && (
             <div className="flex w-full justify-start animate-in fade-in duration-300">
               <div className="flex gap-3 max-w-[80%] items-start">
-                <GragLogoAvatar size={32} />
+                <GSearchLogoAvatar size={32} />
                 <div className="flex flex-col space-y-1">
                   <span className="text-[9px] font-bold text-[var(--app-text-soft)] italic px-1">Processing...</span>
                   <div className="p-4 bg-[var(--app-surface-muted)]/60 border border-[var(--app-border)]/40 text-[var(--app-text)] rounded-2xl rounded-tl-none shadow-sm">
@@ -1480,8 +2406,61 @@ export default function ChatPlaygroundPage() {
 
         {/* Floating Input Dock Footer */}
         <div className="px-4 md:px-12 pb-4 pt-2 bg-gradient-to-t from-[var(--app-surface)] via-[var(--app-surface)] to-transparent border-t-0 z-30 shrink-0">
-          <div className="bg-[var(--app-surface-muted)] border border-[var(--app-border)]/80 rounded-2xl p-3 shadow-lg transition-all focus-within:border-[#285d91]/50 focus-within:ring-4 focus-within:ring-[#285d91]/5 flex flex-col gap-2">
-            
+
+          {/* Mode switch and search above input card */}
+          <div className="flex justify-between items-center px-1 mb-2 w-full select-none gap-3">
+            {/* Search & Agent Switcher unified container */}
+            <div className="flex items-center gap-1 bg-[#eef6f8] dark:bg-[#131e31] p-1 rounded-full border border-[var(--app-border)]/40 shadow-sm">
+              {/* Slot 1: Search Pill or Search Input */}
+              {activeMode === 'search' ? (
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#0f172a] shadow-sm w-52 sm:w-64 transition-all duration-200">
+                  <LuSearch size={12} className="shrink-0 text-[#285d91] dark:text-[#34d399]" />
+                  <input
+                    ref={searchRef}
+                    type="text"
+                    placeholder="Search sessions..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full bg-transparent border-none outline-none text-[11px] font-black tracking-tight text-[var(--app-text)] placeholder-[var(--app-text-soft)]/50"
+                  />
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    setActiveMode('search');
+                    setTimeout(() => searchRef.current?.focus(), 50);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-black tracking-tight transition-all duration-200 cursor-pointer border-none bg-transparent outline-none text-[var(--app-text-soft)]/70 hover:text-[var(--app-text)] font-extrabold"
+                >
+                  <LuSearch size={12} className="shrink-0" />
+                  <span>Search</span>
+                </button>
+              )}
+
+              {/* Slot 2: Agent Pill (stays as pill button, selector is rendered below inside the input card) */}
+              <button
+                onClick={() => setActiveMode('agent')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-black tracking-tight transition-all duration-200 cursor-pointer border-none bg-transparent outline-none ${activeMode === 'agent'
+                    ? "bg-white dark:bg-[#0f172a] text-[#285d91] dark:text-[#34d399] shadow-sm font-black"
+                    : "bg-transparent text-[var(--app-text-soft)]/70 hover:text-[var(--app-text)] font-extrabold"
+                  }`}
+              >
+                <LuBot size={12} className="shrink-0" />
+                <span>Agent</span>
+              </button>
+            </div>
+
+            {/* Mode Shift Shortcut - hidden on mobile view */}
+            <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-[var(--app-text-soft)]/60 font-bold ml-auto">
+              <span>Mode shift:</span>
+              <kbd className="px-1.5 py-0.5 rounded bg-[var(--app-border)]/50 border border-[var(--app-border)] text-[9px] font-black">Ctrl</kbd>
+              <kbd className="px-1.5 py-0.5 rounded bg-[var(--app-border)]/50 border border-[var(--app-border)] text-[9px] font-black">K</kbd>
+            </div>
+          </div>
+
+          {/* Large Unified Input Card with dynamic purple borders */}
+          <div className="bg-white dark:bg-[#0b0f19] border-2 border-purple-500/30 dark:border-purple-500/25 rounded-3xl p-3 shadow-lg transition-all focus-within:border-purple-500/70 focus-within:ring-4 focus-within:ring-purple-500/5 flex flex-col gap-2">
+
             {/* Real-time Dynamic Upload Preview Attachment Frame */}
             {attachedFile && (
               <div className="px-3 pt-2 pb-1 animate-in fade-in duration-200">
@@ -1499,8 +2478,8 @@ export default function ChatPlaygroundPage() {
                     <Text className="text-xs font-bold truncate text-[var(--app-text)]">{attachedFile.name}</Text>
                     <Text className="text-[9px] font-bold text-[var(--app-text-soft)] uppercase tracking-wider">Ready to upload</Text>
                   </Flex>
-                  <button 
-                    onClick={() => setAttachedFile(null)} 
+                  <button
+                    onClick={() => setAttachedFile(null)}
                     className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center hover:bg-red-600 transition-colors shadow-sm cursor-pointer"
                   >
                     <FiX size={11} />
@@ -1509,52 +2488,86 @@ export default function ChatPlaygroundPage() {
               </div>
             )}
 
-            {/* Input Row (Single line layout) */}
-            <Flex align="center" gap={8} className="w-full">
-              {/* Media Upload Node Trigger */}
-              <Upload
-                beforeUpload={handleBeforeUpload}
-                showUploadList={false}
-                accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
+            {/* Input Text Area */}
+            <div className="w-full">
+              <Input.TextArea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask anything"
                 disabled={!agent || wsStatus !== "open"}
-              >
-                <Tooltip title="Share media logs" placement="topLeft">
-                  <Button
-                    type="text"
-                    disabled={!agent || wsStatus !== "open"}
-                    icon={<LuPaperclip className="text-base text-[var(--app-text-soft)]" />}
-                    className="hover:bg-[var(--app-hover)] !rounded-xl w-9 h-9 flex items-center justify-center transition-colors"
-                  />
-                </Tooltip>
-              </Upload>
+                variant="borderless"
+                autoSize={{ minRows: 2, maxRows: 6 }}
+                className="w-full !p-1 !bg-transparent !font-semibold !text-xs md:!text-sm !text-[var(--app-text)] !placeholder:text-[var(--app-text-soft)]/50 focus:outline-none resize-none align-middle"
+              />
+            </div>
 
-              {/* Input Text Area */}
-              <div className="flex-1 min-w-0">
-                <Input.TextArea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Type a message..."
+            {/* Input Row Actions Bottom Bar */}
+            <Flex align="center" justify="space-between" className="w-full pt-1.5 border-t border-[var(--app-border)]/10">
+              {/* Left actions */}
+              <Flex align="center" gap={8} className="min-w-0">
+                <Upload
+                  beforeUpload={handleBeforeUpload}
+                  showUploadList={false}
+                  accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
                   disabled={!agent || wsStatus !== "open"}
-                  variant="borderless"
-                  autoSize={{ minRows: 1, maxRows: 6 }}
-                  className="w-full !p-1 !bg-transparent !font-semibold !text-xs md:!text-sm !text-[var(--app-text)] !placeholder:text-[var(--app-text-soft)]/50 focus:outline-none resize-none align-middle"
-                />
-              </div>
-
-              {/* Send Button */}
-              <Tooltip title="Press Enter to send" placement="topRight">
-                <button
-                  onClick={handleSend}
-                  disabled={!agent || (!input.trim() && !attachedFile) || wsStatus !== "open"}
-                  className="w-8 h-8 bg-[#285d91] text-white rounded-lg flex items-center justify-center hover:bg-[#1e4873] active:scale-95 disabled:opacity-20 disabled:hover:scale-100 disabled:bg-[var(--app-text-soft)]/20 transition-all shrink-0 shadow-md shadow-blue-900/10 cursor-pointer"
                 >
-                  <FiSend size={13} />
-                </button>
-              </Tooltip>
+                  <Tooltip title="Share files" placement="topLeft">
+                    <Button
+                      type="text"
+                      disabled={!agent || wsStatus !== "open"}
+                      icon={<LuPaperclip className="text-base text-[var(--app-text-soft)]" />}
+                      className="hover:bg-[var(--app-hover)] !rounded-xl w-8 h-8 flex items-center justify-center transition-colors border-none bg-transparent cursor-pointer"
+                    />
+                  </Tooltip>
+                </Upload>
+
+                {/* Conditionally show Styled Robot Capsule Dropdown trigger for Selecting Custom Agent inside input card when mode is agent */}
+                {activeMode === 'agent' && (
+                  <Dropdown
+                    menu={{
+                      items: botsCache?.map((bot) => ({
+                        key: bot.id,
+                        label: <span className="font-semibold text-xs">{bot.name}</span>
+                      })),
+                      onClick: (e) => {
+                        const selected = botsCache?.find(b => b.id === e.key);
+                        if (selected) {
+                          handleAgentChange(selected.id, selected.name);
+                        }
+                      }
+                    }}
+                    trigger={["click"]}
+                  >
+                    <button className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#ffffff] hover:bg-gray-100 dark:bg-[#12352f]/30 dark:hover:bg-[#12352f]/50 border border-[#285d91]/30 dark:border-[#34d399]/40 rounded-full text-xs font-black text-[#285d91] dark:text-[#34d399] cursor-pointer select-none transition-all outline-none focus:outline-none ml-1 animate-in fade-in duration-200 shadow-sm">
+                      <div className="w-5 h-5 rounded-full bg-[#e6f0fa] dark:bg-[#12352f] flex items-center justify-center text-[#285d91] dark:text-[#34d399] shrink-0">
+                        <LuBot size={11} className="text-[#285d91] dark:text-[#34d399]" />
+                      </div>
+                      <span className="truncate max-w-[120px] text-[#285d91] dark:text-[#34d399] font-black">
+                        {agent ? agent.name : "Select Agent"}
+                      </span>
+                      <span className="text-[9px] opacity-100 ml-0.5 text-[#285d91] dark:text-[#34d399] font-black">▼</span>
+                    </button>
+                  </Dropdown>
+                )}
+              </Flex>
+
+              {/* Right actions */}
+              <Flex align="center" gap={12} className="shrink-0">
+                {/* Circular Send Arrow button */}
+                <Tooltip title="Press Enter to send" placement="topRight">
+                  <button
+                    onClick={handleSend}
+                    disabled={!agent || (!input.trim() && !attachedFile) || wsStatus !== "open"}
+                    className="w-8 h-8 rounded-full flex items-center justify-center transition-all shrink-0 cursor-pointer border-none outline-none bg-gray-200 dark:bg-gray-800 text-[var(--app-text-soft)] hover:bg-[#285d91] hover:text-white disabled:opacity-40 disabled:hover:bg-gray-200 disabled:hover:text-[var(--app-text-soft)]"
+                  >
+                    <LuArrowRight size={16} strokeWidth={2.5} />
+                  </button>
+                </Tooltip>
+              </Flex>
             </Flex>
           </div>
-          
+
           {/* Powered by Leena AI */}
           {/* <div className="text-center mt-2.5">
             <Text className="text-[10px] text-[var(--app-text-soft)]/75 font-semibold select-none">
@@ -1599,8 +2612,8 @@ export default function ChatPlaygroundPage() {
                 key={(src.id || src.chunk_id) || index}
                 onClick={() => handleSelectSourceForPreview(src)}
                 className={`p-3 rounded-xl cursor-pointer border transition-all ${isSelected
-                    ? "bg-[#285d91] text-white border-transparent shadow-sm"
-                    : "bg-[var(--app-surface-muted)] hover:bg-[var(--app-hover)] text-[var(--app-text)] border-[var(--app-border)]/40"
+                  ? "bg-[#285d91] text-white border-transparent shadow-sm"
+                  : "bg-[var(--app-surface-muted)] hover:bg-[var(--app-hover)] text-[var(--app-text)] border-[var(--app-border)]/40"
                   }`}
               >
                 <div className="flex align-center gap-2 mb-1 min-w-0">
@@ -1657,8 +2670,8 @@ export default function ChatPlaygroundPage() {
                       <button
                         onClick={() => setSourcesDrawerPreviewTab("original")}
                         className={`px-4 py-1.5 rounded-lg text-xs font-extrabold transition-all cursor-pointer ${sourcesDrawerPreviewTab === "original"
-                            ? "bg-[#285d91] text-white shadow-sm"
-                            : "text-[var(--app-text-soft)] hover:text-[var(--app-text)]"
+                          ? "bg-[#285d91] text-white shadow-sm"
+                          : "text-[var(--app-text-soft)] hover:text-[var(--app-text)]"
                           }`}
                       >
                         Original Document
@@ -1721,10 +2734,10 @@ export default function ChatPlaygroundPage() {
                     )}
 
                     {(sourcesDrawerPreviewType === "excel" || sourcesDrawerPreviewType === "csv") && excelSheetNames.length > 0 && (
-                      <div className="w-full h-full flex flex-col overflow-hidden bg-white">
+                      <div className="w-full h-full flex flex-col overflow-hidden bg-[var(--app-surface)]">
                         {/* Excel Multi-sheet Switcher */}
                         {sourcesDrawerPreviewType === "excel" && excelSheetNames.length > 1 && (
-                          <div className="flex gap-2 p-2.5 bg-neutral-50 border-b border-neutral-200 overflow-x-auto shrink-0 scrollbar-thin">
+                          <div className="flex gap-2 p-2.5 bg-[var(--app-surface-muted)] border-b border-[var(--app-border)]/40 overflow-x-auto shrink-0 scrollbar-thin">
                             {excelSheetNames.map(sheetName => {
                               const isActive = activeExcelSheet === sheetName;
                               return (
@@ -1732,8 +2745,8 @@ export default function ChatPlaygroundPage() {
                                   key={sheetName}
                                   onClick={() => setActiveExcelSheet(sheetName)}
                                   className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${isActive
-                                      ? "bg-[#285d91] text-white shadow-sm"
-                                      : "bg-white hover:bg-neutral-100 text-neutral-600 border border-neutral-200"
+                                    ? "bg-[#285d91] text-white shadow-sm"
+                                    : "bg-[var(--app-surface)] hover:bg-[var(--app-surface-muted)] text-[var(--app-text-soft)] border border-[var(--app-border)]/40"
                                     }`}
                                 >
                                   {sheetName}
@@ -1744,24 +2757,24 @@ export default function ChatPlaygroundPage() {
                         )}
 
                         {/* Spreadsheet Grid */}
-                        <div className="flex-1 overflow-auto p-4 custom-scrollbar bg-white">
+                        <div className="flex-1 overflow-auto p-4 custom-scrollbar bg-[var(--app-surface)]">
                           {excelSheets[activeExcelSheet] && excelSheets[activeExcelSheet].length > 0 ? (
-                            <div className="border border-neutral-200 rounded-xl overflow-hidden shadow-sm">
-                              <table className="min-w-full divide-y divide-neutral-200 text-left text-xs bg-white">
-                                <thead className="bg-neutral-50 font-bold text-neutral-700 uppercase tracking-wider">
+                            <div className="border border-[var(--app-border)]/40 rounded-xl overflow-hidden shadow-sm">
+                              <table className="min-w-full divide-y divide-[var(--app-border)]/40 text-left text-xs bg-[var(--app-surface)]">
+                                <thead className="bg-[var(--app-surface-muted)] font-bold text-[var(--app-text)] uppercase tracking-wider">
                                   <tr>
                                     {excelSheets[activeExcelSheet][0].map((cell, idx) => (
-                                      <th key={idx} className="px-4 py-3 border-b border-r border-neutral-200 last:border-r-0 whitespace-nowrap bg-neutral-100 text-neutral-800 font-extrabold text-[10px] tracking-wider">
+                                      <th key={idx} className="px-4 py-3 border-b border-r border-[var(--app-border)]/40 last:border-r-0 whitespace-nowrap bg-[var(--app-surface-muted)] text-[var(--app-text)] font-extrabold text-[10px] tracking-wider">
                                         {cell || `Column ${idx + 1}`}
                                       </th>
                                     ))}
                                   </tr>
                                 </thead>
-                                <tbody className="bg-white divide-y divide-neutral-200 text-neutral-600 font-medium">
+                                <tbody className="bg-[var(--app-surface)] divide-y divide-[var(--app-border)]/40 text-[var(--app-text-soft)] font-medium">
                                   {excelSheets[activeExcelSheet].slice(1).map((row, rowIdx) => (
-                                    <tr key={rowIdx} className="hover:bg-neutral-50/80 transition-colors">
+                                    <tr key={rowIdx} className="hover:bg-[var(--app-surface-muted)]/50 transition-colors">
                                       {excelSheets[activeExcelSheet][0].map((_, colIdx) => (
-                                        <td key={colIdx} className="px-4 py-3 border-r border-neutral-200 last:border-r-0 max-w-xs truncate whitespace-nowrap text-neutral-600">
+                                        <td key={colIdx} className="px-4 py-3 border-r border-[var(--app-border)]/40 last:border-r-0 max-w-xs truncate whitespace-nowrap text-[var(--app-text-soft)]">
                                           {row[colIdx] || ""}
                                         </td>
                                       ))}
@@ -1771,7 +2784,7 @@ export default function ChatPlaygroundPage() {
                               </table>
                             </div>
                           ) : (
-                            <Flex vertical align="center" justify="center" className="py-20 text-neutral-400 h-full">
+                            <Flex vertical align="center" justify="center" className="py-20 text-[var(--app-text-soft)] h-full">
                               <LuFileText size={32} className="mb-2 opacity-55" />
                               <span className="text-xs">No data in this sheet</span>
                             </Flex>
@@ -1819,6 +2832,58 @@ export default function ChatPlaygroundPage() {
         </div>
       </Drawer>
 
+      {/* Thumbs Down Feedback Modal */}
+      <Modal
+        title={<span className="text-[var(--app-text)] font-extrabold">Provide Feedback</span>}
+        open={feedbackModalOpen}
+        onCancel={() => {
+          setFeedbackModalOpen(false);
+          setFeedbackMessageId(null);
+        }}
+        footer={[
+          <Button key="cancel" onClick={() => setFeedbackModalOpen(false)} className="hover:!border-[var(--app-border)] hover:!text-[var(--app-text)]">
+            Cancel
+          </Button>,
+          <Button key="submit" type="primary" onClick={submitThumbsDownFeedback} className="bg-[#285d91] hover:bg-[#285d91]/80 border-none font-bold">
+            Submit
+          </Button>,
+        ]}
+        className="feedback-modal"
+      >
+        <div className="py-4 flex flex-col gap-4">
+          <Text className="text-xs text-[var(--app-text-soft)] font-semibold">
+            Why did you find this answer not helpful?
+          </Text>
+          <Radio.Group
+            onChange={(e) => setSelectedReason(e.target.value)}
+            value={selectedReason}
+            className="w-full"
+          >
+            <div className="flex flex-col gap-2.5">
+              {[
+                "Incorrect Answer",
+                "Missing Information",
+                "Irrelevant Answer",
+                "Hallucination",
+                "Other"
+              ].map((reason) => (
+                <Radio key={reason} value={reason} className="text-[var(--app-text)] font-medium block !m-0">
+                  {reason}
+                </Radio>
+              ))}
+            </div>
+          </Radio.Group>
+          {selectedReason === "Other" && (
+            <Input.TextArea
+              placeholder="Please specify the reason..."
+              value={customReason}
+              onChange={(e) => setCustomReason(e.target.value)}
+              rows={3}
+              className="mt-2 text-[var(--app-text)] border-[var(--app-border)]/40 focus:border-[#285d91]/60"
+            />
+          )}
+        </div>
+      </Modal>
 
       <style jsx global>{`
         .custom-scrollbar::-webkit-scrollbar {
