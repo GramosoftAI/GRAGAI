@@ -82,7 +82,7 @@ _MAX_CACHE_SIZE = 1000  # Evict oldest entries if exceeded
 
 _CACHE_INSERTION_ORDER = []  # Track insertion order for LRU eviction
 
-_RAG_TIMEOUT_SECONDS = 90.0  # Professional timeout for remote AI calls + graph compute
+_RAG_TIMEOUT_SECONDS = 180.0  # Professional timeout for remote AI calls + graph compute
 
 
 
@@ -459,7 +459,7 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
 
         # 3.5 Check for empty context or bypass intents
         is_extractive = context.search_type == "EXTRACTIVE" if context else False
-        is_table_analytics = context.search_type == "TABLE_ANALYTICS" if context else False
+        is_table_analytics = context.search_type in ["TABLE_ANALYTICS", "DATA_ANALYSIS"] if context else False
 
         if is_extractive or is_table_analytics:
             logger.info(f"Bypassing LLM stream for {context.search_type} mode.")
@@ -1059,7 +1059,7 @@ CRITICAL INSTRUCTION: If the user's query is a general greeting or conversationa
             }
         
         is_extractive = context.search_type == "EXTRACTIVE" if context else False
-        is_table_analytics = context.search_type == "TABLE_ANALYTICS" if context else False
+        is_table_analytics = context.search_type in ["TABLE_ANALYTICS", "DATA_ANALYSIS"] if context else False
 
         if is_extractive or is_table_analytics:
             logger.info(f"Bypassing LLM generation for {context.search_type} mode.")

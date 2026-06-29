@@ -322,6 +322,9 @@ class RAGPipeline:
 
         self.router = QueryRouter()
 
+        from app.core.llm.deepinfra_llm import DeepInfraLLMClient
+        self.llm_client = DeepInfraLLMClient()
+
 
 
 
@@ -495,7 +498,7 @@ class RAGPipeline:
 
 
         # STAGE 0.5: EARLY EXIT FOR TABLE ANALYTICS
-        if search_type == SearchType.TABLE_ANALYTICS:
+        if search_type in [SearchType.TABLE_ANALYTICS, SearchType.DATA_ANALYSIS]:
             logger.info("   -> Intercepting query for SQL Table Analytics engine!")
             try:
                 table_results = await self._execute_table_analytics(query, kb_ids)
@@ -1604,17 +1607,28 @@ class RAGPipeline:
             
         t_start = time.perf_counter()
         
-        # 1. Fetch schema
-        schema_query = "SELECT dataset_schema FROM knowledge_bases WHERE id = ANY(CAST(:kb_ids AS uuid[])) AND dataset_schema IS NOT NULL LIMIT 1;"
-        async with self.db_session_maker() as db:
-            result = await db.execute(text(schema_query), {"kb_ids": kb_ids})
-            dataset_schema = result.scalar()
+        # 1. Fetch schema and parsed_path
+        kb_query = "SELECT dataset_schema, parsed_path, source FROM knowledge_bases WHERE id = ANY(CAST(:kb_ids AS uuid[])) LIMIT 1;"
+        result = await self.db.execute(text(kb_query), {"kb_ids": kb_ids})
+        row = result.fetchone()
+        
+        if row:
+            dataset_schema, parsed_path, source = row
+        else:
+            return None
             
+        # 1.5. HYBRID PANDAS ENGINE ROUTING FOR CSV FILES
+        if parsed_path and str(parsed_path).lower().endswith('.csv'):
+            logger.info(" CSV File detected! Routing TABLE_ANALYTICS to PandasQueryEngine.")
+            from .pandas_engine import PandasQueryEngine
+            engine = PandasQueryEngine(self.llm_client)
+            return await engine.execute_query(query, str(parsed_path))
+
+        # (If not CSV, fallback to standard SQL generation)
         if not dataset_schema:
             sample_query = "SELECT row_data FROM document_table_rows WHERE kb_id = ANY(CAST(:kb_ids AS uuid[])) LIMIT 1;"
-            async with self.db_session_maker() as db:
-                result = await db.execute(text(sample_query), {"kb_ids": kb_ids})
-                sample_row = result.scalar()
+            result = await self.db.execute(text(sample_query), {"kb_ids": kb_ids})
+            sample_row = result.scalar()
             if sample_row:
                 dataset_schema = {k: "unknown" for k in sample_row.keys()}
             else:
@@ -1785,64 +1799,63 @@ Return ONLY JSON, no markdown formatting.
             
         # 4. Execute the generated SQL
         t_exec_start = time.perf_counter()
-        async with self.db_session_maker() as db:
-            try:
-                result = await db.execute(text(query_str), params)
-                rows = result.all()
-                t_exec = time.perf_counter() - t_exec_start
-                t_total = time.perf_counter() - t_start
-                
-                if debug_mode:
-                    trace_log.append(f"Execution Time:\n{int(t_total*1000)} ms (AST: {int(t_ast_gen*1000)}ms, Val: {int(t_ast_val*1000)}ms, SQL Gen: {int(t_sql_gen*1000)}ms, DB Exec: {int(t_exec*1000)}ms)\n")
-                    trace_log.append(f"Rows Returned:\n{len(rows)}\n")
-                    logger.info("\n--- DEBUG_ANALYTICS TRACE ---\n" + "\n".join(trace_log) + "\n------------------------------")
-                
-                if not rows:
-                    return "No matching records found in the structured tables."
-                    
-                from decimal import Decimal
-                formatted_rows = []
-                for r in rows:
-                    if hasattr(r, '_mapping'):
-                        row_dict = dict(r._mapping)
-                    elif hasattr(r, 'keys'):
-                        row_dict = dict(r)
-                    else:
-                        row_dict = {"value": r[0]}
-                        
-                    # Convert Decimals to float
-                    for k, v in row_dict.items():
-                        if isinstance(v, Decimal):
-                            row_dict[k] = float(v)
-                            
-                    formatted_rows.append(row_dict)
-                        
-                formatted = json.dumps(formatted_rows, indent=2)
-                
-                # 5. Explainability Layer
-                explanation = "\n\n---\nComputed using:\n"
-                if operation in ["AVG", "MAX", "MIN", "SUM"]:
-                    explanation += f"- Operation: {operation} on '{target_field}'\n"
-                elif operation == "GROUP":
-                    explanation += f"- Operation: GROUP BY '{ast.get('group_by')}'\n"
-                else:
-                    explanation += f"- Operation: {operation}\n"
-                    
-                if explain_filters:
-                    explanation += f"- Filters: {', '.join(explain_filters)}\n"
-                else:
-                    explanation += f"- Filters: None\n"
-                    
-                explanation += f"- Records returned: {len(formatted_rows)}\n"
-                
-                if debug_mode:
-                    explanation += "\n\n---\n**Analytics Debug Trace:**\n```text\n" + "\n".join(trace_log) + "\n```"
-                
-                return formatted + explanation
-                
-            except Exception as e:
-                logger.error(f" SQL Execution Failed: {e}")
+        try:
+            result = await self.db.execute(text(query_str), params)
+            rows = result.all()
+            t_exec = time.perf_counter() - t_exec_start
+            t_total = time.perf_counter() - t_start
+            
+            if debug_mode:
+                trace_log.append(f"Execution Time:\n{int(t_total*1000)} ms (AST: {int(t_ast_gen*1000)}ms, Val: {int(t_ast_val*1000)}ms, SQL Gen: {int(t_sql_gen*1000)}ms, DB Exec: {int(t_exec*1000)}ms)\n")
+                trace_log.append(f"Rows Returned:\n{len(rows)}\n")
+            
+            if not rows:
+                logger.warning(f"SQL execution returned no records: {query_str}")
                 return None
+
+            from decimal import Decimal
+            formatted_rows = []
+            for r in rows:
+                if hasattr(r, '_mapping'):
+                    row_dict = dict(r._mapping)
+                elif hasattr(r, 'keys'):
+                    row_dict = dict(r)
+                else:
+                    row_dict = {"value": r[0]}
+                    
+                # Convert Decimals to float
+                for k, v in row_dict.items():
+                    if isinstance(v, Decimal):
+                        row_dict[k] = float(v)
+                        
+                formatted_rows.append(row_dict)
+                    
+            formatted = json.dumps(formatted_rows, indent=2)
+            
+            # 5. Explainability Layer
+            explanation = "\n\n---\nComputed using:\n"
+            if operation in ["AVG", "MAX", "MIN", "SUM"]:
+                explanation += f"- Operation: {operation} on '{target_field}'\n"
+            elif operation == "GROUP":
+                explanation += f"- Operation: GROUP BY '{ast.get('group_by')}'\n"
+            else:
+                explanation += f"- Operation: {operation}\n"
+                
+            if explain_filters:
+                explanation += f"- Filters: {', '.join(explain_filters)}\n"
+            else:
+                explanation += f"- Filters: None\n"
+                
+            explanation += f"- Records returned: {len(formatted_rows)}\n"
+            
+            if debug_mode:
+                explanation += "\n\n---\n**Analytics Debug Trace:**\n```text\n" + "\n".join(trace_log) + "\n```"
+            
+            return formatted + explanation
+            
+        except Exception as e:
+            logger.error(f" SQL Execution Failed: {e}")
+            return None
 
     async def _expand_via_graph(
 

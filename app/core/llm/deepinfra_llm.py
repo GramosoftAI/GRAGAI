@@ -228,7 +228,7 @@ class DeepInfraLLMClient:
 
         self.max_retries = 3  # Number of retry attempts
 
-        self.max_tokens = 1024  # Max output tokens (GUARD: prevent very long responses)
+        self.max_tokens = 4000  # Max output tokens (GUARD: prevent very long responses)
 
         self.max_answer_length = 2000  # Max chars in answer (latency + cost guard)
 

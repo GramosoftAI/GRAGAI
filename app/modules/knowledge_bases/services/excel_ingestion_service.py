@@ -22,7 +22,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.modules.knowledge_bases.models import DocumentChunk
+from app.modules.knowledge_bases.models import DocumentChunk, DocumentTableRow
 from app.modules.ontology.service import OntologyService
 from app.core.neo4j_repository import Neo4jRepository
 from app.core.neo4j_retry import retry_neo4j_operation
@@ -371,6 +371,7 @@ class ExcelIngestionService:
                 embedding=embeddings[idx]
             )
             self.db.add(pg_chunk)
+
 
         # 4. Stage Chunk nodes in Neo4j
         chunk_nodes_data = [{

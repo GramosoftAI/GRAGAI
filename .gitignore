@@ -87,6 +87,11 @@ docs/analysis/
 *.pptx
 *.xlsx
 *.pdf
+*.csv
+*.docx
+*.sql
+~$*.docx
+RAG_Test_Analytics_Report.md
 
 README_old.md
 README (1) (1).md
@@ -135,6 +140,8 @@ test_pipeline.py
 test_query.py
 test_triplet_diag.py
 test_ws_embed.py
+test_db.py
+test_llm.py
 
 test_passlib.txt
 deploy_test.txt
