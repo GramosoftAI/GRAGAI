@@ -124,6 +124,7 @@ class Neo4jRepository:
         async with driver.session() as session:
             try:
                 result = await session.run(query, parameters)
+                await result.consume()
                 return {"success": True}
             except Exception as e:
                 logger.error(f"Neo4j write failed for tenant {self.tenant_id}: {e}")

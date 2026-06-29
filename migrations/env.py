@@ -3,6 +3,9 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
@@ -10,6 +13,15 @@ from alembic import context
 # this is the Alembic Config object, which provides the values of the
 # [alembic] section of the .ini file as Python attributes.
 config = context.config
+
+postgres_user = os.getenv("POSTGRES_USER", "graphmind")
+postgres_password = os.getenv("POSTGRES_PASSWORD", "graphmind_password")
+postgres_host = os.getenv("POSTGRES_HOST", "localhost")
+postgres_port = os.getenv("POSTGRES_PORT", "5433")
+postgres_db = os.getenv("POSTGRES_DB", "graphmind")
+db_url = f"postgresql://{postgres_user}:{postgres_password}@{postgres_host}:{postgres_port}/{postgres_db}"
+
+config.set_main_option("sqlalchemy.url", db_url)
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:

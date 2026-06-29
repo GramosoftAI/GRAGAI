@@ -11,7 +11,7 @@ PATTERN: Matches existing schema conventions from agents/schemas.py and rag/sche
 
 from uuid import UUID
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 
 
@@ -101,6 +101,10 @@ class MessageResponse(BaseModel):
         None, description="RAG metadata for assistant messages"
     )
     created_at: Optional[str] = Field(None, description="ISO timestamp")
+    feedback_type: Optional[str] = Field(None, description="thumbs_up / thumbs_down")
+    feedback_reason: Optional[str] = Field(None, description="Optional feedback reason")
+    feedback_at: Optional[str] = Field(None, description="Feedback timestamp")
+    feedback_score: Optional[int] = Field(None, description="Optional feedback score or rating")
 
 
 class SessionResponse(BaseModel):
@@ -144,3 +148,33 @@ class SendMessageResponse(BaseModel):
     conversation_turns: int = Field(
         0, description="Number of user-assistant exchanges in this session"
     )
+
+
+class ChatMessageFeedbackRequest(BaseModel):
+    """Request schema for message feedback."""
+    message_id: UUID = Field(..., description="Message UUID")
+    feedback_type: str = Field(..., description="thumbs_up / thumbs_down")
+    feedback_reason: Optional[str] = Field(None, max_length=255, description="Optional feedback reason")
+    feedback_score: Optional[int] = Field(None, description="Optional feedback score or rating")
+
+    @field_validator("feedback_type")
+    @classmethod
+    def validate_feedback_type(cls, v: str) -> str:
+        if v not in ["thumbs_up", "thumbs_down"]:
+            raise ValueError("feedback_type must be either 'thumbs_up' or 'thumbs_down'")
+        return v
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "message_id": "9a4f9a5d-1234-5678-9012-abcdef123456",
+                "feedback_type": "thumbs_down",
+                "feedback_reason": "Incorrect Answer"
+            }
+        }
+
+
+class ChatMessageFeedbackResponse(BaseModel):
+    """Response schema for message feedback."""
+    success: bool = Field(True, description="Indicates if the feedback was saved successfully")
+    message: str = Field("Feedback saved successfully", description="Status message")

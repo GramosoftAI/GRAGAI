@@ -588,6 +588,24 @@ class KnowledgeBaseService:
 
 
             # 2. CHUNK THE TEXT
+            source_type = "pdf"
+            path_to_check = s3_path or source or ""
+            if path_to_check:
+                path_lower = path_to_check.lower()
+                # Clean up query params if present (e.g., in presigned S3 URLs)
+                path_clean = path_lower.split("?")[0]
+                if path_clean.endswith(".pdf"):
+                    source_type = "pdf"
+                elif path_clean.endswith(".docx") or path_clean.endswith(".doc"):
+                    source_type = "docx"
+                elif path_clean.endswith(".txt"):
+                    source_type = "txt"
+                elif path_clean.endswith(".xlsx") or path_clean.endswith(".xls"):
+                    source_type = "excel"
+                elif path_clean.endswith(".csv"):
+                    source_type = "csv"
+                elif path_lower.startswith(("http://", "https://", "http:", "https:")):
+                    source_type = "url"
 
             chunk_metadata_list = []
             if structured_records:
@@ -596,14 +614,15 @@ class KnowledgeBaseService:
                 chunks = [sc.text for sc in structured_chunks]
                 chunk_metadata_list = [sc.metadata for sc in structured_chunks]
             else:
-                chunks = TextChunker.split_into_chunks(document_text)
-                chunk_metadata_list = [{} for _ in chunks]
+                from app.core.adaptive_chunker import AdaptiveChunker
+                adaptive_chunks = await AdaptiveChunker.chunk(content=document_text, source_type=source_type)
+                chunks = [c["chunk_text"] for c in adaptive_chunks]
+                chunk_metadata_list = [c["metadata"] for c in adaptive_chunks]
 
             if not chunks:
-
                 return format_error("Document produced no chunks", meta={"status_code": 400})
 
-            logger.info(f" Chunked document into {len(chunks)} chunks")
+            logger.info(f" Chunked document into {len(chunks)} chunks using Adaptive/Structured Chunking ({source_type})")
 
 
 
@@ -815,9 +834,11 @@ class KnowledgeBaseService:
 
                 "embedding": embeddings[i], "created_at": datetime.utcnow().isoformat(),
 
-                "source": source,
-                
-                "metadata": json.dumps(chunk_metadata_list[i]) if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else "{}"
+                "metadata": json.dumps(chunk_metadata_list[i]) if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else "{}",
+                "chunk_type": chunk_metadata_list[i].get("chunk_type", "generic") if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else "generic",
+                "section": chunk_metadata_list[i].get("section") if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else None,
+                "sheet": chunk_metadata_list[i].get("sheet") if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else None,
+                "source_type": chunk_metadata_list[i].get("source_type", source_type) if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else source_type
 
             } for i in range(len(chunks))]
 
@@ -863,7 +884,9 @@ class KnowledgeBaseService:
 
                 embedding: data.embedding, created_at: data.created_at,
 
-                source: data.source, metadata: data.metadata
+                source: data.source, metadata: data.metadata,
+                chunk_type: data.chunk_type, section: data.section,
+                sheet: data.sheet, source_type: data.source_type
 
             })
 
@@ -1284,6 +1307,37 @@ class KnowledgeBaseService:
             res["status_code"] = 404
             return res
 
+        # ----------------------------------------------------
+        # S3 FILE CLEANUP (Delete if not shared with other active KBs)
+        # ----------------------------------------------------
+        try:
+            from app.core.s3 import S3StorageService
+            s3_service = S3StorageService()
+            
+            # Always delete the unique parsed HTML/text content from S3
+            if kb.parsed_path:
+                await s3_service.delete_file_by_url(kb.parsed_path)
+                
+            # Delete original file from S3 only if no other active KB is using it
+            if kb.s3_path:
+                from sqlalchemy import func
+                stmt = select(func.count()).select_from(KnowledgeBase).where(
+                    KnowledgeBase.s3_path == kb.s3_path,
+                    KnowledgeBase.id != kb.id,
+                    KnowledgeBase.is_active == True
+                )
+                count_res = await self.db.execute(stmt)
+                other_uses = count_res.scalar() or 0
+                if other_uses == 0:
+                    await s3_service.delete_file_by_url(kb.s3_path)
+                else:
+                    logger.info(f"S3 file {kb.s3_path} is shared with {other_uses} other active KBs. Skipping S3 deletion.")
+        except Exception as s3_err:
+            logger.error(f"Failed to clean up S3 files during KB deletion: {s3_err}")
+
+        # ----------------------------------------------------
+        # NEO4J GRAPH CLEANUP
+        # ----------------------------------------------------
         await retry_neo4j_operation(
             lambda: self.neo4j_repo.execute_write(
                 "MATCH (kb:KnowledgeBase {id: $id, tenant_id: $tenant_id}) OPTIONAL MATCH (kb)-[:HAS_CHUNK]->(c:Chunk) DETACH DELETE kb, c",

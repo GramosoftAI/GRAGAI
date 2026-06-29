@@ -80,10 +80,37 @@ def fix_busted_json(json_str: str) -> str:
     s = re.sub(r',\s*}', '}', s)
     s = re.sub(r',\s*]', ']', s)
     
-    # Auto-close brackets if cut off
-    if not s.endswith("}"):
-        s += "}"
-    
+    # Balance braces/brackets
+    stack = []
+    in_string = False
+    escape = False
+    for char in s:
+        if escape:
+            escape = False
+            continue
+        if char == '\\':
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if char in "{[":
+                stack.append(char)
+            elif char in "}]":
+                if not stack:
+                    continue
+                if (char == "}" and stack[-1] == "{") or (char == "]" and stack[-1] == "["):
+                    stack.pop()
+                    
+    # Close any remaining unclosed braces/brackets in reverse order
+    while stack:
+        open_char = stack.pop()
+        if open_char == "{":
+            s += "}"
+        elif open_char == "[":
+            s += "]"
+            
     return s
 
 MAX_PROMPT_TOKENS = 2000
@@ -257,9 +284,11 @@ class UnifiedExtractor:
                 else:
                     # Tier 4: Legacy Fallback
                     logger.warning(f"Unified extraction fallback triggered for chunk {chunk_id}. Rate tracking should monitor this.")
-                    return await self._legacy_fallback(chunk_id, chunk_text)
+                    return await self._legacy_fallback(chunk_id, chunk_text, start_time)
                     
-    async def _legacy_fallback(self, chunk_id: str, chunk_text: str) -> Dict[str, Any]:
+    async def _legacy_fallback(self, chunk_id: str, chunk_text: str, start_time: float = None) -> Dict[str, Any]:
+        if start_time is None:
+            start_time = time.time()
         """Tier 4: Calls the original 3 extractors individually to guarantee no graph data loss."""
         fallback_result = {
             "entities": [],
