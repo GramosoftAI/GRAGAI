@@ -63,6 +63,13 @@ docs/analysis/
 *.pptx
 *.xlsx
 *.pdf
+*.csv
+*.docx
+*.sql
+~$*.docx
+test_db.py
+test_llm.py
+RAG_Test_Analytics_Report.md
 
 # Deploy keys
 graphmind_deploy_key*

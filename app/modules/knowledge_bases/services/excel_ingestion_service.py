@@ -22,7 +22,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.modules.knowledge_bases.models import DocumentChunk
+from app.modules.knowledge_bases.models import DocumentChunk, DocumentTableRow
 from app.modules.ontology.service import OntologyService
 from app.core.neo4j_repository import Neo4jRepository
 from app.core.neo4j_retry import retry_neo4j_operation
@@ -421,6 +421,27 @@ class ExcelIngestionService:
                 embedding=embeddings[idx]
             )
             self.db.add(pg_chunk)
+            
+            # Clean data for JSONB insertion (handle NaN, NaT, None)
+            clean_row = {}
+            current_row = rows_list[idx]
+            for k, v in current_row.items():
+                if pd.isna(v):
+                    clean_row[str(k)] = None
+                else:
+                    clean_row[str(k)] = v
+                    
+            table_row = DocumentTableRow(
+                id=uuid.uuid4(),
+                tenant_id=uuid.UUID(self.tenant_id),
+                kb_id=uuid.UUID(kb_id),
+                page_number=1,
+                table_index=0,
+                row_index=idx,
+                row_data=clean_row
+            )
+            self.db.add(table_row)
+
         chunks_created = len(rows_list)
 
         # 4. Stage Chunk nodes in Neo4j
