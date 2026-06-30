@@ -241,88 +241,72 @@ class PDFExtractor:
     @staticmethod
     async def _extract_gdocz(pdf_bytes: bytes, filename: str) -> str:
         """
-        Extract PDF content using Gdocz OCR server.
+        Extract PDF content using Gdocz OCR server via gdocz_sdk.
         """
         def _sync_gdocz_convert(pdf_data: bytes, fname: str) -> str:
-            import requests
             import os
             import time
-            url = "https://gdocz.gramopro.ai/ocr/ocr/pdf"
-            headers = {"X-API-Key": settings.gdocz_api_key}
-            files = {"file": (fname, pdf_data, "application/pdf")}
+            import tempfile
+            import uuid
+            from gdocz_sdk import GdoczaiClient, ConvertOptions
             
-            # Smart determination of document type 
-            doc_type = "GENERAL"
-            fname_lower = fname.lower()
-            if "resume" in fname_lower or "cv" in fname_lower or "profile" in fname_lower:
-                doc_type = "resume"
-            elif "invoice" in fname_lower or "bill" in fname_lower:
-                doc_type = "INVOICE"
-            elif "quote" in fname_lower or "quotation" in fname_lower:
-                doc_type = "QUOTATION"
-            elif "price" in fname_lower:
-                doc_type = "PRICE_LIST"
- 
-            data = {
-                "model": "chandra",
-                "output_format": "html",
-                "document_type": doc_type
-            }
- 
-            max_retries = 3
-            last_err = None
-            res_json = None
-            
-            for attempt in range(max_retries):
-                try:
-                    logger.info(f"Calling Gdocz `/ocr/pdf` directly with document_type: {doc_type} (attempt {attempt + 1}/{max_retries})")
-                    response = requests.post(url, files=files, data=data, headers=headers, timeout=600)
-                    
-                    if response.status_code != 200:
-                        raise ValueError(f"Gdocz API returned status code {response.status_code}: {response.text}")
-                        
-                    res_json = response.json()
-                    if not res_json.get("success"):
-                        raise ValueError(f"Gdocz API error: {res_json.get('error')}")
-                        
-                    break
-                except Exception as e:
-                    last_err = e
-                    logger.warning(f"Gdocz attempt {attempt + 1} failed: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-            else:
-                raise last_err
+            # Write bytes to temporary file for the SDK
+            temp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}_{fname}")
+            with open(temp_path, "wb") as f:
+                f.write(pdf_data)
                 
-            raw_markdown = res_json.get("markdown", "")
-            
-            # Post-process to embed base64 images from 'images' or 'image_map'
-            images = res_json.get("images") or res_json.get("image_map") or {}
-            if images:
-                logger.info(f"Embedding {len(images)} base64 images into HTML/markdown content")
-                for img_name, img_base64 in images.items():
-                    if not img_base64:
-                        continue
-                    # Ensure base64 has data URI prefix
-                    if not img_base64.startswith("data:image/"):
-                        ext = os.path.splitext(img_name.lower())[1]
-                        mime = "image/jpeg"
-                        if ext == ".png":
-                            mime = "image/png"
-                        elif ext == ".gif":
-                            mime = "image/gif"
-                        elif ext == ".webp":
-                            mime = "image/webp"
-                        img_base64 = f"data:{mime};base64,{img_base64}"
+            try:
+                client = GdoczaiClient(api_key=settings.gdocz_api_key)
+                options = ConvertOptions(mode="chandra")
+                
+                max_retries = 3
+                last_err = None
+                result = None
+                
+                for attempt in range(max_retries):
+                    try:
+                        logger.info(f"Calling Gdocz SDK convert (attempt {attempt + 1}/{max_retries})")
+                        result = client.convert(temp_path, options=options)
+                        break
+                    except Exception as e:
+                        last_err = e
+                        logger.warning(f"Gdocz attempt {attempt + 1} failed: {e}")
+                        if attempt < max_retries - 1:
+                            time.sleep(2 ** attempt)
+                else:
+                    raise last_err
                     
-                    # Replace in HTML format: src="img_name", src='img_name', src=img_name
-                    raw_markdown = raw_markdown.replace(f'src="{img_name}"', f'src="{img_base64}"')
-                    raw_markdown = raw_markdown.replace(f"src='{img_name}'", f"src='{img_base64}'")
-                    raw_markdown = raw_markdown.replace(f'src={img_name}', f'src="{img_base64}"')
-                    # Also replace in markdown format: ![](img_name) -> ![](base64)
-                    raw_markdown = raw_markdown.replace(f"({img_name})", f"({img_base64})")
-            
-            return raw_markdown
+                # Handle either dict or object response from SDK
+                if isinstance(result, dict):
+                    raw_markdown = result.get("markdown", "")
+                    images = result.get("images") or result.get("image_map") or {}
+                else:
+                    raw_markdown = getattr(result, "markdown", "")
+                    images = getattr(result, "images", None) or getattr(result, "image_map", None) or {}
+                
+                # Post-process to embed base64 images if any exist
+                if images:
+                    logger.info(f"Embedding {len(images)} base64 images into HTML/markdown content")
+                    for img_name, img_base64 in images.items():
+                        if not img_base64:
+                            continue
+                        if not img_base64.startswith("data:image/"):
+                            ext = os.path.splitext(img_name.lower())[1]
+                            mime = "image/jpeg"
+                            if ext == ".png": mime = "image/png"
+                            elif ext == ".gif": mime = "image/gif"
+                            elif ext == ".webp": mime = "image/webp"
+                            img_base64 = f"data:{mime};base64,{img_base64}"
+                        
+                        raw_markdown = raw_markdown.replace(f'src="{img_name}"', f'src="{img_base64}"')
+                        raw_markdown = raw_markdown.replace(f"src='{img_name}'", f"src='{img_base64}'")
+                        raw_markdown = raw_markdown.replace(f'src={img_name}', f'src="{img_base64}"')
+                        raw_markdown = raw_markdown.replace(f"({img_name})", f"({img_base64})")
+                
+                return raw_markdown
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
 
         loop = asyncio.get_event_loop()
         raw_markdown = await loop.run_in_executor(
