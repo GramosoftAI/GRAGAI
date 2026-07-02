@@ -626,19 +626,20 @@ class DeepInfraLLMClient:
         
 
         try:
-
             client = await self.get_client()
-
-            async with client.stream("POST", self.base_url, headers=headers, json=payload) as response:
-
+            # PROD-GRADE STREAMING TIMEOUT: read=None is crucial for SSE/WebSockets
+            # so the connection doesn't drop while the LLM is "thinking".
+            stream_timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=30.0)
+            
+            start_time = time.time()
+            logger.info(f"LLM Stream Starting for {self.model} (read_timeout=None)")
+            
+            async with client.stream("POST", self.base_url, headers=headers, json=payload, timeout=stream_timeout) as response:
                 if response.status_code != 200:
-
+                    logger.error(f"LLM API Error: {response.status_code}")
                     yield f"Error: LLM API returned {response.status_code}"
-
                     return
-
                     
-
                 async for line in response.aiter_lines():
 
                         if not line or line.strip() == "":
@@ -710,19 +711,18 @@ class DeepInfraLLMClient:
                                     
                                 if clean_delta:
                                     yield clean_delta
-                            except Exception as e:
-
-                                logger.error(f"Error parsing stream chunk: {e}")
-
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"  Response parsing error in stream: {e} for line {data_str}")
                                 continue
-
                                 
-
+            logger.info(f"LLM Stream Completed in {time.time() - start_time:.2f}s")
+            
+        except httpx.ReadTimeout:
+            logger.error(f"LLM Stream Failed: ReadTimeout after {time.time() - start_time:.2f}s")
+            yield "Error: LLM generation timed out."
         except Exception as e:
-
-            logger.error(f"LLM Stream failed: {e}")
-
-            yield f"\n[Stream Error: {str(e)}]"
+            logger.error(f"LLM Stream Failed: {e}", exc_info=True)
+            yield f"Error: LLM streaming failed."
 
 
 
