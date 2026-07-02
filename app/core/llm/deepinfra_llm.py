@@ -185,23 +185,23 @@ class DeepInfraLLMClient:
 
 
     @classmethod
-
     async def get_client(cls) -> httpx.AsyncClient:
-
         """Get or create the shared persistent HTTP client."""
-
         if cls._shared_client is None or cls._shared_client.is_closed:
-
-            cls._shared_client = httpx.AsyncClient(
-
-                timeout=30.0,
-
-                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-
-                headers={"Authorization": f"Bearer {settings.deepinfra_api_key}"}
-
+            # PROD-GRADE TIMEOUTS: 
+            # DeepSeek-R1 <think> tags can take up to 45-60 seconds before yielding.
+            # 300s read timeout ensures the WebSocket doesn't abruptly interrupt.
+            timeout_config = httpx.Timeout(
+                connect=10.0,   # Fail fast on network drop
+                read=300.0,     # Allow up to 5 mins for LLM streaming response
+                write=30.0,     # Sending prompt should be fast
+                pool=30.0       # Wait up to 30s for an available connection from pool
             )
-
+            cls._shared_client = httpx.AsyncClient(
+                timeout=timeout_config,
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+                headers={"Authorization": f"Bearer {settings.deepinfra_api_key}"}
+            )
         return cls._shared_client
 
 
