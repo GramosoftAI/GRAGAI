@@ -648,7 +648,7 @@ const renderFormattedContent = (content: string, isUser: boolean, themeColor: st
 };
 
 const STAGES = [
-  { at: 0,    label: "Searching knowledge base..." },
+  { at: 0, label: "Searching knowledge base..." },
   { at: 3000, label: "Reading relevant documents..." },
   { at: 8000, label: "Analyzing context..." },
   { at: 15000, label: "Generating answer..." },
@@ -976,7 +976,7 @@ function WidgetContent() {
 
     if (isSelectedLink) {
       const coreKeyword = targetNameRaw.replace(/\s*\((Selected Links|Selected Link)\)\s*/i, "").trim().toLowerCase();
-      
+
       const foundSource = currentSources.find(as => {
         const asName = String(as.name || "").toLowerCase();
         const asUrl = String(as.url || "").toLowerCase();
@@ -1442,7 +1442,7 @@ function WidgetContent() {
 
       setMessages((prev) => {
         const lastMsg = prev[prev.length - 1];
-        
+
         let finalSources = (currentSourcesRef.current && currentSourcesRef.current.length > 0)
           ? currentSourcesRef.current
           : (lastMsg?.sources && lastMsg.sources.length > 0)
@@ -1566,7 +1566,7 @@ function WidgetContent() {
         ws.current.onclose = null;
         ws.current.onerror = null;
         ws.current.close();
-      } catch (e) {}
+      } catch (e) { }
     }
 
     const wsHost = (process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:4915").replace(/\/$/, "");
@@ -2225,7 +2225,7 @@ function WidgetContent() {
                                 if (navigator.clipboard && window.ClipboardItem) {
                                   const blobPlain = new Blob([plainText], { type: "text/plain" });
                                   const blobHtml = htmlText ? new Blob([htmlText], { type: "text/html" }) : null;
-                                  
+
                                   const clipboardData: Record<string, Blob> = { "text/plain": blobPlain };
                                   if (blobHtml) {
                                     clipboardData["text/html"] = blobHtml;
@@ -2329,7 +2329,7 @@ function WidgetContent() {
                               setIsTyping(true);
                               startTypingTimeout();
                               setMessages(messages.slice(0, userMessageIndex + 1));
-                              
+
                               if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                                 ws.current.send(JSON.stringify({ message: prevUserMsg.content, query: prevUserMsg.content, embed: true, is_embed: true }));
                               } else if (ws.current && ws.current.readyState === WebSocket.CONNECTING) {
@@ -2729,14 +2729,14 @@ function WidgetContent() {
           }}>
             <div style={{ fontWeight: "700", fontSize: "14px", color: "#18181b", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <span>Provide Feedback</span>
-              <button 
+              <button
                 onClick={() => { setFeedbackModalOpen(false); setFeedbackMessageId(null); }}
                 style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", fontSize: "16px", color: "#a1a1aa", fontWeight: "bold", padding: 0 }}
               >
                 ✕
               </button>
             </div>
-            
+
             <div style={{ fontSize: "11px", color: "#71717a", fontWeight: "600", marginBottom: "4px" }}>
               Why did you find this answer not helpful?
             </div>
@@ -2751,8 +2751,8 @@ function WidgetContent() {
               ].map((reason) => {
                 const isSelected = selectedReason === reason;
                 return (
-                  <div 
-                    key={reason} 
+                  <div
+                    key={reason}
                     onClick={() => setSelectedReason(reason)}
                     style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", color: isSelected ? "#18181b" : "#4b5563", cursor: "pointer", fontWeight: isSelected ? "600" : "500", userSelect: "none" }}
                   >
