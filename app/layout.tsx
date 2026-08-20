@@ -6,6 +6,8 @@ import { Toaster } from "react-hot-toast";
 import { AntdRegistry } from "@ant-design/nextjs-registry";
 import Script from "next/script";
 import { schema } from "./lib/schema";
+import GSearchChat from "./components/layout/GSearchChat";
+
 
 const plusJakartaSans = Plus_Jakarta_Sans({
   variable: "--font-plus-jakarta-sans",
@@ -99,6 +101,7 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="min-h-full ">
+        
         <Script
           id="schema"
           type="application/ld+json"
@@ -106,6 +109,7 @@ export default function RootLayout({
             __html: JSON.stringify(schema),
           }}
         />
+        <GSearchChat />
         <script
           dangerouslySetInnerHTML={{
             __html: `
