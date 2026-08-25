@@ -443,7 +443,7 @@ const STAGES = [
   { at: 3000, label: "Reading relevant documents..." },
   { at: 8000, label: "Analyzing context..." },
   { at: 15000, label: "Generating answer..." },
-  { at: 30000, label: "Still working — complex query, almost there..." },
+  { at: 30000, label: "Deep reasoning in progress..." },
 ];
 
 function useProgressLabel(isLoading: boolean) {
