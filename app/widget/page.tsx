@@ -29,6 +29,7 @@ type Message = {
   feedback?: "thumbs_up" | "thumbs_down";
   escalation_detected?: boolean;
   timestamp?: string;
+  responseTime?: number;
 };
 
 function stripThinking(content: string): string {
@@ -680,7 +681,8 @@ function WidgetContent() {
   const chatType = searchParams.get("chatType") || "icon";
   const themeColor = searchParams.get("themeColor") || "#0fb5a1";
   const placeholder = searchParams.get("placeholder") || "Ask a question...";
-  const headerLogo = searchParams.get("headerLogo") || "";
+  const headerLogoParam = searchParams.get("headerLogo");
+  const headerLogo = headerLogoParam !== null ? headerLogoParam : "/512_512.png";
   const headerAlign = searchParams.get("headerAlign") || "center";
   const headerNameParam = searchParams.get("headerName");
   const headerName = headerNameParam !== null ? headerNameParam : "Gsearch AI";
@@ -797,6 +799,8 @@ function WidgetContent() {
   const [answeredEscalations, setAnsweredEscalations] = useState<number[]>([]);
   const progressLabel = useProgressLabel(isTyping);
   const isTypingRef = useRef(false);
+  const queryStartTimeRef = useRef<number | null>(null);
+  const currentResponseTimeRef = useRef<number | null>(null);
 
   // Lead Collection State
   const [leadSubmitted, setLeadSubmitted] = useState<boolean>(false);
@@ -1377,7 +1381,7 @@ function WidgetContent() {
 
   const initialQuerySentRef = useRef(false);
   const pendingQueryRef = useRef("");
-  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   const wsDoneRef = useRef(false);
   const currentMsgIdRef = useRef<string | null>(null);
@@ -1389,9 +1393,10 @@ function WidgetContent() {
     currentMsgIdRef.current = null;
     currentSourcesRef.current = [];
     currentEscalationRef.current = false;
+    currentResponseTimeRef.current = null;
   }, []);
 
-  const processIncomingChunk = useCallback((chunk: string, isDone: boolean = false) => {
+  const processIncomingChunk = useCallback((chunk: string, isDone: boolean = false, responseTime?: number) => {
     if (chunk) {
       bufferRef.current += chunk;
     }
@@ -1449,11 +1454,20 @@ function WidgetContent() {
               id: lastMsg.id || currentMsgIdRef.current || undefined,
               sources: finalSources,
               escalation_detected: lastMsg.escalation_detected || currentEscalationRef.current === true,
-              timestamp: lastMsg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+              timestamp: lastMsg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+              responseTime: responseTime !== undefined ? responseTime : lastMsg.responseTime
             },
           ];
         } else {
-          return [...prev, { role: "assistant", content: cleanedText, id: currentMsgIdRef.current || undefined, sources: finalSources, escalation_detected: currentEscalationRef.current === true, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }];
+          return [...prev, { 
+            role: "assistant", 
+            content: cleanedText, 
+            id: currentMsgIdRef.current || undefined, 
+            sources: finalSources, 
+            escalation_detected: currentEscalationRef.current === true, 
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+            responseTime: responseTime
+          }];
         }
       });
     });
@@ -1494,6 +1508,8 @@ function WidgetContent() {
         const query = event.data.query;
         if (query) {
           bufferRef.current = "";
+          queryStartTimeRef.current = Date.now();
+          currentResponseTimeRef.current = null;
           setMessages((prev) => [...prev, { role: "user", content: query, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }]);
           setIsTyping(true);
           startTypingTimeout();
@@ -1519,14 +1535,7 @@ function WidgetContent() {
     }
   }, [isTyping, chatType]);
 
-  // Auto-grow textarea height on value change
-  useEffect(() => {
-    const textarea = inputRef.current;
-    if (!textarea) return;
-    textarea.style.height = "20px";
-    const newHeight = Math.min(120, textarea.scrollHeight);
-    textarea.style.height = `${newHeight}px`;
-  }, [input]);
+  // Single-line input, no auto-grow needed
 
   useEffect(() => {
     if (typeof document !== "undefined") {
@@ -1572,7 +1581,10 @@ function WidgetContent() {
 
   useEffect(() => {
     if (!isTyping && chatType !== "search") {
-      inputRef.current?.focus();
+      const timer = setTimeout(() => {
+        inputRef.current?.focus();
+      }, 100);
+      return () => clearTimeout(timer);
     }
   }, [isTyping, chatType]);
 
@@ -1609,6 +1621,8 @@ function WidgetContent() {
       const initialQuery = searchParams.get("q");
       if (initialQuery && !initialQuerySentRef.current) {
         initialQuerySentRef.current = true;
+        queryStartTimeRef.current = Date.now();
+        currentResponseTimeRef.current = null;
         setMessages((prev) => [...prev, { role: "user", content: initialQuery, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }]);
         setIsTyping(true);
         startTypingTimeout();
@@ -1618,6 +1632,11 @@ function WidgetContent() {
 
     socket.onmessage = (event) => {
       console.log("WebSocket Raw Message:", event.data);
+      if (queryStartTimeRef.current && currentResponseTimeRef.current === null) {
+        const latency = (Date.now() - queryStartTimeRef.current) / 1000;
+        currentResponseTimeRef.current = Math.round(latency * 10) / 10;
+        queryStartTimeRef.current = null;
+      }
       try {
         const data = JSON.parse(event.data);
 
@@ -1686,14 +1705,15 @@ function WidgetContent() {
           }
 
           setIsTyping(true);
-          processIncomingChunk(data.delta);
+          processIncomingChunk(data.delta, false, currentResponseTimeRef.current || undefined);
         }
 
         if (data.type === "done" || data.type === "end") {
           wsDoneRef.current = true;
           if (data.message_id) currentMsgIdRef.current = data.message_id;
           if (data.escalation_detected === true) currentEscalationRef.current = true;
-          processIncomingChunk("", true);
+          
+          processIncomingChunk("", true, currentResponseTimeRef.current || undefined);
         }
       } catch (err) {
         setIsTyping(false);
@@ -1752,6 +1772,8 @@ function WidgetContent() {
     if (!message) return;
     resetStreaming();
     bufferRef.current = ""; // reset old response
+    queryStartTimeRef.current = Date.now();
+    currentResponseTimeRef.current = null;
     setMessages((prev) => [...prev, { role: "user", content: message, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }]);
     setIsTyping(true);
     startTypingTimeout();
@@ -1938,18 +1960,11 @@ function WidgetContent() {
             width: "100%",
             justifyContent: headerAlign === "center" ? "center" : "flex-start"
           }}>
-            {(showInHeader || resolvedHeaderLogo) && (resolvedHeaderLogo || customizationLogoUrl) ? (
+            {resolvedHeaderLogo !== "" && (resolvedHeaderLogo || customizationLogoUrl) ? (
               <div style={{ height: "36px", display: "flex", alignItems: "center" }}>
                 <img src={resolvedHeaderLogo || customizationLogoUrl} alt="Header Logo" style={{ maxHeight: "36px", maxWidth: "120px", objectFit: "contain" }} />
               </div>
-            ) : (
-              <div style={{
-                width: "36px", height: "36px", borderRadius: "10px",
-                display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden"
-              }}>
-                <img src="/512_512.png" alt="Gsearch Logo" style={{ width: "36px", height: "36px", objectFit: "contain" }} />
-              </div>
-            )}
+            ) : null}
 
             <div>
               <div style={{ fontWeight: 600, fontSize: "15px", color: "#171717", display: "flex", alignItems: "center", gap: "6px" }}>
@@ -2284,21 +2299,30 @@ function WidgetContent() {
                       )}
                     </div>
 
-                    {msg.timestamp && (
-                      <div
-                        style={{
-                          fontSize: "10px",
-                          color: "#a3a3a3",
-                          marginTop: "4px",
-                          marginBottom: "2px",
-                          alignSelf: isUser ? "flex-end" : "flex-start",
-                          padding: isUser ? "0 4px 0 0" : "0 0 0 4px",
-                          userSelect: "none"
-                        }}
-                      >
-                        {msg.timestamp}
-                      </div>
-                    )}
+                    <div
+                      style={{
+                        fontSize: "10px",
+                        color: "#a3a3a3",
+                        marginTop: "4px",
+                        marginBottom: "2px",
+                        alignSelf: isUser ? "flex-end" : "flex-start",
+                        padding: isUser ? "0 4px 0 0" : "0 0 0 4px",
+                        userSelect: "none",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px"
+                      }}
+                    >
+                      {msg.timestamp && <span>{msg.timestamp}</span>}
+                      {!isUser && msg.responseTime !== undefined && (
+                        <>
+                          {msg.timestamp && <span>•</span>}
+                          <span style={{ color: "#a3a3a3" }}>
+                            Answered in {msg.responseTime}s
+                          </span>
+                        </>
+                      )}
+                    </div>
 
                     {/* Action Toolbar: Copy, Thumbs Up, Thumbs Down, Regenerate, Source (Far Right) */}
                     {!isUser && (!isTyping || index < messages.length - 1) && index !== 0 && (
@@ -2639,7 +2663,8 @@ function WidgetContent() {
               borderRadius: "24px",
               padding: "6px 8px 6px 18px",
               gap: "12px",
-              height: "46px",
+              minHeight: "46px",
+              height: "auto",
               boxSizing: "border-box",
             }}
           >
@@ -2651,19 +2676,19 @@ function WidgetContent() {
               </svg>
             </span>
 
-            <textarea
+            <input
               ref={inputRef}
+              type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter") {
                   e.preventDefault();
                   if (!isTyping && input.trim()) handleSend();
                 }
               }}
               placeholder={placeholder}
               disabled={isTyping}
-              rows={1}
               style={{
                 flex: 1,
                 padding: "0",
@@ -2673,7 +2698,6 @@ function WidgetContent() {
                 fontSize: "14px",
                 outline: "none",
                 cursor: isTyping ? "not-allowed" : "text",
-                resize: "none",
                 height: "20px",
                 // fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
                 lineHeight: "20px",
