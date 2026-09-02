@@ -1,5 +1,5 @@
 "use client";
-import { Flex, Typography, Card, Button, Tooltip, App, Radio, Input, Modal, Switch, Spin, Tabs} from "antd";
+import { Flex, Typography, Card, Button, Tooltip, App, Radio, Input, Modal, Switch, Spin, Tabs, message} from "antd";
 import {
   CopyOutlined,
   CheckCircleOutlined,
@@ -626,6 +626,14 @@ export default function EmbedScriptSection() {
   };
 
   const handleFileUpload = async (file: File, target: "headerLogo" | "botAvatar" | "buttonIcon") => {
+    const allowedExtensions = ["png", "jpg", "jpeg", "svg", "webp"];
+    const fileExtension = file.name.split(".").pop()?.toLowerCase();
+    
+    if (!fileExtension || !allowedExtensions.includes(fileExtension)) {
+      message.error("Only PNG, JPG, JPEG, SVG, and WEBP image formats are allowed.");
+      return;
+    }
+
     if (target === "headerLogo") setUploadingHeaderLogo(true);
     if (target === "botAvatar") setUploadingBotAvatar(true);
     if (target === "buttonIcon") setUploadingButtonIcon(true);
@@ -908,7 +916,7 @@ export default function EmbedScriptSection() {
           
           <div className="lg:col-span-6 flex flex-col gap-4">
             <Tabs
-              defaultActiveKey="header"
+              defaultActiveKey="button"
               type="card"
               className="custom-widget-tabs"
               items={[
