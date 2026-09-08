@@ -1013,6 +1013,7 @@ export default function ChatPlaygroundPage() {
 
   const queryStartTimeRef = useRef<number | null>(null);
   const lastResponseTimeSecRef = useRef<number | null>(null);
+  const lastUserQueryRef = useRef<string>("");
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
   const [tempEditText, setTempEditText] = useState("");
   const [attachedFile, setAttachedFile] = useState<UploadFile | null>(null);
@@ -1258,6 +1259,35 @@ export default function ChatPlaygroundPage() {
 
       try {
         const data = JSON.parse(rawData);
+
+        if (data.type === "clarification_needed") {
+          streamingTextRef.current = "";
+          setStreamingText("");
+          setIsTyping(false);
+          activeQuerySessionIdRef.current = null;
+          setMessages((prev: any) => [
+            ...prev,
+            {
+              id: data.message_id || `clarification_${Date.now()}`,
+              role: "assistant",
+              type: "clarification_needed",
+              content: data.message || "Multiple datasets matched your query. Please select one to proceed:",
+              clarification: {
+                reason: data.reason,
+                message: data.message,
+                candidates: Array.isArray(data.candidates) ? data.candidates : [],
+                plain_text_fallback: data.plain_text_fallback,
+              },
+              originalQuery: lastUserQueryRef.current,
+              timestamp: new Date().toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              }),
+              responseTime: lastResponseTimeSecRef.current || undefined,
+            },
+          ]);
+          return;
+        }
 
         const parsedId = data.message_id || data.messageId || data.id ||
           (data.message && (data.message.id || data.message.message_id || data.message.messageId)) ||
@@ -1734,6 +1764,7 @@ export default function ChatPlaygroundPage() {
 
     queryStartTimeRef.current = Date.now();
     lastResponseTimeSecRef.current = null;
+    lastUserQueryRef.current = trimmed;
     setMessages((prev: any) => [...prev, {
       role: "user",
       content: trimmed,
@@ -1757,6 +1788,47 @@ export default function ChatPlaygroundPage() {
     setStreamingText("");
     activeQuerySessionIdRef.current = targetSessionId;
     setIsTyping(true);
+  };
+
+  const handleSelectCandidate = (msgIndex: number, candidate: any, originalQuery?: string) => {
+    const queryToSend = originalQuery || lastUserQueryRef.current;
+    if (!queryToSend || !agent?.id || wsStatus !== "open" || isTyping) return;
+
+    let targetSessionId = currentSessionId;
+
+    setMessages((prev: any) => {
+      const copy = [...prev];
+      if (copy[msgIndex]) {
+        copy[msgIndex] = {
+          ...copy[msgIndex],
+          selectedCandidateId: candidate.kb_id,
+        };
+      }
+      return [
+        ...copy,
+        {
+          role: "user",
+          content: `Selected dataset: ${candidate.filename}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        }
+      ];
+    });
+
+    queryStartTimeRef.current = Date.now();
+    lastResponseTimeSecRef.current = null;
+    streamingTextRef.current = "";
+    streamingMessageIdRef.current = null;
+    wsSourcesRef.current = [];
+    setStreamingText("");
+    activeQuerySessionIdRef.current = targetSessionId;
+    setIsTyping(true);
+
+    ws.current?.send(JSON.stringify({
+      query: queryToSend,
+      target_kb_id: candidate.kb_id,
+      session_id: targetSessionId && !targetSessionId.startsWith("session_") ? targetSessionId : null,
+      embed: false
+    }));
   };
 
   const handleCopyMessage = async (text: string) => {
@@ -2903,6 +2975,81 @@ export default function ChatPlaygroundPage() {
                           )}
 
                         </div>}
+
+                      {!isUser && msg.type === "clarification_needed" && msg.clarification?.candidates && msg.clarification.candidates.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-[var(--app-border)]/60 flex flex-col gap-2.5 w-full">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full">
+                            {msg.clarification.candidates.map((cand: any) => {
+                              const isSelected = msg.selectedCandidateId === cand.kb_id;
+                              const isDisabled = !!msg.selectedCandidateId;
+
+                              return (
+                                <button
+                                  key={cand.kb_id}
+                                  type="button"
+                                  disabled={isDisabled}
+                                  onClick={() => handleSelectCandidate(i, cand, msg.originalQuery)}
+                                  className={`flex flex-col text-left p-3 rounded-xl border transition-all duration-200 relative overflow-hidden group ${
+                                    isSelected
+                                      ? "border-[#0fb5a1] bg-[#0fb5a1]/10 shadow-sm ring-1 ring-[#0fb5a1]"
+                                      : isDisabled
+                                      ? "opacity-50 border-[var(--app-border)]/50 bg-[var(--app-surface)]/50 cursor-not-allowed"
+                                      : "border-[var(--app-border)] bg-[var(--app-surface)] hover:border-[#0fb5a1]/60 hover:bg-[#0fb5a1]/5 hover:shadow-sm cursor-pointer hover:-translate-y-0.5"
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-2 w-full">
+                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                      <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-sm ${
+                                        isSelected ? "bg-[#0fb5a1] text-white" : "bg-[#0fb5a1]/10 text-[#0fb5a1] group-hover:bg-[#0fb5a1] group-hover:text-white transition-colors"
+                                      }`}>
+                                        <LuFileText />
+                                      </div>
+                                      <span className={`font-semibold text-xs truncate ${
+                                        isSelected ? "text-[#0fb5a1]" : "text-[var(--app-text)] group-hover:text-[#0fb5a1] transition-colors"
+                                      }`} title={cand.filename}>
+                                        {cand.filename}
+                                      </span>
+                                    </div>
+                                    {isSelected && (
+                                      <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-[#0fb5a1] text-white shrink-0">
+                                        Selected
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-2 mt-2 text-[11px] text-[var(--app-text-soft)]">
+                                    <span className="bg-[var(--app-surface-muted)] px-1.5 py-0.5 rounded font-medium border border-[var(--app-border)]/40">
+                                      {cand.row_count !== undefined ? `${cand.row_count.toLocaleString()} rows` : "Dataset"}
+                                    </span>
+                                    {cand.sample_columns && cand.sample_columns.length > 0 && (
+                                      <span>• {cand.sample_columns.length} columns</span>
+                                    )}
+                                  </div>
+
+                                  {cand.sample_columns && cand.sample_columns.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 mt-2">
+                                      {cand.sample_columns.slice(0, 3).map((col: string, cIdx: number) => (
+                                        <span
+                                          key={cIdx}
+                                          className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--app-surface-muted)] text-[var(--app-text-soft)] border border-[var(--app-border)]/40 truncate max-w-[110px]"
+                                          title={col}
+                                        >
+                                          {col}
+                                        </span>
+                                      ))}
+                                      {cand.sample_columns.length > 3 && (
+                                        <span className="text-[10px] text-[var(--app-text-soft)]/70 self-center">
+                                          +{cand.sample_columns.length - 3} more
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
 
 
                       {!isUser && (msg.confidence || msg.nodes) && (

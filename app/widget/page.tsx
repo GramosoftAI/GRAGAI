@@ -21,15 +21,33 @@ type SourceItem = {
   file_path?: string;
 };
 
+type ClarificationCandidate = {
+  kb_id: string;
+  filename: string;
+  row_count?: number;
+  sample_columns?: string[];
+};
+
+type ClarificationData = {
+  reason?: string;
+  message?: string;
+  candidates: ClarificationCandidate[];
+  plain_text_fallback?: string;
+};
+
 type Message = {
   id?: string;
   role: "user" | "assistant";
+  type?: "clarification_needed" | "standard" | string;
   content: string;
   sources?: SourceItem[];
   feedback?: "thumbs_up" | "thumbs_down";
   escalation_detected?: boolean;
   timestamp?: string;
   responseTime?: number;
+  clarification?: ClarificationData;
+  selectedCandidateId?: string;
+  originalQuery?: string;
 };
 
 function stripThinking(content: string): string {
@@ -1384,6 +1402,8 @@ function WidgetContent() {
 
   const initialQuerySentRef = useRef(false);
   const pendingQueryRef = useRef("");
+  const pendingTargetKbIdRef = useRef<string | null>(null);
+  const lastUserQueryRef = useRef<string>("");
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const wsDoneRef = useRef(false);
@@ -1616,14 +1636,24 @@ function WidgetContent() {
       if (pendingQuery) {
         pendingQueryRef.current = "";
         initialQuerySentRef.current = true;
+        const pendingTargetKbId = pendingTargetKbIdRef.current;
+        pendingTargetKbIdRef.current = null;
+        lastUserQueryRef.current = pendingQuery;
         startTypingTimeout();
-        socket.send(JSON.stringify({ message: pendingQuery, query: pendingQuery, embed: true, is_embed: true }));
+        socket.send(JSON.stringify({
+          message: pendingQuery,
+          query: pendingQuery,
+          embed: true,
+          is_embed: true,
+          ...(pendingTargetKbId ? { target_kb_id: pendingTargetKbId } : {})
+        }));
         return;
       }
 
       const initialQuery = searchParams.get("q");
       if (initialQuery && !initialQuerySentRef.current) {
         initialQuerySentRef.current = true;
+        lastUserQueryRef.current = initialQuery;
         queryStartTimeRef.current = Date.now();
         currentResponseTimeRef.current = null;
         setMessages((prev) => [...prev, { role: "user", content: initialQuery, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }]);
@@ -1645,6 +1675,34 @@ function WidgetContent() {
 
         // Reset inactivity timer on every message chunk received
         startTypingTimeout();
+
+        if (data.type === "clarification_needed") {
+          resetStreaming();
+          setIsTyping(false);
+          resetTypingTimeout();
+          const clarificationMsg: Message = {
+            id: data.message_id || `clarification_${Date.now()}`,
+            role: "assistant",
+            type: "clarification_needed",
+            content: data.message || "Multiple datasets matched your query. Please select one to proceed:",
+            clarification: {
+              reason: data.reason,
+              message: data.message,
+              candidates: Array.isArray(data.candidates) ? data.candidates : [],
+              plain_text_fallback: data.plain_text_fallback,
+            },
+            originalQuery: lastUserQueryRef.current,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+          };
+          setMessages((prev) => {
+            const lastMsg = prev[prev.length - 1];
+            if (lastMsg && lastMsg.role === "assistant" && (!lastMsg.content || lastMsg.content === "")) {
+              return [...prev.slice(0, -1), clarificationMsg];
+            }
+            return [...prev, clarificationMsg];
+          });
+          return;
+        }
 
         if (data.type === "start") {
           setIsTyping(true);
@@ -1795,6 +1853,7 @@ function WidgetContent() {
   const handleSend = () => {
     const message = input.trim();
     if (!message) return;
+    lastUserQueryRef.current = message;
     resetStreaming();
     bufferRef.current = ""; // reset old response
     queryStartTimeRef.current = Date.now();
@@ -1812,6 +1871,52 @@ function WidgetContent() {
     }
     setInput("");
   };
+
+  const handleSelectCandidate = useCallback((msgIndex: number, candidate: ClarificationCandidate, originalQuery?: string) => {
+    const queryToSend = originalQuery || lastUserQueryRef.current;
+    if (!queryToSend) return;
+
+    setMessages((prev) => {
+      const copy = [...prev];
+      if (copy[msgIndex]) {
+        copy[msgIndex] = {
+          ...copy[msgIndex],
+          selectedCandidateId: candidate.kb_id,
+        };
+      }
+      return [
+        ...copy,
+        {
+          role: "user",
+          content: `Selected dataset: ${candidate.filename}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+        }
+      ];
+    });
+
+    resetStreaming();
+    bufferRef.current = "";
+    queryStartTimeRef.current = Date.now();
+    currentResponseTimeRef.current = null;
+    setIsTyping(true);
+    startTypingTimeout();
+
+    const payload = {
+      message: queryToSend,
+      query: queryToSend,
+      target_kb_id: candidate.kb_id,
+      embed: true,
+      is_embed: true
+    };
+
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify(payload));
+    } else {
+      pendingQueryRef.current = queryToSend;
+      pendingTargetKbIdRef.current = candidate.kb_id;
+      connectWs();
+    }
+  }, [connectWs, resetStreaming, startTypingTimeout]);
 
   return (
     <div
@@ -2347,6 +2452,145 @@ function WidgetContent() {
                               >
                                 No, thanks
                               </button>
+                            </div>
+                          )}
+                          {!isUser && msg.type === "clarification_needed" && msg.clarification?.candidates && msg.clarification.candidates.length > 0 && (
+                            <div style={{ marginTop: "14px", display: "flex", flexDirection: "column", gap: "10px", width: "100%" }}>
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "8px", width: "100%" }}>
+                                {msg.clarification.candidates.map((cand) => {
+                                  const isSelected = msg.selectedCandidateId === cand.kb_id;
+                                  const isDisabled = !!msg.selectedCandidateId;
+
+                                  return (
+                                    <button
+                                      key={cand.kb_id}
+                                      type="button"
+                                      disabled={isDisabled}
+                                      onClick={() => handleSelectCandidate(index, cand, msg.originalQuery)}
+                                      style={{
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        textAlign: "left",
+                                        padding: "12px",
+                                        borderRadius: "12px",
+                                        border: isSelected ? `2px solid ${themeColor}` : "1px solid #e4e4e7",
+                                        background: isSelected ? `${themeColor}15` : "#fafafa",
+                                        color: "#18181b",
+                                        cursor: isDisabled ? (isSelected ? "default" : "not-allowed") : "pointer",
+                                        opacity: isDisabled && !isSelected ? 0.55 : 1,
+                                        transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+                                        boxShadow: isSelected ? `0 4px 12px ${themeColor}26` : "0 1px 3px rgba(0,0,0,0.04)",
+                                        position: "relative",
+                                        overflow: "hidden",
+                                      }}
+                                      onMouseEnter={(e) => {
+                                        if (!isDisabled) {
+                                          e.currentTarget.style.borderColor = themeColor;
+                                          e.currentTarget.style.background = "#ffffff";
+                                          e.currentTarget.style.transform = "translateY(-2px)";
+                                          e.currentTarget.style.boxShadow = `0 6px 16px ${themeColor}20`;
+                                        }
+                                      }}
+                                      onMouseLeave={(e) => {
+                                        if (!isDisabled) {
+                                          e.currentTarget.style.borderColor = isSelected ? themeColor : "#e4e4e7";
+                                          e.currentTarget.style.background = isSelected ? `${themeColor}15` : "#fafafa";
+                                          e.currentTarget.style.transform = "translateY(0)";
+                                          e.currentTarget.style.boxShadow = isSelected ? `0 4px 12px ${themeColor}26` : "0 1px 3px rgba(0,0,0,0.04)";
+                                        }
+                                      }}
+                                    >
+                                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", width: "100%" }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+                                          <span style={{
+                                            display: "inline-flex",
+                                            alignItems: "center",
+                                            justifyContent: "center",
+                                            width: "28px",
+                                            height: "28px",
+                                            borderRadius: "7px",
+                                            background: `${themeColor}18`,
+                                            color: themeColor,
+                                            fontSize: "14px",
+                                            fontWeight: "700",
+                                            flexShrink: 0
+                                          }}>
+                                            📄
+                                          </span>
+                                          <span style={{
+                                            fontWeight: 600,
+                                            fontSize: "13px",
+                                            color: isSelected ? themeColor : "#18181b",
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
+                                            whiteSpace: "nowrap"
+                                          }} title={cand.filename}>
+                                            {cand.filename}
+                                          </span>
+                                        </div>
+                                        {isSelected && (
+                                          <span style={{
+                                            fontSize: "10px",
+                                            fontWeight: 700,
+                                            textTransform: "uppercase",
+                                            padding: "2px 6px",
+                                            borderRadius: "4px",
+                                            background: themeColor,
+                                            color: "#ffffff"
+                                          }}>
+                                            Selected
+                                          </span>
+                                        )}
+                                      </div>
+
+                                      <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "8px", fontSize: "11px", color: "#71717a" }}>
+                                        <span style={{
+                                          background: "#f4f4f5",
+                                          padding: "2px 6px",
+                                          borderRadius: "4px",
+                                          fontWeight: 600,
+                                          color: "#52525b"
+                                        }}>
+                                          {cand.row_count !== undefined ? `${cand.row_count.toLocaleString()} rows` : "Dataset"}
+                                        </span>
+                                        {cand.sample_columns && cand.sample_columns.length > 0 && (
+                                          <span>• {cand.sample_columns.length} cols</span>
+                                        )}
+                                      </div>
+
+                                      {cand.sample_columns && cand.sample_columns.length > 0 && (
+                                        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "8px" }}>
+                                          {cand.sample_columns.slice(0, 3).map((col, cIdx) => (
+                                            <span
+                                              key={cIdx}
+                                              style={{
+                                                fontSize: "10px",
+                                                background: "#f4f4f5",
+                                                border: "1px solid #e4e4e7",
+                                                color: "#71717a",
+                                                padding: "1px 6px",
+                                                borderRadius: "4px",
+                                                maxWidth: "110px",
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap"
+                                              }}
+                                              title={col}
+                                            >
+                                              {col}
+                                            </span>
+                                          ))}
+                                          {cand.sample_columns.length > 3 && (
+                                            <span style={{ fontSize: "10px", color: "#a1a1aa", alignSelf: "center" }}>
+                                              +{cand.sample_columns.length - 3} more
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+                                    </button>
+                                  );
+                                })}
+                              </div>
                             </div>
                           )}
                         </>

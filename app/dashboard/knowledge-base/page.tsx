@@ -17,7 +17,7 @@ import { getCookie } from "../../config/cookies";
 import { toast } from "react-hot-toast";
 
 
-const ALLOWED_EXTENSIONS = ['.pdf', '.csv', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.gif', '.webp'];
+const ALLOWED_EXTENSIONS = ['.pdf', '.csv', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.txt', '.md', '.docx', '.doc'];
 
 function getFileExtension(fileName: string): string {
   const idx = fileName.lastIndexOf('.');
@@ -660,14 +660,26 @@ export default function KnowledgeBasePage() {
     setCrawlerLoading(true);
 
     try {
-      await urlSelect({
+      const res = await urlSelect({
         path: `/${agent?.id}/sources/url/select`,
         data: {
           urls: selectedUrls
         }
-      });
+      }) as any;
       
-      // message.success("Successfully imported selected URLs to knowledge base");
+      // Extract job_id from response to track progress
+      const jobId = res?.jobId || res?.job_id || res?.data?.jobId || res?.data?.job_id || res?.result?.jobId || res?.result?.job_id;
+
+      if (jobId) {
+        setActiveJobs(prev => [...prev, {
+          id: jobId,
+          name: `URL Import (${selectedUrls.length} links)`,
+          type: 'url',
+          progress: 0,
+          status: 'processing'
+        }]);
+      }
+
       setCrawlerModalVisible(false);
       setUrl(''); 
      

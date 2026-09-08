@@ -24,7 +24,7 @@
   }
 
   const targetAgentId = agentId || "24b3d80f-aed6-4b70-b5b2-48c64cb616c1";
-  const apiHost = baseUrl || window.location.origin || "https://uat.gramosoft.tech";
+  const apiHost = "http://localhost:8000" || baseUrl || window.location.origin || "https://uat.gramosoft.tech";
   const cleanApiHost = apiHost.endsWith("/api/v1") ? apiHost : apiHost + "/api/v1";
   const configApiUrl = `${cleanApiHost}/embed/configs/${targetAgentId}?device=${getDeviceType()}${tenantId ? `&tenant_id=${tenantId}` : ""}`;
 
