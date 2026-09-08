@@ -10,12 +10,25 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 logger = logging.getLogger(__name__)
 
-# Standard scopes required for Google Drive indexing & user discovery
-SCOPES = [
+# Scopes definition
+USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
+
+# Dedicated, least-privilege scopes for Google Drive
+DRIVE_SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/admin.directory.user.readonly",
+]
+
+# Dedicated, least-privilege scopes for Gmail
+GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
 ]
+
+# OAuth authorization scopes (including email identity resolution)
+DRIVE_OAUTH_SCOPES = DRIVE_SCOPES + [USERINFO_EMAIL_SCOPE]
+GMAIL_OAUTH_SCOPES = GMAIL_SCOPES + [USERINFO_EMAIL_SCOPE]
+
+# Backward compatibility alias
+SCOPES = DRIVE_SCOPES
 
 
 class GoogleAPIError(Exception):
@@ -43,7 +56,7 @@ class GoogleAuthManager:
         self.is_service_account: bool = False
         self.primary_admin_email: Optional[str] = None
 
-    def load_credentials(self, credentials: Dict[str, Any]) -> Dict[str, Any]:
+    def load_credentials(self, credentials: Dict[str, Any], scopes: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Parse credentials dict. Supports:
         1. Service Account JSON structure (requires 'type': 'service_account')
@@ -51,24 +64,25 @@ class GoogleAuthManager:
         """
         self.creds_dict = credentials.copy()
         self.primary_admin_email = credentials.get("primary_admin_email")
+        effective_scopes = scopes or DRIVE_SCOPES
 
         # Determine authentication mode
         if credentials.get("type") == "service_account":
             self.is_service_account = True
-            logger.info("Initializing Google Service Account credentials")
+            logger.info(f"Initializing Google Service Account credentials with scopes: {effective_scopes}")
             self.creds = service_account.Credentials.from_service_account_info(
-                credentials, scopes=SCOPES
+                credentials, scopes=effective_scopes
             )
         else:
             self.is_service_account = False
-            logger.info("Initializing Google User OAuth2 credentials")
+            logger.info(f"Initializing Google User OAuth2 credentials with scopes: {effective_scopes}")
             self.creds = google_credentials.Credentials(
                 token=credentials.get("access_token"),
                 refresh_token=credentials.get("refresh_token"),
                 client_id=credentials.get("client_id"),
                 client_secret=credentials.get("client_secret"),
                 token_uri="https://oauth2.googleapis.com/token",
-                scopes=None,
+                scopes=effective_scopes,
             )
 
         return self.creds_dict
@@ -96,6 +110,24 @@ class GoogleAuthManager:
                 raise ValueError("Refreshed token is empty.")
             return active_creds.token
         except Exception as e:
+            # Self-healing: If refresh fails with unauthorized_client and credentials came with mismatched client_id,
+            # retry with server's configured GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
+            import os
+            server_client_id = os.getenv("GOOGLE_CLIENT_ID")
+            server_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+            if server_client_id and "unauthorized_client" in str(e).lower() and getattr(active_creds, "client_id", None) != server_client_id:
+                logger.warning(f"Detected client_id mismatch on token refresh. Retrying with server client_id ({server_client_id[:12]}...)...")
+                active_creds._client_id = server_client_id
+                if server_client_secret:
+                    active_creds._client_secret = server_client_secret
+                try:
+                    active_creds.refresh(GoogleRequest())
+                    if active_creds.token:
+                        logger.info("Successfully refreshed Google token using server credentials fallback.")
+                        return active_creds.token
+                except Exception as retry_err:
+                    logger.error(f"Fallback token refresh attempt failed: {retry_err}")
+
             logger.error(f"Failed to refresh Google credentials token: {e}", exc_info=True)
             raise RuntimeError(f"Authentication token refresh failed: {str(e)}")
 

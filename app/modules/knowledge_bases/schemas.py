@@ -303,6 +303,7 @@ class GoogleDriveSyncRequest(BaseModel):
     file_ids: Optional[list[str]] = Field(default_factory=list, description="Specific file IDs to ingest")
     folder_ids: Optional[list[str]] = Field(default_factory=list, description="Specific folder IDs to ingest (recursive)")
     user_email: Optional[str] = Field(None, description="Email of the user syncing the drive")
+    email: Optional[str] = Field(None, description="Alias for user_email")
 
     class Config:
         json_schema_extra = {

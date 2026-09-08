@@ -456,6 +456,104 @@ class RAGService:
             )
         return dropped
 
+    async def _log_query_analytics_safely(
+        self,
+        query: str,
+        user_id: Optional[str],
+        session_id: Optional[str],
+        status: ResponseStatus,
+        confidence: float,
+        latency_ms: float,
+        model_name: str,
+        llm_input_tokens: int = 0,
+        llm_output_tokens: int = 0,
+        embedding_tokens: int = 0,
+    ):
+        try:
+            from app.core.database import get_db_with_tenant
+            from app.core.llm.pricing import calculate_token_cost
+            from app.core.config import get_settings
+
+            llm_cost_usd = calculate_token_cost(
+                model_name=model_name,
+                input_tokens=llm_input_tokens,
+                output_tokens=llm_output_tokens,
+            )
+            embedding_cost_usd = (
+                calculate_token_cost(
+                    model_name=get_settings().model_embedding,
+                    input_tokens=embedding_tokens,
+                    output_tokens=0,
+                )
+                if embedding_tokens
+                else 0.0
+            )
+            total_cost_usd = llm_cost_usd + embedding_cost_usd
+
+            async with get_db_with_tenant(str(self.tenant_id)) as session:
+                analytics_repo = AnalyticsRepository(session, UUID(self.tenant_id))
+                await analytics_repo.create_query_log(
+                    {
+                        "query": query,
+                        "response_status": status,
+                        "confidence_score": confidence,
+                        "latency_ms": latency_ms,
+                        "session_id": UUID(str(session_id)) if session_id and isinstance(session_id, UUID) or (isinstance(session_id, str) and len(session_id) == 36 and session_id.count('-') == 4) else None,
+                        "user_id": UUID(str(user_id)) if user_id and isinstance(user_id, UUID) or (isinstance(user_id, str) and len(user_id) == 36 and user_id.count('-') == 4) else None,
+                        "llm_input_tokens": llm_input_tokens,
+                        "llm_output_tokens": llm_output_tokens,
+                        "embedding_tokens": embedding_tokens,
+                        "llm_cost_usd": llm_cost_usd,
+                        "embedding_cost_usd": embedding_cost_usd,
+                        "total_cost_usd": total_cost_usd,
+                        "model_name": model_name,
+                    }
+                )
+        except Exception as ae:
+            logger.exception(
+                f"Failed to log analytics for stream (Tenant: {self.tenant_id}, User: {user_id}, Session: {session_id}): {ae}"
+            )
+
+    def _filter_relevant_chunks(self, context) -> int:
+        """
+        Applies scale-aware relevance filtering to context.chunks to prevent context poisoning/hallucination.
+        Seamlessly handles both RRF scores (~0.001-0.033) and Vector/Legacy scores (0.0-1.0+) by using
+        a scale-independent relative cutoff (15% of top chunk score), automatically preventing static
+        threshold mismatch bugs when legacy env vars are present.
+        Returns the number of dropped chunks.
+        """
+        if not context or not getattr(context, "chunks", None):
+            return 0
+
+        import os
+        original_count = len(context.chunks)
+        max_score = max((getattr(c, "hybrid_score", 0.0) for c in context.chunks), default=0.0)
+        if max_score <= 0.0:
+            return 0
+
+        # Relative cutoff threshold (15% of highest chunk score)
+        relative_ratio = 0.15
+        cutoff = max_score * relative_ratio
+
+        env_val = os.getenv("RAG_MIN_RELEVANCE_SCORE")
+        if env_val is not None:
+            try:
+                env_score = float(env_val)
+                # Only use absolute env threshold if it does not exceed top candidate score (prevents scale mismatch)
+                if 0.0 < env_score <= max_score:
+                    cutoff = env_score
+            except ValueError:
+                pass
+
+        context.chunks = [c for c in context.chunks if getattr(c, "hybrid_score", 0.0) >= cutoff]
+        dropped = original_count - len(context.chunks)
+        if dropped > 0:
+            logger.info(
+                f"Relevance Filter (Scale-Aware): Top score = {max_score:.4f}, "
+                f"Cutoff = {cutoff:.4f}. Dropped {dropped} low-relevance chunks."
+            )
+        return dropped
+
     async def stream_rag_answer(
         self,
         query: str,
@@ -937,6 +1035,7 @@ class RAGService:
                 s_names = locals().get('schema_name_terms', set())
                 
                 # Pre-strip the tabular subquery to drop non-schema clauses
+                import re
                 clauses = re.split(r'\s+and\s+|\s*,\s*', tabular_subquery.lower())
                 valid_clauses = []
                 analytic_verbs = {"average", "total", "sum", "count", "list", "how many", "max", "min"}
@@ -1422,7 +1521,65 @@ class RAGService:
             has_valid_triplets = context and context.triplets
             has_triplet_context = context and context.triplet_context
             if not has_valid_chunks and not has_valid_triplets and not has_triplet_context and not chat_history and not hybrid_merge_context:
-                logger.info("Empty context retrieved for stream, returning fallback message.")
+                logger.info("Empty vector context retrieved for stream. Checking for active excel_parquet KBs as fallback...")
+                
+                # ROUTER FALLBACK CHAIN: Vector RAG -> SQL Analytics
+                from app.core.parquet_ingester import ParquetIngester
+                from app.modules.rag.pandas_engine import PandasQueryEngine
+                
+                excel_kbs_found = []
+                for kid in (kb_ids if isinstance(kb_ids, list) else [kb_ids]):
+                    try:
+                        k_obj = await self.kb_repo.get_by_id(kid)
+                        if k_obj and getattr(k_obj, 'description', '') == 'excel_parquet':
+                            excel_kbs_found.append(k_obj)
+                    except Exception as err:
+                        logger.warning(f"Error checking KB {kid} for SQL fallback: {err}")
+
+                if excel_kbs_found:
+                    active_paths = []
+                    for ek in excel_kbs_found:
+                        dname = getattr(ek, "parsed_path", None) or getattr(ek, "name", None)
+                        if dname:
+                            p = ParquetIngester.get_active_dataset(dname)
+                            if p:
+                                active_paths.append((ek.name or dname, p))
+
+                    if active_paths:
+                        fallback_results = []
+                        all_paths = [ap[1] for ap in active_paths]
+                        for kb_label, ppath in active_paths:
+                            try:
+                                engine = PandasQueryEngine(ppath, all_dataset_paths=all_paths)
+                                sql_res = await engine.execute_query(query, ppath)
+                                res_str = str(sql_res) if sql_res else ""
+                                unmatched_sigs = ["not present in dataset", "no records matched", "error", "0 rows", "empty dataframe"]
+                                if res_str and not any(unm in res_str.lower() for unm in unmatched_sigs):
+                                    fallback_results.append(f"**Data Result from {kb_label}:**\n{res_str}")
+                            except Exception as ex:
+                                logger.warning(f"Router SQL fallback execution failed for {ppath}: {ex}")
+
+                        if fallback_results:
+                            final_fallback_msg = "\n\n".join(fallback_results)
+                            logger.info(f"Router SQL Fallback successfully found results! Yielding SQL answer for '{query}'.")
+                            yield final_fallback_msg
+                            latency_ms = (time.time() - trace_start_time) * 1000
+                            emb_tok = getattr(context, "query_embedding_tokens", 0) if context else max(1, len(query) // 4)
+                            await self._log_query_analytics_safely(
+                                query=query,
+                                user_id=user_id,
+                                session_id=session_id,
+                                status=ResponseStatus.SUCCESS,
+                                confidence=1.0,
+                                latency_ms=latency_ms,
+                                model_name=self.llm_client.model_answer,
+                                llm_input_tokens=0,
+                                llm_output_tokens=0,
+                                embedding_tokens=emb_tok,
+                            )
+                            return
+
+                logger.info("No active spreadsheet data matched query in router fallback chain. Returning default refusal message.")
                 yield "I'm sorry, but the requested information is not available within my current knowledge base. Please try a related query or provide additional context."
                 latency_ms = (time.time() - trace_start_time) * 1000
                 emb_tok = getattr(context, "query_embedding_tokens", 0) if context else max(1, len(query) // 4)

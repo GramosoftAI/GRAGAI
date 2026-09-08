@@ -624,13 +624,79 @@ class RAGPipeline:
         total_pipeline_start = time.time()
         # Now wait for analysis to finish (needed for routing)
         analysis = await analyzer_task
+        if kb_metadata_task:
+            await kb_metadata_task
+
+        # Authoritative RAG Router Gate: Schema-Aware Gating with Doc-Signal Short-Circuit
+        # Single Source of Truth for Routing: QueryAnalyzer + Pipeline Tabular Gate
+        # Architecture Note: Uses schema_utils.get_schema_columns for canonical schema column parsing.
+        import re
+        from app.modules.rag.schema_utils import get_schema_columns
+
+        doc_signals = [
+            "in the document", "in the pdf", "policy", "manual", "according to", "clause", "article",
+            "guideline", "section", "paragraph", "doc mentions", "pdf mentions"
+        ]
+        generic_cols = {"name", "date", "id", "type", "status", "data", "info", "value", "text", "description"}
+
+        if not any(sig in focused_query.lower() for sig in doc_signals):
+            all_schema_cols = set()
+            for meta in self._kb_metadata.values():
+                ds = meta.get("dataset_schema")
+                cv = meta.get("categorical_values")
+                for col in get_schema_columns(ds, cv):
+                    c_str = str(col).lower().strip()
+                    all_schema_cols.add(c_str)
+                    all_schema_cols.add(c_str.replace(" ", "_"))
+
+            q_lower = focused_query.lower()
+            # Match non-generic schema columns referenced in the query (>2 chars, not in generic_cols)
+            matched_non_generic_cols = [
+                col for col in all_schema_cols
+                if col and len(col) > 2 and col not in generic_cols and (col in q_lower or col.replace("_", " ") in q_lower)
+            ]
+
+            analytical_pattern = r'\b(what is|find|get|give me|show|calculate|sum|average|count|total|min|max|highest|lowest)\b'
+            has_analytical_phrase = bool(re.search(analytical_pattern, q_lower))
+
+            if matched_non_generic_cols or (has_analytical_phrase and any(col in q_lower for col in all_schema_cols if col not in generic_cols)):
+                analysis.is_tabular = True
+
+        # Wait for the embedding so we can use it for the routing gate
+        # (It will also be cached/reused in the structured queries loop)
+        original_query_embedding, _ = await embedding_task
+        
+        # Execute Semantic File Routing Gate
+        filtered_kb_ids = await self._execute_semantic_file_gate(original_query_embedding, kb_ids)
+        
+        if not filtered_kb_ids:
+            logger.info("File Routing Gate determined no relevant files. Fast failing to insufficient knowledge.")
+            return RAGContext(
+                query=query,
+                chunks=[],
+                entity_mentions={},
+                total_tokens=0,
+                search_type="INSUFFICIENT_KNOWLEDGE"
+            )
+            
+        # Overwrite the pipeline's kb_ids with the filtered list
+        kb_ids = filtered_kb_ids
+
+        # Preserve the original query as an immutable reference throughout this pipeline run
+        original_query = query
+        corrected = getattr(analysis.metadata, "corrected_query", None)
+        if corrected and corrected.lower().strip() != original_query.lower().strip():
+            logger.info(
+                "Query spell checked: %r -> %r", original_query, corrected
+            )
+            query = corrected
+
         # Log Authoritative Routing Decision
         selected_routing_path = "SQL_TABLE_ANALYTICS" if getattr(analysis, "is_tabular", False) else "HYBRID_VECTOR_GRAPH_RAG"
         logger.info(
             f"RAG ROUTER DECISION | intent={getattr(analysis.intent, 'name', 'UNKNOWN')} | "
             f"is_tabular={getattr(analysis, 'is_tabular', False)} | selected_path={selected_routing_path}"
         )
-
         # STAGE 0.5: EARLY EXIT FOR TABLE ANALYTICS (Using QueryAnalyzer & Pipeline Router)
         if getattr(analysis, "is_tabular", False):
             logger.info(f"   -> Intercepting query for SQL Table Analytics engine! (intent={analysis.intent.name}, is_tabular=True)")
@@ -3551,9 +3617,10 @@ CRITICAL RULES:
             for r in formatted_rows:
                 if "row_data" in r and isinstance(r["row_data"], dict):
                     kb_val = r.get("kb_id")
-                    page_num = r.get("page_number", 1)
+                    page_num = r.get("page_number")
+                    page_num_sort = page_num if page_num is not None else 0
                     tbl_val = r.get("table_index", 0)
-                    key = (str(kb_val) if kb_val else "unknown_kb", page_num, tbl_val)
+                    key = (str(kb_val) if kb_val else "unknown_kb", page_num_sort, tbl_val)
                     if key not in tables_map:
                         tables_map[key] = []
                     tables_map[key].append(r["row_data"])
@@ -3564,7 +3631,7 @@ CRITICAL RULES:
                     tables_map[key].append(r)
             
             # Sort keys to preserve natural document order (page_number first, then table_index)
-            sorted_keys = sorted(tables_map.keys(), key=lambda x: (x[0], x[1], x[2]))
+            sorted_keys = sorted(tables_map.keys(), key=lambda x: (x[0], x[1] or 0, x[2]))
             
             # Format each group as a separate markdown table
             markdown_tables = []
