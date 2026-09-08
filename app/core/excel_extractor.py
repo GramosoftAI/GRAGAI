@@ -277,7 +277,8 @@ class ExcelExtractor:
                             
                     if row_data_dict:
                         table_rows_extracted.append({
-                            "page_number": 1,
+                            "page_number": None,
+                            "sheet_name": sheet_name,
                             "table_index": 0,
                             "row_index": index + header_idx + 2,
                             "row_data": row_data_dict

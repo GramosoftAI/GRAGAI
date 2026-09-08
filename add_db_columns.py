@@ -101,6 +101,7 @@ async def main():
             ("categorical_values", "JSONB"),
             ("noisy_words", "JSONB"),
             ("noisy_words_generated_at", "TIMESTAMP WITH TIME ZONE"),
+            ("metadata_json", "JSONB"),
             ("summary_embedding", "vector(4096)"),
             ("s3_path", "VARCHAR(1024)"),
             ("parsed_path", "VARCHAR(1024)"),

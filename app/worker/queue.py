@@ -22,13 +22,15 @@ from .jobs.gmail_sync import gmail_sync_job
 from .jobs.email_processing import email_processing_job
 from .jobs.embedding import embedding_job
 from .jobs.graph_update import graph_update_job
+from .jobs.google_drive_sync import google_drive_sync_job
 
 class WorkerSettings:
     functions = [
         gmail_sync_job,
         email_processing_job,
         embedding_job,
-        graph_update_job
+        graph_update_job,
+        google_drive_sync_job
     ]
     
     on_startup = startup

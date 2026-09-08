@@ -114,19 +114,21 @@ class PDFExtractor:
             
             # Find Markdown tables: consecutive lines starting with | or tab-separated lines
             # First, look for standard Markdown tables
-            md_table_pattern = re.compile(r'((?:^[ \t]*\|.*?\|[ \t]*(?:\n|$))+)', re.MULTILINE)
-            md_tables = list(md_table_pattern.finditer(raw_markdown))
+            md_table_matches = list(md_table_pattern.finditer(raw_markdown))
             
-            if md_tables:
-                for t_idx, match in enumerate(md_tables):
+            if md_table_matches:
+                for t_idx, match in enumerate(md_table_matches):
                     table_str = match.group(1)
+                    match_pos = match.start()
                     
                     section_heading = None
-                    text_before = raw_markdown[:match.start()]
+                    text_before = raw_markdown[:match_pos]
                     heading_matches = list(re.finditer(r'^#{1,6}\s+(.*)$', text_before, re.MULTILINE))
                     if heading_matches:
                         section_heading = heading_matches[-1].group(1).strip()
-                        
+
+                    page_markers = list(re.finditer(r'(?:<---*|<!--|---*|#+|\b)\s*Page\s+(\d+)\s*(?:---*>|-->|---*|\b)', text_before, re.IGNORECASE))
+                    detected_page = int(page_markers[-1].group(1)) if page_markers else 1
                     lines = [line.strip() for line in table_str.strip().split('\n')]
                     if len(lines) < 2:
                         continue
@@ -163,7 +165,7 @@ class PDFExtractor:
                         
                         if has_data:
                             extracted_tables.append({
-                                "page_number": 1, # Markdown loses page numbers, default to 1
+                                "page_number": detected_page,
                                 "table_index": t_idx,
                                 "row_index": row_idx,
                                 "filename": filename,
@@ -178,17 +180,20 @@ class PDFExtractor:
             
             # Fallback for tab-separated tables in markdown
             ts_table_pattern = re.compile(r'((?:^[^\n\t]*(?:\t[^\n\t]*)+(?:\n|$)){2,})', re.MULTILINE)
-            ts_tables = list(ts_table_pattern.finditer(raw_markdown))
-            if ts_tables:
-                for t_idx, match in enumerate(ts_tables):
+            ts_table_matches = list(ts_table_pattern.finditer(raw_markdown))
+            if ts_table_matches:
+                for t_idx, match in enumerate(ts_table_matches):
                     table_str = match.group(1)
+                    match_pos = match.start()
                     
                     section_heading = None
-                    text_before = raw_markdown[:match.start()]
+                    text_before = raw_markdown[:match_pos]
                     heading_matches = list(re.finditer(r'^#{1,6}\s+(.*)$', text_before, re.MULTILINE))
                     if heading_matches:
                         section_heading = heading_matches[-1].group(1).strip()
-                        
+
+                    page_markers = list(re.finditer(r'(?:<---*|<!--|---*|#+|\b)\s*Page\s+(\d+)\s*(?:---*>|-->|---*|\b)', text_before, re.IGNORECASE))
+                    detected_page = int(page_markers[-1].group(1)) if page_markers else 1
                     lines = [line.strip() for line in table_str.strip().split('\n')]
                     if len(lines) < 2:
                         continue
@@ -217,7 +222,7 @@ class PDFExtractor:
                         
                         if has_data:
                             extracted_tables.append({
-                                "page_number": 1,
+                                "page_number": detected_page,
                                 "table_index": t_idx,
                                 "row_index": row_idx,
                                 "filename": filename,

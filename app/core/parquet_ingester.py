@@ -26,7 +26,8 @@ class ParquetIngester:
             
         os.makedirs(output_dir, exist_ok=True)
         base_name = os.path.basename(file_path)
-        name_without_ext = dataset_name or os.path.splitext(base_name)[0]
+        raw_name = dataset_name or os.path.splitext(base_name)[0]
+        name_without_ext = os.path.splitext(raw_name)[0] if raw_name.lower().endswith(('.csv', '.xlsx', '.xls', '.parquet')) else raw_name
         
         # PRODUCTION FIX: Parquet File Lock Contention (Versioning)
         # We append a timestamp so active queries on older files are never violently locked out.
@@ -34,7 +35,7 @@ class ParquetIngester:
         versioned_filename = f"{name_without_ext}_{timestamp}.parquet"
         output_path = os.path.join(output_dir, versioned_filename)
         
-        logger.info(f"Starting memory-safe versioned ingestion for {file_path}")
+        logger.info(f"Starting memory-safe versioned ingestion for {file_path} (registry key={name_without_ext})")
         
         try:
             if file_path.lower().endswith('.csv'):
@@ -220,17 +221,58 @@ class ParquetIngester:
 
     @staticmethod
     def get_active_dataset(dataset_name: str, output_dir: str = "data/parquet") -> Optional[str]:
-        """Retrieves the filepath of the most recent version of a dataset."""
+        """
+        Retrieves the filepath of the most recent version of a dataset.
+        Includes single-source-of-truth registry lookup + resilient fuzzy fallback sweep.
+        """
+        if not dataset_name:
+            return None
+
         if not os.path.isabs(output_dir):
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             output_dir = os.path.join(base_dir, output_dir)
-            
+
+        clean_key = dataset_name.strip()
+        if clean_key.lower().endswith(('.csv', '.xlsx', '.xls', '.parquet')):
+            clean_key = os.path.splitext(clean_key)[0]
+
+        # 1. Primary Registry Lookup
         registry_path = os.path.join(output_dir, "active_datasets.json")
         if os.path.exists(registry_path):
-            with open(registry_path, 'r') as f:
-                registry = json.load(f)
-                if dataset_name in registry:
-                    return os.path.join(output_dir, registry[dataset_name])
+            try:
+                with open(registry_path, 'r') as f:
+                    registry = json.load(f)
+                    lookup_keys = [clean_key, dataset_name, dataset_name.strip()]
+                    for key in lookup_keys:
+                        if key in registry:
+                            candidate = os.path.join(output_dir, registry[key])
+                            if os.path.exists(candidate):
+                                return candidate
+                            logger.warning(f"[PARQUET_REGISTRY] Key '{key}' in registry points to missing file '{candidate}'. Running fallback sweep...")
+            except Exception as reg_err:
+                logger.warning(f"[PARQUET_REGISTRY] Failed to read registry at {registry_path}: {reg_err}")
+
+        # 2. Resilient Fuzzy / Glob Fallback Sweep
+        if os.path.exists(output_dir):
+            target_prefix = f"{clean_key.lower()}_"
+            target_exact = f"{clean_key.lower()}.parquet"
+
+            candidates = []
+            for fname in os.listdir(output_dir):
+                fn_lower = fname.lower()
+                if fn_lower == target_exact or (fn_lower.startswith(target_prefix) and fn_lower.endswith(".parquet")):
+                    full_p = os.path.join(output_dir, fname)
+                    if os.path.exists(full_p):
+                        mtime = os.path.getmtime(full_p)
+                        candidates.append((mtime, full_p))
+
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                selected_path = candidates[0][1]
+                logger.warning(f"[PARQUET_REGISTRY_FALLBACK] Resolved dataset '{dataset_name}' to newest parquet file '{selected_path}' via fuzzy fallback sweep.")
+                return selected_path
+
+        logger.error(f"[PARQUET_REGISTRY] Could not find any parquet file for dataset_name='{dataset_name}' in '{output_dir}'")
         return None
 
     @staticmethod

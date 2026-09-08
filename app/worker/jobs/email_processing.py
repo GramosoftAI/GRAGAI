@@ -4,7 +4,7 @@ import base64
 from typing import Dict, Any, List
 from bs4 import BeautifulSoup
 import re
-from app.modules.connectors.google.auth import GoogleAuthManager, execute_google_request
+from app.modules.connectors.google.auth import GoogleAuthManager, execute_google_request, GMAIL_SCOPES
 from app.core.database import AsyncSessionLocal
 from app.modules.connectors.google.models import GmailMessage
 
@@ -103,7 +103,7 @@ async def email_processing_job(ctx: Dict[Any, Any], kb_id: str, tenant_id: str, 
     
     auth_manager = GoogleAuthManager()
     if credentials:
-        auth_manager.load_credentials(credentials)
+        auth_manager.load_credentials(credentials, scopes=GMAIL_SCOPES)
         
     processed_messages = []
     

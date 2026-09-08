@@ -294,7 +294,7 @@ class DocumentTableRow(Base):
         nullable=False,
     )
 
-    page_number = Column(Integer, nullable=False, default=1)
+    page_number = Column(Integer, nullable=True)
     table_index = Column(Integer, nullable=False, default=0)
     row_index = Column(Integer, nullable=False, default=0)
     

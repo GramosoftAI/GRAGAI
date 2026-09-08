@@ -6,7 +6,7 @@ from collections.abc import Generator
 from typing import Any, Dict, List, Optional
 
 from app.core.connectors import CheckpointedConnector, SlimDocument, HierarchyNode, ConnectorCheckpoint, StageCompletion
-from .auth import GoogleAuthManager, execute_google_request
+from .auth import GoogleAuthManager, execute_google_request, GMAIL_SCOPES
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +22,9 @@ class GmailConnector(CheckpointedConnector[ConnectorCheckpoint]):
         self.query = query or ""
         self.max_results = max_results
         self.label_ids = label_ids
-        self.label_ids = label_ids
 
     def load_credentials(self, credentials: Dict[str, Any]) -> Dict[str, Any] | None:
-        return self.auth_manager.load_credentials(credentials)
+        return self.auth_manager.load_credentials(credentials, scopes=GMAIL_SCOPES)
 
     def build_dummy_checkpoint(self) -> ConnectorCheckpoint:
         return ConnectorCheckpoint(has_more=True, completion_stage="start")
