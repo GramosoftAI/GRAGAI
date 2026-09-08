@@ -426,7 +426,7 @@ function SlackIntegrationContent() {
                     display: "flex",
                     flexDirection: "column",
                     height: "100%",
-                    justify: "space-between",
+                    justifyContent: "space-between",
                   },
                 }}
               >
