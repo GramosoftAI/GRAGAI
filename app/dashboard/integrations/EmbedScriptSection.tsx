@@ -853,7 +853,7 @@ export default function EmbedScriptSection() {
           </Flex>
           <div className="flex items-center gap-4 bg-[var(--app-surface-muted)] p-3 rounded-2xl border border-[var(--app-border)] max-w-sm">
             <Text className="text-xs font-bold uppercase tracking-wider text-[var(--app-text-muted)] shrink-0">Select AI Agent:</Text>
-            <div className="flex-1" style={{ minWidth: "180px", maxWidth: "240px" }}>
+            <div className="flex-1" style={{ minWidth: "150px", maxWidth: "240px" }}>
               <AgentList
                 selectedId={agent?.id}
                 size="middle"

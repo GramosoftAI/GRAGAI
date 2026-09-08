@@ -678,7 +678,8 @@ function WidgetContent() {
   const searchParams = useSearchParams();
   const agentId = searchParams.get("agentId");
   const tenantId = searchParams.get("tenantId");
-  const deviceParam = searchParams.get("device") || (typeof window !== "undefined" && (window.innerWidth <= 640 || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) ? "mobile" : "lap");
+  const isMobileFallback = typeof window !== "undefined" && ((window.screen && window.screen.width <= 640) || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
+  const deviceParam = searchParams.get("device") || (isMobileFallback ? "mobile" : "lap");
   const chatType = searchParams.get("chatType") || "icon";
   const themeColor = searchParams.get("themeColor") || "#0fb5a1";
   const placeholder = searchParams.get("placeholder") || "Ask a question...";
