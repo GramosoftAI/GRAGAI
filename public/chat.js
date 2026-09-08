@@ -6,6 +6,9 @@
   const agentId = script.getAttribute("data-agent-id");
   const tenantId = script.getAttribute("data-tenant-id");
 
+  const isMobileDevice = () => typeof window !== "undefined" && ((window.screen && window.screen.width <= 640) || window.innerWidth <= 640 || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
+  const getDeviceType = () => (isMobileDevice() ? "mobile" : "lap");
+
   // Dynamically detect base URL of the hosting widget
   let baseUrl = "";
   try {
@@ -21,9 +24,9 @@
   }
 
   const targetAgentId = agentId || "24b3d80f-aed6-4b70-b5b2-48c64cb616c1";
-  const apiHost = "https://uat.gramosoft.tech";
+  const apiHost = baseUrl || window.location.origin || "https://uat.gramosoft.tech";
   const cleanApiHost = apiHost.endsWith("/api/v1") ? apiHost : apiHost + "/api/v1";
-  const configApiUrl = `${cleanApiHost}/embed/configs/${targetAgentId}${tenantId ? `?tenant_id=${tenantId}` : ""}`;
+  const configApiUrl = `${cleanApiHost}/embed/configs/${targetAgentId}?device=${getDeviceType()}${tenantId ? `&tenant_id=${tenantId}` : ""}`;
 
   fetch(configApiUrl)
     .then(res => res.json())
@@ -651,7 +654,7 @@
       iframe.setAttribute("allowtransparency", "true");
       iframe.setAttribute("allow", "clipboard-write");
       iframe.loading = "lazy";
-      iframe.src = `${baseUrl}/widget?agentId=${agentId}&tenantId=${tenantId}&chatType=${chatType}&themeColor=${encodeURIComponent(themeColor)}&headerLogo=${encodeURIComponent(resolvedHeaderLogo)}&headerAlign=${encodeURIComponent(headerAlign)}&headerName=${encodeURIComponent(headerName)}&headerSubtext=${encodeURIComponent(headerSubtext)}&agentLabel=${encodeURIComponent(agentLabel)}&themeTextColor=${encodeURIComponent(themeTextColor)}&botAvatar=${encodeURIComponent(resolvedBotAvatar)}&buttonIcon=${encodeURIComponent(resolvedButtonIcon)}&buttonAlign=${encodeURIComponent(buttonAlign)}&showButtonText=${showButtonText}&buttonText=${encodeURIComponent(buttonText)}&initialMessage=${encodeURIComponent(initialMessage)}&displaySources=${displaySources}&allowDownloads=${allowDownloads}&displayCopy=${displayCopy}&displayFeedback=${displayFeedback}&linkSafety=${linkSafety}&leadCollection=${leadCollection}&leadFields=${encodeURIComponent(leadFields)}&leadTiming=${leadTiming}&escalationEnabled=${escalationEnabled}&escalationLink=${encodeURIComponent(escalationLink)}&placeholder=${encodeURIComponent(placeholder)}`;
+      iframe.src = `${baseUrl}/widget?agentId=${agentId}&tenantId=${tenantId}&device=${getDeviceType()}&chatType=${chatType}&themeColor=${encodeURIComponent(themeColor)}&headerLogo=${encodeURIComponent(resolvedHeaderLogo)}&headerAlign=${encodeURIComponent(headerAlign)}&headerName=${encodeURIComponent(headerName)}&headerSubtext=${encodeURIComponent(headerSubtext)}&agentLabel=${encodeURIComponent(agentLabel)}&themeTextColor=${encodeURIComponent(themeTextColor)}&botAvatar=${encodeURIComponent(resolvedBotAvatar)}&buttonIcon=${encodeURIComponent(resolvedButtonIcon)}&buttonAlign=${encodeURIComponent(buttonAlign)}&showButtonText=${showButtonText}&buttonText=${encodeURIComponent(buttonText)}&initialMessage=${encodeURIComponent(initialMessage)}&displaySources=${displaySources}&allowDownloads=${allowDownloads}&displayCopy=${displayCopy}&displayFeedback=${displayFeedback}&linkSafety=${linkSafety}&leadCollection=${leadCollection}&leadFields=${encodeURIComponent(leadFields)}&leadTiming=${leadTiming}&escalationEnabled=${escalationEnabled}&escalationLink=${encodeURIComponent(escalationLink)}&placeholder=${encodeURIComponent(placeholder)}`;
 
       iframe.addEventListener("load", () => {
         iframe.setAttribute("data-loaded", "true");
