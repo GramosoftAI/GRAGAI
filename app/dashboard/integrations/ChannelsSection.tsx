@@ -291,7 +291,7 @@ export default function ChannelsSection() {
     if (currentType === "email") {
       localStorage.setItem("my_saved_kb_id", kbId);
       localStorage.setItem("files", "email");
-      signIn("google");
+      signIn("google-gmail");
     } else if (currentType === "outlook") {
       localStorage.setItem("my_saved_kb_id", kbId);
       localStorage.setItem("files", "outlook");
@@ -311,7 +311,7 @@ export default function ChannelsSection() {
       localStorage.setItem("files", currentType === "google" ? "google" : "share");
       
       if (currentType === "google") {
-        signIn("google");
+        signIn("google-drive");
       } else {
         signIn("azure-ad");
       }
@@ -332,7 +332,7 @@ export default function ChannelsSection() {
       } else {
         localStorage.setItem("my_saved_kb_id", kbId);
         localStorage.setItem("files", "email");
-        signIn("google");
+        signIn("google-gmail");
       }
     } else if (type === "outlook") {
       if (session?.refreshToken) {
@@ -349,7 +349,7 @@ export default function ChannelsSection() {
         localStorage.setItem("my_saved_kb_id", kbId);
         localStorage.setItem("files", type === "google" ? "google" : "share");
         if (type === "google") {
-          signIn("google");
+          signIn("google-drive");
         } else {
           signIn("azure-ad");
         }

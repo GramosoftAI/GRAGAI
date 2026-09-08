@@ -6,7 +6,7 @@
   const agentId = script.getAttribute("data-agent-id");
   const tenantId = script.getAttribute("data-tenant-id");
 
-  const isMobileDevice = () => window.innerWidth <= 640 || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  const isMobileDevice = () => typeof window !== "undefined" && ((window.screen && window.screen.width <= 640) || window.innerWidth <= 640 || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
   const getDeviceType = () => (isMobileDevice() ? "mobile" : "lap");
 
   // Dynamically detect base URL of the hosting widget
@@ -654,7 +654,7 @@
       iframe.setAttribute("allowtransparency", "true");
       iframe.setAttribute("allow", "clipboard-write");
       iframe.loading = "lazy";
-      iframe.src = `${baseUrl}/widget?agentId=${agentId}&tenantId=${tenantId}&chatType=${chatType}&themeColor=${encodeURIComponent(themeColor)}&headerLogo=${encodeURIComponent(resolvedHeaderLogo)}&headerAlign=${encodeURIComponent(headerAlign)}&headerName=${encodeURIComponent(headerName)}&headerSubtext=${encodeURIComponent(headerSubtext)}&agentLabel=${encodeURIComponent(agentLabel)}&themeTextColor=${encodeURIComponent(themeTextColor)}&botAvatar=${encodeURIComponent(resolvedBotAvatar)}&buttonIcon=${encodeURIComponent(resolvedButtonIcon)}&buttonAlign=${encodeURIComponent(buttonAlign)}&showButtonText=${showButtonText}&buttonText=${encodeURIComponent(buttonText)}&initialMessage=${encodeURIComponent(initialMessage)}&displaySources=${displaySources}&allowDownloads=${allowDownloads}&displayCopy=${displayCopy}&displayFeedback=${displayFeedback}&linkSafety=${linkSafety}&leadCollection=${leadCollection}&leadFields=${encodeURIComponent(leadFields)}&leadTiming=${leadTiming}&escalationEnabled=${escalationEnabled}&escalationLink=${encodeURIComponent(escalationLink)}&placeholder=${encodeURIComponent(placeholder)}`;
+      iframe.src = `${baseUrl}/widget?agentId=${agentId}&tenantId=${tenantId}&device=${getDeviceType()}&chatType=${chatType}&themeColor=${encodeURIComponent(themeColor)}&headerLogo=${encodeURIComponent(resolvedHeaderLogo)}&headerAlign=${encodeURIComponent(headerAlign)}&headerName=${encodeURIComponent(headerName)}&headerSubtext=${encodeURIComponent(headerSubtext)}&agentLabel=${encodeURIComponent(agentLabel)}&themeTextColor=${encodeURIComponent(themeTextColor)}&botAvatar=${encodeURIComponent(resolvedBotAvatar)}&buttonIcon=${encodeURIComponent(resolvedButtonIcon)}&buttonAlign=${encodeURIComponent(buttonAlign)}&showButtonText=${showButtonText}&buttonText=${encodeURIComponent(buttonText)}&initialMessage=${encodeURIComponent(initialMessage)}&displaySources=${displaySources}&allowDownloads=${allowDownloads}&displayCopy=${displayCopy}&displayFeedback=${displayFeedback}&linkSafety=${linkSafety}&leadCollection=${leadCollection}&leadFields=${encodeURIComponent(leadFields)}&leadTiming=${leadTiming}&escalationEnabled=${escalationEnabled}&escalationLink=${encodeURIComponent(escalationLink)}&placeholder=${encodeURIComponent(placeholder)}`;
 
       iframe.addEventListener("load", () => {
         iframe.setAttribute("data-loaded", "true");
