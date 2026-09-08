@@ -3502,9 +3502,10 @@ CRITICAL RULES:
             for r in formatted_rows:
                 if "row_data" in r and isinstance(r["row_data"], dict):
                     kb_val = r.get("kb_id")
-                    page_num = r.get("page_number", 1)
+                    page_num = r.get("page_number")
+                    page_num_sort = page_num if page_num is not None else 0
                     tbl_val = r.get("table_index", 0)
-                    key = (str(kb_val) if kb_val else "unknown_kb", page_num, tbl_val)
+                    key = (str(kb_val) if kb_val else "unknown_kb", page_num_sort, tbl_val)
                     if key not in tables_map:
                         tables_map[key] = []
                     tables_map[key].append(r["row_data"])
@@ -3515,7 +3516,7 @@ CRITICAL RULES:
                     tables_map[key].append(r)
             
             # Sort keys to preserve natural document order (page_number first, then table_index)
-            sorted_keys = sorted(tables_map.keys(), key=lambda x: (x[0], x[1], x[2]))
+            sorted_keys = sorted(tables_map.keys(), key=lambda x: (x[0], x[1] or 0, x[2]))
             
             # Format each group as a separate markdown table
             markdown_tables = []

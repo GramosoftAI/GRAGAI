@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, Any, List
-from app.modules.connectors.google.auth import GoogleAuthManager, execute_google_request
+from app.modules.connectors.google.auth import GoogleAuthManager, execute_google_request, GMAIL_SCOPES
 from app.core.database import AsyncSessionLocal
 from app.modules.connectors.google.models import GmailSyncState
 from sqlalchemy import select
@@ -13,7 +13,7 @@ async def gmail_sync_job(ctx: Dict[Any, Any], kb_id: str, tenant_id: str, user_e
     
     auth_manager = GoogleAuthManager()
     if credentials:
-        auth_manager.load_credentials(credentials)
+        auth_manager.load_credentials(credentials, scopes=GMAIL_SCOPES)
     
     
     async with auth_manager.get_client(user_email) as client:

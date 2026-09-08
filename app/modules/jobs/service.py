@@ -27,9 +27,33 @@ class JobService:
     async def get_job(self, job_id: str) -> Dict[str, Any]:
         try:
             job = await self.repo.get_job(job_id)
-            if not job:
-                return format_error("Job not found", meta={"status_code": 404})
-            return format_success({"job": JobResponse.model_validate(job)})
+            if job:
+                return format_success({"job": JobResponse.model_validate(job)})
+            
+            # Check ARQ Redis pool for background task status
+            try:
+                from arq.jobs import Job, JobStatus
+                from app.worker.queue import get_redis_pool
+                redis_pool = await get_redis_pool()
+                arq_job = Job(job_id, redis_pool)
+                status = await arq_job.status()
+                info = await arq_job.info()
+                
+                if status != JobStatus.not_found:
+                    result = None
+                    if status == JobStatus.complete:
+                        result = await arq_job.result()
+                    return format_success({
+                        "job_id": job_id,
+                        "status": status.value,
+                        "function": info.function if info else None,
+                        "enqueue_time": info.enqueue_time.isoformat() if info and info.enqueue_time else None,
+                        "result": result
+                    })
+            except Exception as arq_err:
+                logger.warning(f"Failed to check ARQ Redis job status: {arq_err}")
+
+            return format_error("Job not found", meta={"status_code": 404})
         except Exception as e:
             logger.error(f"Failed to fetch job {job_id}: {e}")
             return format_error(f"Failed to fetch job: {str(e)}")

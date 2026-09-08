@@ -13,7 +13,7 @@ import logging
 
 import uuid
 
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
 from .models import DatabaseConnection
 
 from .service import KnowledgeBaseService
@@ -23,6 +23,7 @@ from . import schemas
 from ...core.database import AsyncSessionLocal
 
 from ...utils.formatters import format_error, format_success
+from app.modules.connectors.google.auth import GMAIL_OAUTH_SCOPES, DRIVE_OAUTH_SCOPES
 
 
 
@@ -1612,9 +1613,9 @@ async def sync_google_drive_to_graph(request: Request, kb_id: str, sync_req: Opt
 
 
 
-            connection_params = db_conn.connection_params
+            connection_params = db_conn.connection_params or {}
 
-            credentials = connection_params.get("credentials", {})
+            credentials = connection_params.get("credentials") or connection_params
 
             folder_urls = connection_params.get("folder_urls", [])
 
@@ -1624,33 +1625,50 @@ async def sync_google_drive_to_graph(request: Request, kb_id: str, sync_req: Opt
 
             file_ids = sync_req.file_ids if sync_req else None
             folder_ids = sync_req.folder_ids if sync_req else None
-            user_email = sync_req.user_email if sync_req else None
-            result = await service.sync_google_drive_source(
-                kb_id=kb_id,
-                credentials_dict=credentials,
-                folder_urls=folder_urls,
-                file_ids=file_ids,
-                folder_ids=folder_ids,
-                user_email=user_email
-            )
+            user_email = (sync_req.user_email or sync_req.email) if sync_req else (credentials.get("primary_admin_email") or connection_params.get("primary_admin_email"))
 
+            try:
+                from app.worker.queue import get_redis_pool
+                redis_pool = await get_redis_pool()
+                job = await redis_pool.enqueue_job(
+                    "google_drive_sync_job",
+                    kb_id=kb_id,
+                    tenant_id=tenant_id,
+                    credentials=credentials,
+                    folder_urls=folder_urls,
+                    file_ids=file_ids,
+                    folder_ids=folder_ids,
+                    user_email=user_email
+                )
+                db_conn.last_synced_at = datetime.now()
+                await db.commit()
+                return format_success(
+                    {
+                        "job_id": job.job_id,
+                        "kb_id": kb_id,
+                        "status": "queued",
+                        "files_queued": len(file_ids) if file_ids else 0,
+                        "folders_queued": len(folder_ids) if folder_ids else 0,
+                    },
+                    meta={"message": "Google Drive sync queued to Redis background worker successfully"}
+                )
+            except Exception as queue_err:
+                logger.warning(f"Redis queue unavailable ({queue_err}), falling back to inline synchronous sync.")
+                result = await service.sync_google_drive_source(
+                    kb_id=kb_id,
+                    credentials_dict=credentials,
+                    folder_urls=folder_urls,
+                    file_ids=file_ids,
+                    folder_ids=folder_ids,
+                    user_email=user_email
+                )
 
+                if not result.get("success"):
+                    raise HTTPException(status_code=400, detail=result.get("error"))
 
-            if not result.get("success"):
-
-                raise HTTPException(status_code=400, detail=result.get("error"))
-
-
-
-            # Update sync status timestamp
-
-            db_conn.last_synced_at = datetime.now()
-
-            await db.commit()
-
-
-
-            return result
+                db_conn.last_synced_at = datetime.now()
+                await db.commit()
+                return result
 
     except HTTPException:
 
@@ -1875,6 +1893,8 @@ async def register_gmail(
 async def sync_gmail_to_graph(request: Request, kb_id: str, sync_req: schemas.GmailSyncRequest) -> dict:
     try:
         tenant_id, _ = get_tenant_and_user(request)
+        if sync_req.email and not sync_req.user_email:
+            sync_req.user_email = sync_req.email
         async with AsyncSessionLocal() as db:
             from sqlalchemy import select
             from .models import DatabaseConnection
@@ -2118,31 +2138,35 @@ async def sharepoint_callback(code: str, state: str):
     )
 
 
-@router.get("/{kb_id}/gmail/login")
-async def gmail_login(kb_id: str):
-    import os, urllib.parse
+# ============================================================================
+# GOOGLE OAUTH ROUTES (DRIVE & GMAIL - SEPARATE LEAST-PRIVILEGE FLOWS)
+# ============================================================================
+
+@router.get("/{kb_id}/google-drive/login")
+async def google_drive_login(kb_id: str):
     client_id = os.getenv("GOOGLE_CLIENT_ID")
-    redirect_uri = "http://localhost:4915/api/v1/knowledge-bases/gmail/callback"
+    redirect_uri = os.getenv("GOOGLE_DRIVE_REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI") or "http://localhost:4915/api/v1/knowledge-bases/google-drive/callback"
     state = kb_id
+    scope_param = urllib.parse.quote(" ".join(DRIVE_OAUTH_SCOPES))
     auth_url = (
         f"https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={client_id}"
         f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
         f"&response_type=code"
-        f"&scope=https://www.googleapis.com/auth/gmail.readonly%20https://www.googleapis.com/auth/userinfo.email"
+        f"&scope={scope_param}"
         f"&access_type=offline"
         f"&prompt=consent"
         f"&state={state}"
     )
     return RedirectResponse(auth_url)
 
-@router.get("/gmail/callback")
-async def gmail_callback(code: str, state: str):
-    import os, httpx, uuid
+
+@router.get("/google-drive/callback")
+async def google_drive_callback(code: str, state: str):
     kb_id = state
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    redirect_uri = "http://localhost:4915/api/v1/knowledge-bases/gmail/callback"
+    redirect_uri = os.getenv("GOOGLE_DRIVE_REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI") or "http://localhost:4915/api/v1/knowledge-bases/google-drive/callback"
     token_url = "https://oauth2.googleapis.com/token"
     data = {
         "client_id": client_id,
@@ -2158,27 +2182,164 @@ async def gmail_callback(code: str, state: str):
             raise HTTPException(status_code=400, detail=token_data.get("error_description"))
         access_token = token_data.get("access_token")
         refresh_token = token_data.get("refresh_token")
+
+    # Fetch user info (email)
+    user_email = None
+    try:
+        async with httpx.AsyncClient() as client:
+            u_resp = await client.get(
+                "https://www.googleapis.com/oauth2/v1/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+            if u_resp.status_code == 200:
+                user_email = u_resp.json().get("email")
+    except Exception as e:
+        logger.warning(f"Failed to fetch Google Drive userinfo: {e}")
+
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select
+        from app.modules.knowledge_bases.models import KnowledgeBase
         query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
         res = await db.execute(query)
         db_conn = res.scalar_one_or_none()
-        if not db_conn:
-            db_conn = DatabaseConnection(
-                tenant_id=uuid.UUID("506a8be1-fa85-4441-99c7-5e3c1408e15e"),
-                kb_id=uuid.UUID(kb_id),
-                db_type="gmail",
-                connection_params={}
-            )
-            db.add(db_conn)
-        db_conn.connection_params = {
+
+        kb_res = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == uuid.UUID(kb_id)))
+        kb_obj = kb_res.scalar_one_or_none()
+        tenant_id = kb_obj.tenant_id if kb_obj else uuid.UUID("506a8be1-fa85-4441-99c7-5e3c1408e15e")
+
+        credentials_dict = {
             "access_token": access_token,
             "refresh_token": refresh_token,
             "client_id": client_id,
-            "client_secret": client_secret
+            "client_secret": client_secret,
+            "primary_admin_email": user_email,
         }
+        existing_folders = db_conn.connection_params.get("folder_urls", []) if (db_conn and db_conn.connection_params) else []
+        connection_params = {
+            "credentials": credentials_dict,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "primary_admin_email": user_email,
+            "folder_urls": existing_folders,
+        }
+
+        if not db_conn:
+            db_conn = DatabaseConnection(
+                tenant_id=tenant_id,
+                kb_id=uuid.UUID(kb_id),
+                db_type="google_drive",
+                connection_params=connection_params,
+            )
+            db.add(db_conn)
+        else:
+            db_conn.db_type = "google_drive"
+            db_conn.connection_params = connection_params
         await db.commit()
-    return {"message": "Successfully connected Gmail! You can now close this window."}
+
+    return HTMLResponse(
+        content="<script>window.close();</script><h2>Successfully connected Google Drive! You can close this window.</h2>"
+    )
+
+
+@router.get("/{kb_id}/gmail/login")
+async def gmail_login(kb_id: str):
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    redirect_uri = os.getenv("GMAIL_REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI") or "http://localhost:4915/api/v1/knowledge-bases/gmail/callback"
+    state = kb_id
+    scope_param = urllib.parse.quote(" ".join(GMAIL_OAUTH_SCOPES))
+    auth_url = (
+        f"https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={client_id}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        f"&response_type=code"
+        f"&scope={scope_param}"
+        f"&access_type=offline"
+        f"&prompt=consent"
+        f"&state={state}"
+    )
+    return RedirectResponse(auth_url)
+
+
+@router.get("/gmail/callback")
+async def gmail_callback(code: str, state: str):
+    kb_id = state
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    redirect_uri = os.getenv("GMAIL_REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI") or "http://localhost:4915/api/v1/knowledge-bases/gmail/callback"
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(token_url, data=data)
+        token_data = resp.json()
+        if "error" in token_data:
+            raise HTTPException(status_code=400, detail=token_data.get("error_description"))
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+
+    # Fetch user info (email)
+    user_email = None
+    try:
+        async with httpx.AsyncClient() as client:
+            u_resp = await client.get(
+                "https://www.googleapis.com/oauth2/v1/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+            if u_resp.status_code == 200:
+                user_email = u_resp.json().get("email")
+    except Exception as e:
+        logger.warning(f"Failed to fetch Gmail userinfo: {e}")
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select
+        from app.modules.knowledge_bases.models import KnowledgeBase
+        query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
+        res = await db.execute(query)
+        db_conn = res.scalar_one_or_none()
+
+        kb_res = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == uuid.UUID(kb_id)))
+        kb_obj = kb_res.scalar_one_or_none()
+        tenant_id = kb_obj.tenant_id if kb_obj else uuid.UUID("506a8be1-fa85-4441-99c7-5e3c1408e15e")
+
+        credentials_dict = {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "primary_admin_email": user_email,
+        }
+        connection_params = {
+            "credentials": credentials_dict,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "primary_admin_email": user_email,
+        }
+
+        if not db_conn:
+            db_conn = DatabaseConnection(
+                tenant_id=tenant_id,
+                kb_id=uuid.UUID(kb_id),
+                db_type="gmail",
+                connection_params=connection_params,
+            )
+            db.add(db_conn)
+        else:
+            db_conn.db_type = "gmail"
+            db_conn.connection_params = connection_params
+        await db.commit()
+
+    return HTMLResponse(
+        content="<script>window.close();</script><h2>Successfully connected Gmail! You can close this window.</h2>"
+    )
 
 
 @router.get("/{kb_id}/outlook/login")
@@ -2247,67 +2408,6 @@ async def outlook_callback(code: str, state: str):
     return {"message": "Successfully connected Outlook! You can now close this window."}
 
 
-@router.post("/{kb_id}/gmail/register", status_code=200)
-async def register_gmail(request: Request, kb_id: str, payload: schemas.GmailRegister):
-    try:
-        tenant_id, _ = get_tenant_and_user(request)
-        async with AsyncSessionLocal() as db:
-            from sqlalchemy import select
-            import uuid
-            query = select(DatabaseConnection).where(DatabaseConnection.kb_id == uuid.UUID(kb_id))
-            res = await db.execute(query)
-            db_conn = res.scalar_one_or_none()
-            if not db_conn:
-                db_conn = DatabaseConnection(
-                    tenant_id=uuid.UUID(tenant_id),
-                    kb_id=uuid.UUID(kb_id),
-                    db_type="gmail",
-                    connection_params={"credentials": payload.credentials}
-                )
-                db.add(db_conn)
-            else:
-                db_conn.db_type = "gmail"
-                db_conn.connection_params = {"credentials": payload.credentials}
-            await db.commit()
-            return {"success": True, "message": "Gmail credentials registered."}
-    except Exception as e:
-        logger.error(f"Error in register_gmail: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/{kb_id}/gmail/labels", status_code=200)
-async def list_gmail_labels(request: Request, kb_id: str):
-    try:
-        tenant_id, _ = get_tenant_and_user(request)
-        from app.utils.formatters import format_success
-        return format_success({"items": [
-            {"id": "INBOX", "name": "Inbox", "is_folder": True},
-            {"id": "SENT", "name": "Sent", "is_folder": True},
-            {"id": "STARRED", "name": "Starred", "is_folder": True}
-        ]})
-    except Exception as e:
-        logger.error(f"Error in list_gmail_labels: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/{kb_id}/gmail/sync", status_code=200)
-async def sync_gmail_api(request: Request, kb_id: str, payload: schemas.GmailSyncRequest):
-    try:
-        tenant_id, _ = get_tenant_and_user(request)
-        
-        actual_email = payload.user_email or payload.email
-        if not actual_email:
-            return {"success": False, "message": "User Email is required"}
-            
-        payload.user_email = actual_email
-
-        async with AsyncSessionLocal() as db:
-            from app.modules.knowledge_bases.service import KnowledgeBaseService
-            service = KnowledgeBaseService(db, tenant_id)
-            result = await service.sync_gmail_source(kb_id, payload.model_dump())
-            return result
-    except Exception as e:
-        logger.error(f"Error in sync_gmail: {e}")
-        from app.utils.formatters import format_error
-        return format_error(f"Internal server error: {e}")
 
 
 @router.post("/{kb_id}/outlook/register", status_code=200)

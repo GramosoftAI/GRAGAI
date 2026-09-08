@@ -10,12 +10,25 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 logger = logging.getLogger(__name__)
 
-# Standard scopes required for Google Drive indexing & user discovery
-SCOPES = [
+# Scopes definition
+USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
+
+# Dedicated, least-privilege scopes for Google Drive
+DRIVE_SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/admin.directory.user.readonly",
+]
+
+# Dedicated, least-privilege scopes for Gmail
+GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
 ]
+
+# OAuth authorization scopes (including email identity resolution)
+DRIVE_OAUTH_SCOPES = DRIVE_SCOPES + [USERINFO_EMAIL_SCOPE]
+GMAIL_OAUTH_SCOPES = GMAIL_SCOPES + [USERINFO_EMAIL_SCOPE]
+
+# Backward compatibility alias
+SCOPES = DRIVE_SCOPES
 
 
 class GoogleAPIError(Exception):
@@ -43,7 +56,7 @@ class GoogleAuthManager:
         self.is_service_account: bool = False
         self.primary_admin_email: Optional[str] = None
 
-    def load_credentials(self, credentials: Dict[str, Any]) -> Dict[str, Any]:
+    def load_credentials(self, credentials: Dict[str, Any], scopes: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Parse credentials dict. Supports:
         1. Service Account JSON structure (requires 'type': 'service_account')
@@ -51,24 +64,25 @@ class GoogleAuthManager:
         """
         self.creds_dict = credentials.copy()
         self.primary_admin_email = credentials.get("primary_admin_email")
+        effective_scopes = scopes or DRIVE_SCOPES
 
         # Determine authentication mode
         if credentials.get("type") == "service_account":
             self.is_service_account = True
-            logger.info("Initializing Google Service Account credentials")
+            logger.info(f"Initializing Google Service Account credentials with scopes: {effective_scopes}")
             self.creds = service_account.Credentials.from_service_account_info(
-                credentials, scopes=SCOPES
+                credentials, scopes=effective_scopes
             )
         else:
             self.is_service_account = False
-            logger.info("Initializing Google User OAuth2 credentials")
+            logger.info(f"Initializing Google User OAuth2 credentials with scopes: {effective_scopes}")
             self.creds = google_credentials.Credentials(
                 token=credentials.get("access_token"),
                 refresh_token=credentials.get("refresh_token"),
                 client_id=credentials.get("client_id"),
                 client_secret=credentials.get("client_secret"),
                 token_uri="https://oauth2.googleapis.com/token",
-                scopes=None,
+                scopes=effective_scopes,
             )
 
         return self.creds_dict

@@ -963,6 +963,7 @@ class KnowledgeBaseService:
             structured_entities_to_save = []
             structured_sections_to_save = []
             for i, result in enumerate(structured_results):
+                chunk_page = chunk_metadata_list[i].get("page_number") if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else None
                 for ident in result.get("identifiers", []):
                     structured_entities_to_save.append(
                         DocumentEntity(
@@ -973,7 +974,7 @@ class KnowledgeBaseService:
                             start_offset=ident.get("start_offset"),
                             end_offset=ident.get("end_offset"),
                             source_text=ident.get("source_text"),
-                            page_number=1, # Assuming 1 for simplicity here, can be enhanced
+                            page_number=ident.get("page_number") or chunk_page,
                             confidence=ident.get("confidence", 1.0),
                             entity_status="REVIEW" if float(ident.get("confidence", 1.0)) < 0.80 else "VERIFIED"
                         )
@@ -985,7 +986,7 @@ class KnowledgeBaseService:
                             document_id=uuid.UUID(kb_id),
                             section_name=sec["name"],
                             section_json=sec["content"],
-                            page_number=1
+                            page_number=sec.get("page_number") or chunk_page
                         )
                     )
             
@@ -2622,7 +2623,7 @@ class KnowledgeBaseService:
             if not db_conn:
                 return format_error("No registered Google Drive connection found for this KB", meta={"status_code": 404})
 
-            credentials = db_conn.connection_params.get("credentials", {})
+            credentials = db_conn.connection_params.get("credentials") or db_conn.connection_params
             
             from app.modules.connectors.google.crawler import GoogleDriveConnector
             connector = GoogleDriveConnector()
@@ -2691,7 +2692,7 @@ class KnowledgeBaseService:
             connector.load_credentials(credentials_dict)
             
             # Update Knowledge Base source to reflect Google Drive connection
-            effective_email = user_email or connector.auth_manager.primary_admin_email or "unknown_email"
+            effective_email = user_email or credentials_dict.get("primary_admin_email") or connector.auth_manager.primary_admin_email or "unknown_email"
             pg_kb = await self.repository.get_by_id(kb_id)
             if pg_kb:
                 pg_kb.source = f"google_drive({effective_email})"
@@ -2724,6 +2725,8 @@ class KnowledgeBaseService:
             files_synced = 0
 
             folders_synced = 0
+
+            partial_failures = []
 
             
 
@@ -2893,26 +2896,105 @@ class KnowledgeBaseService:
                     # 1. CSV / Excel
 
                     if mime_type == "text/csv" or "spreadsheet" in mime_type or filename.endswith((".csv", ".xlsx", ".xls")):
+                        logger.info(f"Piping Google Drive tabular file '{filename}' to Parquet/DuckDB ingestion service")
+                        import tempfile, os, hashlib
+                        from app.core.parquet_ingester import ParquetIngester
 
-                        logger.info(f"Piping {filename} to tabular excel/csv ingestion service")
+                        ext = os.path.splitext(filename)[1] or (".csv" if "csv" in mime_type else ".xlsx")
+                        temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
+                        try:
+                            with os.fdopen(temp_fd, 'wb') as f:
+                                f.write(file_bytes)
 
-                        ingest_res = await self.ingest_excel_or_csv(
+                            dataset_name = os.path.splitext(filename)[0]
+                            file_hash = hashlib.sha256(file_bytes).hexdigest()
+                            output_path, categorical_registry, schema_registry = ParquetIngester.ingest_to_parquet(
+                                temp_path, dataset_name=dataset_name
+                            )
 
-                            kb_id=kb_id,
+                            from sqlalchemy import update
+                            from app.modules.knowledge_bases.models import KnowledgeBase
+                            await self.db.execute(
+                                update(KnowledgeBase)
+                                .where(KnowledgeBase.id == uuid.UUID(kb_id))
+                                .values(
+                                    file_hash=file_hash,
+                                    parsed_path=dataset_name,
+                                    description="excel_parquet",
+                                    categorical_values=categorical_registry,
+                                    dataset_schema=schema_registry
+                                )
+                            )
+                            await self.db.commit()
 
-                            file_bytes=file_bytes,
+                            # Update Neo4j KnowledgeBase node
+                            try:
+                                from app.core.neo4j_retry import retry_neo4j_operation
+                                await retry_neo4j_operation(
+                                    lambda: self.neo4j_repo.execute_write(
+                                        """
+                                        MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                                        SET kb.parsed_path = $parsed_path, kb.document_category = 'dataset'
+                                        """,
+                                        {
+                                            "kb_id": kb_id,
+                                            "tenant_id": str(self.tenant_id),
+                                            "parsed_path": dataset_name
+                                        }
+                                    )
+                                )
+                            except Exception as neo_err:
+                                logger.warning(f"Failed to update Neo4j KB parsed_path: {neo_err}")
 
-                            filename=filename,
+                            # THRESHOLD-BASED DUAL INGESTION: Row-by-Row text chunks + Vector Embeddings
+                            try:
+                                import polars as pl
+                                df_parquet = pl.read_parquet(output_path)
+                                row_count = df_parquet.height
+                                logger.info(f"Threshold Dual-Ingestion: Dataset '{dataset_name}' has {row_count} rows.")
+                                
+                                chunks_text_list = []
+                                if row_count > 0:
+                                    if row_count <= 3000:
+                                        for idx, row_dict in enumerate(df_parquet.to_dicts()):
+                                            fields = [f"{c}: {v}" for c, v in row_dict.items() if v is not None and str(v).strip() != ""]
+                                            if fields:
+                                                chunks_text_list.append(f"[Dataset: {dataset_name} | Row {idx + 1}]\n" + " | ".join(fields))
+                                    else:
+                                        batch_size = 20
+                                        dicts = df_parquet.to_dicts()
+                                        for b_i in range(0, row_count, batch_size):
+                                            batch = dicts[b_i : b_i + batch_size]
+                                            batch_lines = []
+                                            for r_offset, r_data in enumerate(batch):
+                                                fields = [f"{c}: {v}" for c, v in r_data.items() if v is not None and str(v).strip() != ""]
+                                                if fields:
+                                                    batch_lines.append(f"Row {b_i + r_offset + 1}: " + " | ".join(fields))
+                                            if batch_lines:
+                                                chunks_text_list.append(f"[Dataset: {dataset_name} | Rows {b_i + 1} to {min(b_i + batch_size, row_count)}]\n" + "\n".join(batch_lines))
 
-                            mime_type=mime_type,
-
-                            source="google_drive"
-
-                        )
-
-                        if ingest_res.get("success"):
+                                if chunks_text_list:
+                                    combined_text = "\n\n---\n\n".join(chunks_text_list)
+                                    await self.ingest_document(
+                                        kb_id=kb_id,
+                                        document_text=combined_text,
+                                        source=filename,
+                                        parsed_path=output_path
+                                    )
+                                    logger.info(f"Dual-Ingestion successfully generated {len(chunks_text_list)} text chunks for KB {kb_id}.")
+                            except Exception as dual_err:
+                                logger.warning(f"[DUAL_INGESTION_FAILED] Dual-Ingestion text chunking failed for {filename}: {dual_err}")
+                                partial_failures.append({
+                                    "file": filename,
+                                    "stage": "dual_ingestion",
+                                    "status": "sql_only",
+                                    "error": str(dual_err)
+                                })
 
                             files_synced += 1
+                        finally:
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
 
                     
 
@@ -3062,11 +3144,17 @@ class KnowledgeBaseService:
 
                     "folders_synced": folders_synced,
 
+                    "partial_failures": partial_failures,
+
                     "sync_duration_seconds": time.time() - sync_start_time
 
                 },
 
-                meta={"message": "Google Drive synchronized with Knowledge Graph successfully"}
+                meta={
+                    "message": "Google Drive synchronized with Knowledge Graph successfully"
+                    if not partial_failures
+                    else f"Google Drive synchronized with {len(partial_failures)} partial failure(s)"
+                }
 
             )
 
@@ -3782,7 +3870,7 @@ class KnowledgeBaseService:
                     DocumentTableRow(
                         tenant_id=self.tenant_id,
                         kb_id=uuid.UUID(kb_id),
-                        page_number=row.get("page_number", 1),
+                        page_number=row.get("page_number"),
                         table_index=row.get("table_index", 0),
                         row_index=row.get("row_index", 0),
                         part_number=str(part_number)[:255] if part_number else None,
@@ -3809,13 +3897,16 @@ class KnowledgeBaseService:
                 
                 if chunk_parts:
                     chunk_texts.append("\n".join(chunk_parts))
-                    chunk_metadatas.append({
+                    chunk_meta = {
                         "chunk_type": "table_row",
-                        "page_number": row.get("page_number", 1),
+                        "page_number": row.get("page_number"),
                         "table_index": row.get("table_index", 0),
                         "row_index": row.get("row_index", 0),
                         "row_data": row_data
-                    })
+                    }
+                    if "sheet_name" in row:
+                        chunk_meta["sheet_name"] = row["sheet_name"]
+                    chunk_metadatas.append(chunk_meta)
                 
             self.db.add_all(db_rows)
             

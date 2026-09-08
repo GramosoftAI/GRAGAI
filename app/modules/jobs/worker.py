@@ -435,6 +435,45 @@ async def run_excel_ingestion_job(
                 logger.warning(f"Failed to update Neo4j KB description for parquet: {neo_err}")
 
             await db.commit()
+
+            # THRESHOLD-BASED DUAL INGESTION: Row-by-Row text chunks + Vector Embeddings
+            try:
+                import polars as pl
+                df_parquet = pl.read_parquet(output_path)
+                row_count = df_parquet.height
+                logger.info(f"Threshold Dual-Ingestion check for job {job_id}: Dataset '{dataset_name}' has {row_count} rows.")
+                
+                chunks_text_list = []
+                if row_count > 0:
+                    if row_count <= 3000:
+                        for idx, row_dict in enumerate(df_parquet.to_dicts()):
+                            fields = [f"{c}: {v}" for c, v in row_dict.items() if v is not None and str(v).strip() != ""]
+                            if fields:
+                                chunks_text_list.append(f"[Dataset: {dataset_name} | Row {idx + 1}]\n" + " | ".join(fields))
+                    else:
+                        batch_size = 20
+                        dicts = df_parquet.to_dicts()
+                        for b_i in range(0, row_count, batch_size):
+                            batch = dicts[b_i : b_i + batch_size]
+                            batch_lines = []
+                            for r_offset, r_data in enumerate(batch):
+                                fields = [f"{c}: {v}" for c, v in r_data.items() if v is not None and str(v).strip() != ""]
+                                if fields:
+                                    batch_lines.append(f"Row {b_i + r_offset + 1}: " + " | ".join(fields))
+                            if batch_lines:
+                                chunks_text_list.append(f"[Dataset: {dataset_name} | Rows {b_i + 1} to {min(b_i + batch_size, row_count)}]\n" + "\n".join(batch_lines))
+
+                if chunks_text_list:
+                    combined_text = "\n\n---\n\n".join(chunks_text_list)
+                    await kb_service.ingest_document(
+                        kb_id=kb_id,
+                        document_text=combined_text,
+                        source=filename,
+                        parsed_path=output_path
+                    )
+                    logger.info(f"Dual-Ingestion successfully generated {len(chunks_text_list)} text chunks for job {job_id}.")
+            except Exception as dual_err:
+                logger.warning(f"Dual-Ingestion text chunking failed for job {job_id}: {dual_err}")
                 
             # Trigger graph cleanup asynchronously in the background
             async def run_cleanup_async(tenant_id_str: str, kb_id_str: str):

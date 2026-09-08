@@ -885,7 +885,65 @@ class RAGService:
             has_valid_triplets = context and context.triplets
             has_triplet_context = context and context.triplet_context
             if not has_valid_chunks and not has_valid_triplets and not has_triplet_context and not chat_history and not hybrid_merge_context:
-                logger.info("Empty context retrieved for stream, returning fallback message.")
+                logger.info("Empty vector context retrieved for stream. Checking for active excel_parquet KBs as fallback...")
+                
+                # ROUTER FALLBACK CHAIN: Vector RAG -> SQL Analytics
+                from app.core.parquet_ingester import ParquetIngester
+                from app.modules.rag.pandas_engine import PandasQueryEngine
+                
+                excel_kbs_found = []
+                for kid in (kb_ids if isinstance(kb_ids, list) else [kb_ids]):
+                    try:
+                        k_obj = await self.kb_repo.get_by_id(kid)
+                        if k_obj and getattr(k_obj, 'description', '') == 'excel_parquet':
+                            excel_kbs_found.append(k_obj)
+                    except Exception as err:
+                        logger.warning(f"Error checking KB {kid} for SQL fallback: {err}")
+
+                if excel_kbs_found:
+                    active_paths = []
+                    for ek in excel_kbs_found:
+                        dname = getattr(ek, "parsed_path", None) or getattr(ek, "name", None)
+                        if dname:
+                            p = ParquetIngester.get_active_dataset(dname)
+                            if p:
+                                active_paths.append((ek.name or dname, p))
+
+                    if active_paths:
+                        fallback_results = []
+                        all_paths = [ap[1] for ap in active_paths]
+                        for kb_label, ppath in active_paths:
+                            try:
+                                engine = PandasQueryEngine(ppath, all_dataset_paths=all_paths)
+                                sql_res = await engine.execute_query(query, ppath)
+                                res_str = str(sql_res) if sql_res else ""
+                                unmatched_sigs = ["not present in dataset", "no records matched", "error", "0 rows", "empty dataframe"]
+                                if res_str and not any(unm in res_str.lower() for unm in unmatched_sigs):
+                                    fallback_results.append(f"**Data Result from {kb_label}:**\n{res_str}")
+                            except Exception as ex:
+                                logger.warning(f"Router SQL fallback execution failed for {ppath}: {ex}")
+
+                        if fallback_results:
+                            final_fallback_msg = "\n\n".join(fallback_results)
+                            logger.info(f"Router SQL Fallback successfully found results! Yielding SQL answer for '{query}'.")
+                            yield final_fallback_msg
+                            latency_ms = (time.time() - trace_start_time) * 1000
+                            emb_tok = getattr(context, "query_embedding_tokens", 0) if context else max(1, len(query) // 4)
+                            await self._log_query_analytics_safely(
+                                query=query,
+                                user_id=user_id,
+                                session_id=session_id,
+                                status=ResponseStatus.SUCCESS,
+                                confidence=1.0,
+                                latency_ms=latency_ms,
+                                model_name=self.llm_client.model_answer,
+                                llm_input_tokens=0,
+                                llm_output_tokens=0,
+                                embedding_tokens=emb_tok,
+                            )
+                            return
+
+                logger.info("No active spreadsheet data matched query in router fallback chain. Returning default refusal message.")
                 yield "I'm sorry, but the requested information is not available within my current knowledge base. Please try a related query or provide additional context."
                 latency_ms = (time.time() - trace_start_time) * 1000
                 emb_tok = getattr(context, "query_embedding_tokens", 0) if context else max(1, len(query) // 4)
