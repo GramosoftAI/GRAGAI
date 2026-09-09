@@ -112,11 +112,12 @@ export default function EmbedScriptSection() {
   const [getAgents] = useAxios<AgentListResponse>({ endpoint: "GETAGENTLIST", hideErrorMsg: true });
   const [saveEmbedConfig, saveEmbedConfigLoading] = useAxios({ endpoint: "SAVE_EMBED_CONFIG", hideErrorMsg: true });
   const [getEmbedConfig] = useAxios({ endpoint: "GET_EMBED_CONFIG", hideErrorMsg: true });
+  const [savedConfigVersion, setSavedConfigVersion] = useState<number | null>(null);
 
   // 1. Core Layout & Theme States
   const [chatType, setChatType] = useState<"icon" | "search">("icon");
   const [position, setPosition] = useState<"center" | "right">("center");
-  const [placeholderText, setPlaceholderText] = useState("Ask about web scraping, Zyte API, anything data extraction...");
+  const [placeholderText, setPlaceholderText] = useState("Ask anything");
   const [themeColor, setThemeColor] = useState("#0fb5a1");
   const [themeTextColor, setThemeTextColor] = useState<string>("#ffffff");
   const [btnBgColor, setBtnBgColor] = useState<string>("#0fb5a1");
@@ -162,7 +163,7 @@ export default function EmbedScriptSection() {
   const [isCustomizerOpen, setIsCustomizerOpen] = useState(false);
   const [draftChatType, setDraftChatType] = useState<"icon" | "search">("icon");
   const [draftPosition, setDraftPosition] = useState<"center" | "right">("center");
-  const [draftPlaceholderText, setDraftPlaceholderText] = useState("Ask about web scraping, Zyte API, anything data extraction...");
+  const [draftPlaceholderText, setDraftPlaceholderText] = useState("Ask anything");
   const [draftThemeColor, setDraftThemeColor] = useState("#0fb5a1");
   const [draftThemeTextColor, setDraftThemeTextColor] = useState<string>("#ffffff");
   const [draftBtnBgColor, setDraftBtnBgColor] = useState<string>("#0fb5a1");
@@ -219,55 +220,125 @@ export default function EmbedScriptSection() {
     return token;
   };
 
-  // ── Track version for Optimistic Concurrency Control ──────────────────────
-  const [savedConfigVersion, setSavedConfigVersion] = useState<number | null>(null);
+  const resetToDefaults = () => {
+    setChatType("icon");
+    setPosition("center");
+    setPlaceholderText("Ask anything");
+    setThemeColor("#0fb5a1");
+    setThemeTextColor("#ffffff");
+    setBtnBgColor("#0fb5a1");
+    setBtnBorderColor("#0fb5a1");
+    setHeaderLogo("/512_512.png");
+    setHeaderAlignment("center");
+    setHeaderName("Gsearch AI");
+    setBotAvatar("chat");
+    setAgentLabel("Agent");
+    setButtonIcon("chat");
+    setButtonAlignment("right");
+    setShowButtonText(true);
+    setButtonText("Help");
+    setInitialMessage("Hi! I'm your AI Support Agent. How can I help you today?");
+    setDisplaySources(true);
+    setAllowDownloads(false);
+    setDisplayCopyBtn(true);
+    setDisplayFeedback(true);
+    setLinkSafety(true);
+    setLeadCollection(false);
+    setLeadFields("name,email");
+    setLeadTiming("pre-chat");
+    setEscalationEnabled(false);
+    setEscalationLink("");
+    setShowInHeader(true);
+    setShowInChat(true);
+    setShowInEmbed(false);
 
-  // ── Load full embed config from backend when agent selection changes ───────
+    // Drafts
+    setDraftChatType("icon");
+    setDraftPosition("center");
+    setDraftPlaceholderText("Ask anything");
+    setDraftThemeColor("#0fb5a1");
+    setDraftThemeTextColor("#ffffff");
+    setDraftBtnBgColor("#0fb5a1");
+    setDraftBtnBorderColor("#0fb5a1");
+    setDraftHeaderLogo("/512_512.png");
+    setDraftHeaderAlignment("center");
+    setDraftHeaderName("Gsearch AI");
+    setDraftBotAvatar("chat");
+    setDraftAgentLabel("Agent");
+    setDraftButtonIcon("chat");
+    setDraftButtonAlignment("right");
+    setDraftShowButtonText(true);
+    setDraftButtonText("Help");
+    setDraftInitialMessage("Hi! I'm your AI Support Agent. How can I help you today?");
+    setDraftDisplaySources(true);
+    setDraftAllowDownloads(false);
+    setDraftDisplayCopyBtn(true);
+    setDraftDisplayFeedback(true);
+    setDraftLinkSafety(true);
+    setDraftLeadCollection(false);
+    setDraftLeadFields("name,email");
+    setDraftLeadTiming("pre-chat");
+    setDraftEscalationEnabled(false);
+    setDraftEscalationLink("");
+    setDraftShowInHeader(true);
+    setDraftShowInChat(true);
+    setDraftShowInEmbed(false);
+    setSavedConfigVersion(null);
+  };
+
   const loadConfigForAgent = useCallback((agentId: string) => {
-    getEmbedConfig(
-      { path: `/${agentId}` } as any,
-      (payload: any) => {
-        const data = payload?.data ?? payload;
-        if (!data) return;
+    getEmbedConfig({ path: `/${agentId}` }, (payload: any) => {
+      if (payload?.success && payload?.data && payload?.data.exists) {
+        const data = payload.data;
+        setSavedConfigVersion(data.version || 1);
 
-        // Track the version for OCC on next save
-        if (typeof data.version === "number") setSavedConfigVersion(data.version);
-
-        // Populate APPLIED state (what the snippet shows)
-        if (data.theme_color) setThemeColor(data.theme_color);
-        if (data.theme_text_color) setThemeTextColor(data.theme_text_color);
-        if (data.btn_bg_color) setBtnBgColor(data.btn_bg_color);
-        if (data.btn_border_color) setBtnBorderColor(data.btn_border_color);
-        if (data.header_logo) { const u = toProxyLogoUrl(data.header_logo); setHeaderLogo(u); setDraftHeaderLogo(u); }
-        if (data.header_align) setHeaderAlignment(data.header_align as "left" | "center");
-        if (data.header_name) setHeaderName(data.header_name);
-        if (data.agent_label) setAgentLabel(data.agent_label);
-        if (data.bot_avatar) setBotAvatar(data.bot_avatar);
-        if (data.chat_type) setChatType(data.chat_type as "icon" | "search");
-        if (data.position) setPosition(data.position as "center" | "right");
-        if (data.placeholder_text) setPlaceholderText(data.placeholder_text);
-        if (data.button_icon) setButtonIcon(data.button_icon);
-        if (data.button_align) setButtonAlignment(data.button_align as "left" | "right");
-        if (typeof data.show_button_text === "boolean") setShowButtonText(data.show_button_text);
-        if (data.button_text) setButtonText(data.button_text);
-        if (data.initial_message) setInitialMessage(data.initial_message);
-        if (typeof data.display_sources === "boolean") setDisplaySources(data.display_sources);
-        if (typeof data.allow_downloads === "boolean") setAllowDownloads(data.allow_downloads);
-        if (typeof data.display_copy === "boolean") setDisplayCopyBtn(data.display_copy);
-        if (typeof data.display_feedback === "boolean") setDisplayFeedback(data.display_feedback);
-        if (typeof data.link_safety === "boolean") setLinkSafety(data.link_safety);
-        if (typeof data.lead_collection === "boolean") setLeadCollection(data.lead_collection);
-        if (Array.isArray(data.lead_fields)) setLeadFields(data.lead_fields.join(","));
-        if (data.lead_timing) setLeadTiming(data.lead_timing);
-        if (typeof data.escalation_enabled === "boolean") setEscalationEnabled(data.escalation_enabled);
-        if (data.escalation_link !== undefined) setEscalationLink(data.escalation_link);
+        if (data.theme_color) { setThemeColor(data.theme_color); setDraftThemeColor(data.theme_color); }
+        if (data.theme_text_color) { setThemeTextColor(data.theme_text_color); setDraftThemeTextColor(data.theme_text_color); }
+        if (data.btn_bg_color) { setBtnBgColor(data.btn_bg_color); setDraftBtnBgColor(data.btn_bg_color); }
+        if (data.btn_border_color) { setBtnBorderColor(data.btn_border_color); setDraftBtnBorderColor(data.btn_border_color); }
+        if (data.header_logo !== undefined && data.header_logo !== null) {
+          setHeaderLogo(data.header_logo);
+          setDraftHeaderLogo(data.header_logo);
+        } else {
+          setHeaderLogo("/512_512.png");
+          setDraftHeaderLogo("/512_512.png");
+        }
+        if (data.header_align) { setHeaderAlignment(data.header_align); setDraftHeaderAlignment(data.header_align); }
+        if (data.header_name) { setHeaderName(data.header_name); setDraftHeaderName(data.header_name); }
+        if (data.agent_label) { setAgentLabel(data.agent_label); setDraftAgentLabel(data.agent_label); }
+        if (data.bot_avatar) { setBotAvatar(data.bot_avatar); setDraftBotAvatar(data.bot_avatar); }
+        if (data.chat_type) { setChatType(data.chat_type); setDraftChatType(data.chat_type); }
+        if (data.position) { setPosition(data.position); setDraftPosition(data.position); }
+        if (data.placeholder_text) { setPlaceholderText(data.placeholder_text); setDraftPlaceholderText(data.placeholder_text); }
+        if (data.button_icon) { setButtonIcon(data.button_icon); setDraftButtonIcon(data.button_icon); }
+        if (data.button_align) { setButtonAlignment(data.button_align); setDraftButtonAlignment(data.button_align); }
+        if (typeof data.show_button_text === "boolean") { setShowButtonText(data.show_button_text); setDraftShowButtonText(data.show_button_text); }
+        if (data.button_text) { setButtonText(data.button_text); setDraftButtonText(data.button_text); }
+        if (data.initial_message) { setInitialMessage(data.initial_message); setDraftInitialMessage(data.initial_message); }
+        if (typeof data.display_sources === "boolean") { setDisplaySources(data.display_sources); setDraftDisplaySources(data.display_sources); }
+        if (typeof data.allow_downloads === "boolean") { setAllowDownloads(data.allow_downloads); setDraftAllowDownloads(data.allow_downloads); }
+        if (typeof data.display_copy === "boolean") { setDisplayCopyBtn(data.display_copy); setDraftDisplayCopyBtn(data.display_copy); }
+        if (typeof data.display_feedback === "boolean") { setDisplayFeedback(data.display_feedback); setDraftDisplayFeedback(data.display_feedback); }
+        if (typeof data.link_safety === "boolean") { setLinkSafety(data.link_safety); setDraftLinkSafety(data.link_safety); }
+        if (typeof data.lead_collection === "boolean") { setLeadCollection(data.lead_collection); setDraftLeadCollection(data.lead_collection); }
+        if (data.lead_fields) {
+          const formattedFields = Array.isArray(data.lead_fields) ? data.lead_fields.join(",") : data.lead_fields;
+          setLeadFields(formattedFields);
+          setDraftLeadFields(formattedFields);
+        }
+        if (data.lead_timing) { setLeadTiming(data.lead_timing); setDraftLeadTiming(data.lead_timing); }
+        if (typeof data.escalation_enabled === "boolean") { setEscalationEnabled(data.escalation_enabled); setDraftEscalationEnabled(data.escalation_enabled); }
+        if (data.escalation_link) { setEscalationLink(data.escalation_link); setDraftEscalationLink(data.escalation_link); }
         if (typeof data.show_in_header === "boolean") { setShowInHeader(data.show_in_header); setDraftShowInHeader(data.show_in_header); }
         if (typeof data.show_in_chat === "boolean") { setShowInChat(data.show_in_chat); setDraftShowInChat(data.show_in_chat); }
         if (typeof data.show_in_embed === "boolean") { setShowInEmbed(data.show_in_embed); setDraftShowInEmbed(data.show_in_embed); }
+      } else {
+        resetToDefaults();
+        setSavedConfigVersion(null);
       }
-    );
+    });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [getEmbedConfig]);
 
   // Sandbox Live Preview States (Inside Modal)
   const [previewMessages, setPreviewMessages] = useState<any[]>([]);

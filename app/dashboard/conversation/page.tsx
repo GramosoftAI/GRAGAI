@@ -1017,6 +1017,8 @@ export default function ChatPlaygroundPage() {
   const [wsStatus, setWsStatus] = useState<"connecting" | "open" | "closed" | "error">("closed");
   const [getAgents] = useAxios<AgentListResponse>({ endpoint: "GETAGENTLIST", hideErrorMsg: true });
   const bottomRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef<boolean>(true);
   const ws = useRef<WebSocket | null>(null);
   const streamingTextRef = useRef<string>("");
   const streamingMessageIdRef = useRef<string | null>(null);
@@ -1125,6 +1127,10 @@ export default function ChatPlaygroundPage() {
                 setCurrentSessionId(matchedSession.id);
                 const mappedMessages = (matchedSession.messages || []).map((msg: any) => {
                   const { cleanedContent, sources } = cleanAndExtractSources(msg.content, msg.sources);
+                  const savedResponseTime = msg.response_time ?? msg.response_time_sec ?? msg.responseTime ?? msg.latency ?? msg.metrics?.response_time ?? msg.metrics?.latency ?? msg.duration;
+                  const responseTimeVal = savedResponseTime !== undefined && savedResponseTime !== null && !isNaN(Number(savedResponseTime)) && Number(savedResponseTime) > 0
+                    ? Number(Number(savedResponseTime).toFixed(1))
+                    : undefined;
                   return {
                     id: msg.message_id || msg.id || msg.messageId || msg.msg_id || msg._id || msg.msgId,
                     role: msg.role,
@@ -1135,6 +1141,7 @@ export default function ChatPlaygroundPage() {
                     timestamp: msg.created_at
                       ? new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
                       : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                    responseTime: responseTimeVal
                   };
                 });
                 setMessages(deduplicateMessages(mappedMessages));
@@ -1278,7 +1285,7 @@ export default function ChatPlaygroundPage() {
       
       if (queryStartTimeRef.current && lastResponseTimeSecRef.current === null) {
         const latency = (Date.now() - queryStartTimeRef.current) / 1000;
-        lastResponseTimeSecRef.current = Math.round(latency * 10) / 10;
+        lastResponseTimeSecRef.current = Math.max(0.1, Math.round(latency * 10) / 10);
         queryStartTimeRef.current = null;
       }
 
@@ -1378,6 +1385,13 @@ export default function ChatPlaygroundPage() {
             } as SourceMetadata));
           }
 
+          if (queryStartTimeRef.current && lastResponseTimeSecRef.current === null) {
+            const latency = (Date.now() - queryStartTimeRef.current) / 1000;
+            lastResponseTimeSecRef.current = Math.max(0.1, Math.round(latency * 10) / 10);
+            queryStartTimeRef.current = null;
+          }
+          const capturedResponseTime = lastResponseTimeSecRef.current;
+
           if (accumulated) {
             setMessages((prev: any) => [
               ...prev,
@@ -1390,7 +1404,7 @@ export default function ChatPlaygroundPage() {
                   hour: "2-digit",
                   minute: "2-digit",
                 }),
-                responseTime: lastResponseTimeSecRef.current || undefined
+                responseTime: capturedResponseTime !== null ? capturedResponseTime : undefined
               },
             ]);
           }
@@ -1433,18 +1447,41 @@ export default function ChatPlaygroundPage() {
 
               if (rawMsgs.length > 0) {
                 setMessages((prevMessages: any[]) => {
+                  const prevAssistantMsgs = prevMessages.filter((m: any) => m.role === "assistant");
+                  let assistantCounter = 0;
+
                   const mappedMessages = rawMsgs.map((msg: any, idx: number) => {
                     const { cleanedContent, sources } = cleanAndExtractSources(msg.content, msg.sources);
                     const msgId = msg.id || msg.message_id || msg.messageId || msg.msg_id || msg._id || msg.msgId;
-                    const existingMsg = prevMessages.find((pm: any) => pm.id === msgId || (pm.role === msg.role && pm.content === cleanedContent));
-                    const isLastAssistant = msg.role === "assistant" && idx === rawMsgs.length - 1;
-                    const responseTimeVal =
-                      msg.response_time ??
-                      msg.response_time_sec ??
-                      msg.responseTime ??
-                      msg.latency ??
-                      existingMsg?.responseTime ??
-                      ((isLastAssistant && lastResponseTimeSecRef.current !== null) ? lastResponseTimeSecRef.current : undefined);
+                    const existingMsg = prevMessages.find((pm: any) =>
+                      (msgId && pm.id === msgId) ||
+                      (pm.role === msg.role && pm.content && cleanedContent && (
+                        pm.content === cleanedContent ||
+                        pm.content.trim() === cleanedContent.trim() ||
+                        pm.content.includes(cleanedContent.slice(0, 30)) ||
+                        cleanedContent.includes(pm.content.slice(0, 30))
+                      ))
+                    );
+
+                    let fallbackResponseTime: number | undefined = undefined;
+                    if (msg.role === "assistant") {
+                      const isLastAssistantInRaw = idx === rawMsgs.length - 1 || !rawMsgs.slice(idx + 1).some(m => m.role === "assistant");
+                      if (isLastAssistantInRaw && capturedResponseTime !== null) {
+                        fallbackResponseTime = capturedResponseTime;
+                      } else if (existingMsg?.responseTime !== undefined && existingMsg.responseTime !== null) {
+                        fallbackResponseTime = existingMsg.responseTime;
+                      } else if (prevAssistantMsgs[assistantCounter]?.responseTime !== undefined) {
+                        fallbackResponseTime = prevAssistantMsgs[assistantCounter]?.responseTime;
+                      }
+                      assistantCounter++;
+                    }
+
+                    const savedResponseTime = msg.response_time ?? msg.response_time_sec ?? msg.responseTime ?? msg.latency ?? msg.metrics?.response_time ?? msg.metrics?.latency ?? msg.duration;
+                    const responseTimeVal = savedResponseTime !== undefined && savedResponseTime !== null && !isNaN(Number(savedResponseTime)) && Number(savedResponseTime) > 0
+                      ? Number(Number(savedResponseTime).toFixed(1))
+                      : (existingMsg?.responseTime !== undefined && existingMsg.responseTime !== null
+                          ? existingMsg.responseTime
+                          : fallbackResponseTime);
 
                     return {
                       id: msgId,
@@ -1461,7 +1498,6 @@ export default function ChatPlaygroundPage() {
                   });
                   return deduplicateMessages(mappedMessages);
                 });
-                lastResponseTimeSecRef.current = null;
               }
             })();
           }
@@ -1540,7 +1576,9 @@ export default function ChatPlaygroundPage() {
   }, [connectWs]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (isAtBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages, streamingText]);
 
   // ─── Actions ───────────────────────────────────────────────────────────────
@@ -1568,6 +1606,7 @@ export default function ChatPlaygroundPage() {
     currentSessionIdRef.current = newSessionId;
     setMessages([]);
     setAgent(selectedAgent);
+    isAtBottomRef.current = true;
   };
 
   const loadSession = async (session: ChatSession) => {
@@ -1589,7 +1628,10 @@ export default function ChatPlaygroundPage() {
 
     const mappedMessages = rawMessages.map((msg: any) => {
       const { cleanedContent, sources } = cleanAndExtractSources(msg.content, msg.sources);
-      const responseTimeVal = msg.response_time ?? msg.response_time_sec ?? msg.responseTime ?? msg.latency ?? undefined;
+      const savedResponseTime = msg.response_time ?? msg.response_time_sec ?? msg.responseTime ?? msg.latency ?? msg.metrics?.response_time ?? msg.metrics?.latency ?? msg.duration;
+      const responseTimeVal = (savedResponseTime !== undefined && savedResponseTime !== null && !isNaN(Number(savedResponseTime)) && Number(savedResponseTime) > 0)
+        ? Number(Number(savedResponseTime).toFixed(1))
+        : undefined;
       return {
         id: msg.message_id || msg.id || msg.messageId || msg.msg_id || msg._id || msg.msgId,
         role: msg.role,
@@ -1605,6 +1647,7 @@ export default function ChatPlaygroundPage() {
     });
 
     setMessages(deduplicateMessages(mappedMessages));
+    isAtBottomRef.current = true;
     if (agentId) {
       const matched = botsCache?.find(b => b.id === agentId);
       if (matched) {
@@ -1698,17 +1741,18 @@ export default function ChatPlaygroundPage() {
 
     queryStartTimeRef.current = Date.now();
     lastResponseTimeSecRef.current = null;
+    wsSourcesRef.current = [];
+    streamingMessageIdRef.current = null;
+    streamingTextRef.current = "";
+    setStreamingText("");
+    setIsTyping(true);
+    isAtBottomRef.current = true;
     ws.current?.send(JSON.stringify({
       query: userMsg.content,
       file: userMsg.file ? { name: userMsg.file.name, type: userMsg.file.type } : null,
       session_id: currentSessionId && !currentSessionId.startsWith("session_") ? currentSessionId : null,
       embed: false
     }));
-
-    wsSourcesRef.current = [];
-    streamingMessageIdRef.current = null;
-    setStreamingText("");
-    setIsTyping(true);
   };
 
   const handleShareSession = () => {
@@ -1828,47 +1872,7 @@ export default function ChatPlaygroundPage() {
     setStreamingText("");
     activeQuerySessionIdRef.current = targetSessionId;
     setIsTyping(true);
-  };
-
-  const handleSelectCandidate = (msgIndex: number, candidate: any, originalQuery?: string) => {
-    const queryToSend = originalQuery || lastUserQueryRef.current;
-    if (!queryToSend || !agent?.id || wsStatus !== "open" || isTyping) return;
-
-    let targetSessionId = currentSessionId;
-
-    setMessages((prev: any) => {
-      const copy = [...prev];
-      if (copy[msgIndex]) {
-        copy[msgIndex] = {
-          ...copy[msgIndex],
-          selectedCandidateId: candidate.kb_id,
-        };
-      }
-      return [
-        ...copy,
-        {
-          role: "user",
-          content: `Selected dataset: ${candidate.filename}`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        }
-      ];
-    });
-
-    queryStartTimeRef.current = Date.now();
-    lastResponseTimeSecRef.current = null;
-    streamingTextRef.current = "";
-    streamingMessageIdRef.current = null;
-    wsSourcesRef.current = [];
-    setStreamingText("");
-    activeQuerySessionIdRef.current = targetSessionId;
-    setIsTyping(true);
-
-    ws.current?.send(JSON.stringify({
-      query: queryToSend,
-      target_kb_id: candidate.kb_id,
-      session_id: targetSessionId && !targetSessionId.startsWith("session_") ? targetSessionId : null,
-      embed: false
-    }));
+    isAtBottomRef.current = true;
   };
 
   const handleCopyMessage = async (text: string) => {
@@ -2285,8 +2289,51 @@ export default function ChatPlaygroundPage() {
 
     wsSourcesRef.current = [];
     streamingMessageIdRef.current = null;
+    streamingTextRef.current = "";
+    setStreamingText("");
     activeQuerySessionIdRef.current = currentSessionId;
     setIsTyping(true);
+    isAtBottomRef.current = true;
+  };
+
+  const handleSelectCandidate = (msgIndex: number, candidate: any, originalQuery?: string) => {
+    const queryToSend = originalQuery || lastUserQueryRef.current;
+    if (!queryToSend || !agent?.id || wsStatus !== "open" || isTyping) return;
+
+    setMessages((prev: any[]) => {
+      const copy = [...prev];
+      if (copy[msgIndex]) {
+        copy[msgIndex] = {
+          ...copy[msgIndex],
+          selectedCandidateId: candidate.kb_id,
+        };
+      }
+      return [
+        ...copy,
+        {
+          role: "user",
+          content: `Selected dataset: ${candidate.filename}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        }
+      ];
+    });
+
+    queryStartTimeRef.current = Date.now();
+    lastResponseTimeSecRef.current = null;
+    streamingTextRef.current = "";
+    setStreamingText("");
+    wsSourcesRef.current = [];
+    streamingMessageIdRef.current = null;
+    activeQuerySessionIdRef.current = currentSessionId;
+    setIsTyping(true);
+    isAtBottomRef.current = true;
+
+    ws.current?.send(JSON.stringify({
+      query: queryToSend,
+      target_kb_id: candidate.kb_id,
+      session_id: currentSessionId && !currentSessionId.startsWith("session_") ? currentSessionId : null,
+      embed: false
+    }));
   };
 
   const handleThumbsUp = async (msgId?: string) => {
@@ -2806,8 +2853,16 @@ export default function ChatPlaygroundPage() {
           </Flex>
         </div>
 
-        {/* Conversation Stream */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-12 py-6 md:py-10 space-y-6 custom-scrollbar bg-dots-pattern">
+       
+        <div
+          ref={chatContainerRef}
+          onScroll={() => {
+            if (!chatContainerRef.current) return;
+            const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
+            isAtBottomRef.current = scrollHeight - scrollTop - clientHeight <= 120;
+          }}
+          className="flex-1 overflow-y-auto px-4 md:px-12 py-6 md:py-10 space-y-6 custom-scrollbar bg-dots-pattern"
+        >
           {messages.length === 0 && !isTyping && (
             <Flex vertical align="center" justify="center" className="h-full select-none my-auto space-y-4">
               <h1 className="m-0 text-[var(--app-text)] font-extrabold text-xl sm:text-2xl md:text-4xl tracking-tight text-center max-w-xl px-4 animate-in fade-in duration-500">
@@ -2887,20 +2942,18 @@ export default function ChatPlaygroundPage() {
                           </Tooltip>
                         ) : (
                           <>
-                            <Tooltip title={isTyping ? "Generation in progress" : "Helpful"} placement="bottom">
+                            <Tooltip title="Helpful" placement="bottom">
                               <button
-                                onClick={() => !isTyping && handleThumbsUp(msg.id)}
-                                disabled={isTyping}
-                                className={`p-2 transition-colors ${isTyping ? "text-gray-400 cursor-not-allowed opacity-40" : `cursor-pointer hover:opacity-80 ${msg.feedback === "thumbs_up" ? "text-emerald-500 font-bold" : "text-[var(--app-text)] font-bold"}`}`}
+                                onClick={() => handleThumbsUp(msg.id)}
+                                className={`p-2 transition-colors cursor-pointer hover:opacity-80 ${msg.feedback === "thumbs_up" ? "text-emerald-500 font-bold" : "text-[var(--app-text)] font-bold"}`}
                               >
                                 <FiThumbsUp size={16} strokeWidth={msg.feedback === "thumbs_up" ? 2.5 : 2} fill="none" />
                               </button>
                             </Tooltip>
-                            <Tooltip title={isTyping ? "Generation in progress" : "Not helpful"} placement="bottom">
+                            <Tooltip title="Not helpful" placement="bottom">
                               <button
-                                onClick={() => !isTyping && handleThumbsDown(msg.id)}
-                                disabled={isTyping}
-                                className={`p-2 transition-colors ${isTyping ? "text-gray-400 cursor-not-allowed opacity-40" : `cursor-pointer hover:opacity-80 ${msg.feedback === "thumbs_down" ? "text-rose-500 font-bold" : "text-[var(--app-text)] font-bold"}`}`}
+                                onClick={() => handleThumbsDown(msg.id)}
+                                className={`p-2 transition-colors cursor-pointer hover:opacity-80 ${msg.feedback === "thumbs_down" ? "text-rose-500 font-bold" : "text-[var(--app-text)] font-bold"}`}
                               >
                                 <FiThumbsDown size={16} strokeWidth={msg.feedback === "thumbs_down" ? 2.5 : 2} fill="none" />
                               </button>

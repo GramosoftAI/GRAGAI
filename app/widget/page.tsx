@@ -1399,6 +1399,8 @@ function WidgetContent() {
 
   const ws = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  const isAtBottomRef = useRef<boolean>(true);
 
   const initialQuerySentRef = useRef(false);
   const pendingQueryRef = useRef("");
@@ -1533,6 +1535,7 @@ function WidgetContent() {
           bufferRef.current = "";
           queryStartTimeRef.current = Date.now();
           currentResponseTimeRef.current = null;
+          isAtBottomRef.current = true;
           setMessages((prev) => [...prev, { role: "user", content: query, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }]);
           setIsTyping(true);
           startTypingTimeout();
@@ -1599,7 +1602,9 @@ function WidgetContent() {
   }, []);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (isAtBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages, isTyping]);
 
   useEffect(() => {
@@ -1667,7 +1672,7 @@ function WidgetContent() {
       console.log("WebSocket Raw Message:", event.data);
       if (queryStartTimeRef.current && currentResponseTimeRef.current === null) {
         const latency = (Date.now() - queryStartTimeRef.current) / 1000;
-        currentResponseTimeRef.current = Math.round(latency * 10) / 10;
+        currentResponseTimeRef.current = Math.max(0.1, Math.round(latency * 10) / 10);
         queryStartTimeRef.current = null;
       }
       try {
@@ -1766,7 +1771,7 @@ function WidgetContent() {
           }
 
           setIsTyping(true);
-          processIncomingChunk(data.delta, false, currentResponseTimeRef.current || undefined);
+          processIncomingChunk(data.delta, false, currentResponseTimeRef.current ?? undefined);
         }
 
         if (data.type === "done" || data.type === "end") {
@@ -1774,7 +1779,13 @@ function WidgetContent() {
           if (data.message_id) currentMsgIdRef.current = data.message_id;
           if (data.escalation_detected === true) currentEscalationRef.current = true;
           
-          processIncomingChunk("", true, currentResponseTimeRef.current || undefined);
+          if (queryStartTimeRef.current && currentResponseTimeRef.current === null) {
+            const latency = (Date.now() - queryStartTimeRef.current) / 1000;
+            currentResponseTimeRef.current = Math.max(0.1, Math.round(latency * 10) / 10);
+            queryStartTimeRef.current = null;
+          }
+          const finalRespTime = currentResponseTimeRef.current ?? undefined;
+          processIncomingChunk("", true, finalRespTime);
         }
       } catch (err) {
         setIsTyping(false);
@@ -1842,6 +1853,7 @@ function WidgetContent() {
     pendingQueryRef.current = "";
     queryStartTimeRef.current = null;
     currentResponseTimeRef.current = null;
+    isAtBottomRef.current = true;
     setMessages(
       initialMessageParam
         ? [{ role: "assistant", content: initialMessageParam, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }]
@@ -1858,6 +1870,7 @@ function WidgetContent() {
     bufferRef.current = ""; // reset old response
     queryStartTimeRef.current = Date.now();
     currentResponseTimeRef.current = null;
+    isAtBottomRef.current = true;
     setMessages((prev) => [...prev, { role: "user", content: message, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }]);
     setIsTyping(true);
     startTypingTimeout();
@@ -2316,6 +2329,12 @@ function WidgetContent() {
           </div>
         ) : (
           <div
+            ref={chatContainerRef}
+            onScroll={() => {
+              if (!chatContainerRef.current) return;
+              const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
+              isAtBottomRef.current = scrollHeight - scrollTop - clientHeight <= 120;
+            }}
             style={{
               flex: 1,
               overflowY: "auto",
@@ -2726,6 +2745,7 @@ function WidgetContent() {
 
                         <button
                           onClick={() => {
+                            if (isTyping) return;
                             let userMessageIndex = -1;
                             for (let j = index; j >= 0; j--) {
                               if (messages[j].role === "user") {
@@ -2737,7 +2757,10 @@ function WidgetContent() {
                               const prevUserMsg = messages[userMessageIndex];
                               resetStreaming();
                               bufferRef.current = "";
+                              queryStartTimeRef.current = Date.now();
+                              currentResponseTimeRef.current = null;
                               setIsTyping(true);
+                              isAtBottomRef.current = true;
                               startTypingTimeout();
                               setMessages(messages.slice(0, userMessageIndex + 1));
 
