@@ -197,6 +197,8 @@ class RAGService:
 
             # ============= HYBRID RAG: ENTERPRISE SCHEMA-AWARE ROUTING =============
             hybrid_merge_context = ""
+            schema_col_terms = set()
+            schema_name_terms = set()
             if excel_kbs:
                 from app.core.parquet_ingester import ParquetIngester
                 from app.modules.rag.pandas_engine import PandasQueryEngine
@@ -222,8 +224,6 @@ class RAGService:
                 if active_paths:
                     import pyarrow.parquet as pq
                     
-                    schema_col_terms = set()
-                    schema_name_terms = set()
                     overlap = False
                     reason = "not_tabular"
                     

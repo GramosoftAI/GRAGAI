@@ -425,6 +425,7 @@ class DeepInfraLLMClient:
         model: Optional[str] = None,
         timeout: Optional[float] = None,
         task: Optional[Any] = None,
+        **kwargs
     ) -> str:
         """
         Equivalent to generate() but explicitly routes to the cloud DeepInfra model 
@@ -449,6 +450,9 @@ class DeepInfraLLMClient:
             "enable_thinking": False,
             "reasoning_effort": "none"
         }
+        
+        if "response_format" in kwargs:
+            payload["response_format"] = kwargs["response_format"]
         
         last_error = None
         for attempt in range(3):
@@ -928,34 +932,11 @@ class DeepInfraLLMClient:
             name = agent_persona.get("name", "Assistant")
 
             personality = agent_persona.get("personality", "Friendly")
-
             prompt_custom = agent_persona.get("system_prompt", "")
 
-            
-
             system_content = f"You are {name}. Your tone and personality is {personality}. "
-
             if prompt_custom:
-
                 system_content += f"\n\nInstructions: {prompt_custom}"
-
-            
-
-            system_content += (
-
-                "\n\nCRITICAL INSTRUCTION: You must strictly respond ONLY using the provided knowledge base content. "
-
-                "Do not rely on your own pre-trained knowledge. Always include precise numeric values, years, percentages, "
-
-                "and symbols (like GPA scores, dates, or currency) explicitly mentioned in the context. "
-
-                "If the answer is not contained within the provided context, you MUST respond exactly with: "
-
-                "\"Im sorry, but the requested information is not available within my current knowledge base. "
-
-                "Please try a related query or provide additional context.\""
-
-            )
 
         else:
 
@@ -1287,8 +1268,6 @@ STRICT GROUNDING RULES:
 1. If the QUESTION is a factual inquiry, use ONLY the provided CONTEXT to answer.
 
 2. PRESERVE NUMERICS: Always include precise years, scores (GPA), and technical symbols.
-
-3. If the answer to a factual question is NOT in the context, respond with: "Im sorry, but I don't have that specific information in my current knowledge base."
 
 
 
