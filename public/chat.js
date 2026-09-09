@@ -24,7 +24,7 @@
   }
 
   const targetAgentId = agentId || "24b3d80f-aed6-4b70-b5b2-48c64cb616c1";
-  const apiHost = "http://localhost:8000" || baseUrl || window.location.origin || "https://uat.gramosoft.tech";
+  const apiHost = baseUrl || window.location.origin || "https://uat.gramosoft.tech";
   const cleanApiHost = apiHost.endsWith("/api/v1") ? apiHost : apiHost + "/api/v1";
   const configApiUrl = `${cleanApiHost}/embed/configs/${targetAgentId}?device=${getDeviceType()}${tenantId ? `&tenant_id=${tenantId}` : ""}`;
 
@@ -349,7 +349,7 @@
         try {
           const { left, top } = JSON.parse(savedPos);
           if (left !== null && left !== undefined && !isNaN(left) &&
-              top !== null && top !== undefined && !isNaN(top)) {
+            top !== null && top !== undefined && !isNaN(top)) {
             el.style.left = left + "px";
             el.style.top = top + "px";
             el.style.right = "auto";
@@ -358,7 +358,7 @@
             // Check bounds in case window size changed since last visit
             setTimeout(() => clampPosition(el), 100);
           }
-        } catch (e) {}
+        } catch (e) { }
       }
 
       const onMouseDown = (e) => {
@@ -491,7 +491,7 @@
         // Icon mode - uses draggable rect-based dynamic positioning
         if (!button) return;
         const launcherRect = button.getBoundingClientRect();
-        
+
         // Define dimensions based on device
         let iframeWidth = 420;
         let iframeHeight = Math.min(520, window.innerHeight - 115);
@@ -514,7 +514,7 @@
         // Side placement is possible if the screen is wide enough to fit the iframe on at least one side
         const canPlaceRight = spaceRight >= iframeWidth + 12;
         const canPlaceLeft = spaceLeft >= iframeWidth + 12;
-        
+
         // We prefer side placement if the button is vertically in the middle area,
         // or if the chat window cannot fit vertically above or below the button without overlapping.
         const fitsAbove = spaceAbove >= iframeHeight;
@@ -549,7 +549,7 @@
           iframeTop = Math.max(10, Math.min(window.innerHeight - iframeHeight - 10, iframeTop));
         } else {
           // Vertical above/below positioning (either because button is near top/bottom boundaries or screen is too narrow for side placement)
-          
+
           // Determine above/below based on which side has more space or button position relative to screen center
           const buttonCenterY = launcherRect.top + launcherRect.height / 2;
           const useAbove = buttonCenterY > window.innerHeight / 2;
@@ -670,7 +670,7 @@
 
     const openIframe = (initialQuery = "") => {
       const currentIframe = initIframe();
-      
+
       updateIframeDimensions();
 
       if (chatType === "search" && searchPoweredByContainer) {
@@ -915,7 +915,7 @@
       searchPoweredByContainer.style.display = "none"; // Hidden by default when search bar is closed
       searchPoweredByContainer.style.justifyContent = "center";
       searchPoweredByContainer.style.marginTop = "6px";
-   
+
       const poweredBy = document.createElement("a");
       poweredBy.href = "https://gsearchai.com/";
       poweredBy.target = "_blank";
@@ -937,7 +937,7 @@
       poweredBy.style.boxShadow = "0 2px 6px rgba(0, 0, 0, 0.08)";
       poweredBy.style.transition = "all 0.2s ease-in-out";
       poweredBy.innerHTML = `Powered by <span style="font-weight: 750; color: ${themeColor};">Gsearch</span>`;
-   
+
       poweredBy.addEventListener("mouseenter", () => {
         poweredBy.style.transform = "translateY(-1px)";
         poweredBy.style.boxShadow = "0 4px 12px rgba(0, 0, 0, 0.12)";
@@ -946,9 +946,9 @@
         poweredBy.style.transform = "none";
         poweredBy.style.boxShadow = "0 2px 6px rgba(0, 0, 0, 0.08)";
       });
-   
+
       searchPoweredByContainer.appendChild(poweredBy);
-   
+
       // Assemble and render elements
       inputBar.appendChild(leftIcon);
       inputBar.appendChild(searchInput);
@@ -957,7 +957,7 @@
       searchWrapper.appendChild(searchGlowContainer);
       document.body.appendChild(searchWrapper);
       document.body.appendChild(searchPoweredByContainer);
-      
+
       // Position searchWrapper correctly on load
       updateSearchWrapperDimensions();
     } else {
