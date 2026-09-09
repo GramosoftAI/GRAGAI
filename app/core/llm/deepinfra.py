@@ -103,8 +103,8 @@ class DeepInfraEmbeddingClient:
                 base_url = f"{base_url.rstrip('/')}/embeddings"
         self.base_url = base_url
         self.model = settings.model_embedding
-        self.timeout = 2.5  # Request timeout in seconds (fast online threshold)
-        self.max_retries = 1  # Fail fast to prevent multi-second pipeline latency
+        self.timeout = 60.0  # Request timeout in seconds (increased to prevent timeouts)
+        self.max_retries = 3  # Number of retry attempts
         self.max_text_length = 1000  # Safe limit (~300-400 tokens)
         self.expected_dimension = settings.embedding_dimension  # Dynamic from settings
 

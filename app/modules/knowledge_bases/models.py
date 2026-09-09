@@ -91,6 +91,7 @@ class KnowledgeBase(Base):
     categorical_values = Column(JSONB, nullable=True)
     noisy_words = Column(JSONB, nullable=True)
     noisy_words_generated_at = Column(DateTime(timezone=True), nullable=True)
+    metadata_json = Column(JSONB, nullable=True)
 
     # ============= CONTENT TRACKING =============
     total_chunks = Column(
@@ -293,7 +294,7 @@ class DocumentTableRow(Base):
         nullable=False,
     )
 
-    page_number = Column(Integer, nullable=False, default=1)
+    page_number = Column(Integer, nullable=True)
     table_index = Column(Integer, nullable=False, default=0)
     row_index = Column(Integer, nullable=False, default=0)
     

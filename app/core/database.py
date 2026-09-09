@@ -744,7 +744,7 @@ async def init_db():
         from ..modules.connectors.google.models import GmailMessage, GmailSyncState
         from ..modules.jobs.models import ProcessingJob
         from ..modules.Embed.models import WidgetCustomization
-        from ..modules.analytics.models import AnalyticsSummary, AnalyticsQueryLog as ChatAnalyticsQueryLog, AppErrorLog
+        from ..modules.analytics.models import AnalyticsSummary, AnalyticsQueryLog as ChatAnalyticsQueryLog, AppErrorLog, LLMStageUsageLog
         from ..modules.database_knowledgebase.models import (
             DatabaseKnowledgebase,
             DatabaseSchemaSnapshot,
@@ -850,22 +850,23 @@ async def init_db():
             # Create tables first if they don't exist
             await conn.run_sync(Base.metadata.create_all)
 
-        # Run vector column check in separate transaction
+        # Run vector column check in separate transaction (only if needed to avoid startup delays/locks)
         async with engine.begin() as conn:
             try:
-                await conn.execute(
-                    text(f"ALTER TABLE document_chunks ALTER COLUMN embedding TYPE vector({settings.embedding_dimension});")
+                check_type = await conn.execute(
+                    text("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'document_chunks'::regclass AND attname = 'embedding';")
                 )
-                logger.info(f" Verified/migrated document_chunks.embedding to vector({settings.embedding_dimension})")
-            except Exception as e:
-                logger.warning(
-                    f"Could not directly alter document_chunks.embedding to vector({settings.embedding_dimension}): {e}. Clearing old chunks..."
-                )
-                async with engine.begin() as clear_conn:
-                    await clear_conn.execute(text("DELETE FROM document_chunks;"))
-                    await clear_conn.execute(
-                        text(f"ALTER TABLE document_chunks ALTER COLUMN embedding TYPE vector({settings.embedding_dimension});")
+                curr_type = check_type.scalar()
+                target_type = f"vector({settings.embedding_dimension})"
+                if curr_type != target_type:
+                    logger.info(f"Migrating document_chunks.embedding from {curr_type} to {target_type}...")
+                    await conn.execute(
+                        text(f"ALTER TABLE document_chunks ALTER COLUMN embedding TYPE {target_type};")
                     )
+                else:
+                    logger.debug(f"document_chunks.embedding verified as {target_type}")
+            except Exception as e:
+                logger.warning(f"Vector column type check notice: {e}")
 
         async with engine.begin() as conn:
             # Auto-migrate document_chunks columns
@@ -876,15 +877,11 @@ async def init_db():
             await conn.execute(text("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_kbs_file_hash ON knowledge_bases(file_hash)"))
 
-            # Auto-migrate FTS and Hybrid Search columns/indexes
-            await conn.execute(text("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS language regconfig DEFAULT 'english'::regconfig;"))
-            await conn.execute(text("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS language regconfig DEFAULT 'english'::regconfig;"))
-            
-            fts_col_check = await conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name='document_chunks' AND column_name='search_vector'"))
-            if not fts_col_check.fetchone():
-                await conn.execute(text("ALTER TABLE document_chunks ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (to_tsvector(language, coalesce(text, ''))) STORED;"))
-
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_chunks_search_vector_gin ON document_chunks USING GIN(search_vector);"))
+            # Auto-migrate document_chunks indexes
+            await conn.execute(text("DROP INDEX IF EXISTS idx_chunks_search_vector_gin;"))
+            await conn.execute(text("ALTER TABLE document_chunks DROP COLUMN IF EXISTS search_vector;"))
+            await conn.execute(text("ALTER TABLE document_chunks DROP COLUMN IF EXISTS language;"))
+            await conn.execute(text("ALTER TABLE knowledge_bases DROP COLUMN IF EXISTS language;"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_chunks_tenant_kb ON document_chunks (tenant_id, kb_id);"))
 
         # Run HNSW index creation in its own transaction block

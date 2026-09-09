@@ -1,14 +1,14 @@
 import logging
-from typing import Optional, Dict, Literal
-from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from app.core.config import get_settings, settings
+import uuid
 import tempfile
 import os
 import re
 import json
-from typing import Optional, Dict, Literal, List
+from typing import Optional, Dict, Literal, List, Tuple, Any
+from pydantic import BaseModel, Field
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from app.core.config import get_settings, settings
 from sqlalchemy import create_engine, text
 
 logger = logging.getLogger(__name__)
@@ -101,9 +101,20 @@ def parse_json_from_thinking(text: str) -> dict:
     else:
         text = ""
         
+    fallback_dict = {
+        "intents": [],
+        "sql": "SELECT 'LLM JSON parsing failed' AS info WHERE FALSE;",
+        "explanation": "LLM JSON output parsing failed.",
+        "parse_failed": True,
+        "target_engine": "HYBRID_MERGE",
+        "confidence": 0.0,
+        "matched_columns": [],
+        "reasoning": "LLM JSON output parsing failed."
+    }
+
     if not text:
-        logger.warning(f"LLM returned empty or non-JSON text after stripping think tags: {raw_text[:100]}")
-        return {"intents": ["row_lookup"], "sql": "SELECT * FROM dataset LIMIT 10;", "explanation": "Retrieved sample records from dataset"}
+        logger.error(f"LLM returned empty text after stripping think tags: {raw_text}")
+        return fallback_dict
         
     try:
         cleaned = re.sub(r',\s*}', '}', text)
@@ -119,7 +130,7 @@ def parse_json_from_thinking(text: str) -> dict:
         except Exception as e_yaml:
             logger.error(f"Both json.loads and yaml.safe_load failed on text: {text} | error: {e_yaml}")
             
-        return {"intents": ["row_lookup"], "sql": "SELECT * FROM dataset LIMIT 10;", "explanation": "Retrieved sample records from dataset"}
+        return fallback_dict
 
 class IntentClassification(BaseModel):
     """Classifies the user query into one or more execution engines."""
@@ -138,6 +149,152 @@ class DuckDBSemanticQuery(BaseModel):
         ...,
         description="Explanation of what the SQL query does."
     )
+
+def validate_sql_security(sql_str: str) -> Optional[str]:
+    """
+    Defense-in-depth SQL security validator for PandasQueryEngine.
+    Enforces:
+    1. Single-statement execution (rejects multi-statement semicolon injection).
+    2. Read-only allow-list (must start strictly with SELECT or WITH).
+    3. Restriction on file I/O, extension loading, system procedures (COPY, PRAGMA, INSTALL, LOAD, CALL, TRUNCATE, read_csv, read_parquet, etc.).
+    4. Extended keyword safety net.
+    Returns None if valid, or an error message string if a security violation is detected.
+    """
+    if not sql_str or not sql_str.strip():
+        return "Error: Security violation - empty query."
+
+    clean_sql = sql_str.strip()
+
+    # 1. Multi-Statement Validation
+    # Remove single-line comments (--), block comments (/* */), and trailing semicolons
+    stripped_sql = re.sub(r'--(.*?)$', '', clean_sql, flags=re.MULTILINE)
+    stripped_sql = re.sub(r'/\*.*?\*/', '', stripped_sql, flags=re.DOTALL).strip()
+    
+    while stripped_sql.endswith(';'):
+        stripped_sql = stripped_sql[:-1].strip()
+
+    if ';' in stripped_sql:
+        logger.warning(f"[SQL_SECURITY] Rejected multi-statement query: {sql_str}")
+        return "Error: Security violation - multi-statement queries are strictly prohibited."
+
+    # 2. Allow-List Validation (Must start strictly with SELECT or WITH)
+    upper_sql = stripped_sql.upper()
+    if not (upper_sql.startswith("SELECT") or upper_sql.startswith("WITH")):
+        logger.warning(f"[SQL_SECURITY] Query does not start with SELECT or WITH: {sql_str}")
+        return "Error: Security violation - only single read-only SELECT or WITH queries are permitted."
+
+    # 3. Restrict File I/O, Extension, and System Execution Keywords & Functions
+    forbidden_kw = [
+        "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE",
+        "EXEC", "ATTACH", "DETACH", "COPY", "PRAGMA", "INSTALL", "LOAD",
+        "CALL", "TRUNCATE", "EXPORT", "IMPORT", "READ_CSV", "READ_PARQUET",
+        "READ_JSON", "READ_TEXT", "READ_BLOB"
+    ]
+
+    for kw in forbidden_kw:
+        pattern = r'\b' + re.escape(kw) + r'(\b|_)'
+        if re.search(pattern, upper_sql):
+            logger.warning(f"[SQL_SECURITY] Forbidden keyword/function '{kw}' detected in query: {sql_str}")
+    return None
+
+import time
+import threading
+
+_DUCKDB_ENGINE_CACHE: Dict[Tuple[str, ...], Tuple[float, Any, List[str]]] = {}
+_DUCKDB_CACHE_LOCK = threading.Lock()
+_DUCKDB_CACHE_TTL_SECONDS = 600.0  # 10 minutes TTL
+_MAX_DUCKDB_CACHE_SIZE = 50
+
+def get_pooled_duckdb_engine(paths: List[str]) -> Tuple[Any, List[str], float]:
+    """
+    Retrieves or creates a pooled, thread-safe DuckDB SQLAlchemy engine and cached catalog columns
+    for the given dataset file paths. Returns (engine, columns, acquisition_latency_ms).
+    """
+    start_time = time.time()
+    paths_key = tuple(sorted(str(p).replace('\\', '/') for p in paths if p and os.path.exists(p)))
+    if not paths_key:
+        raise ValueError("No valid existing file paths provided for DuckDB engine.")
+
+    now = time.time()
+    with _DUCKDB_CACHE_LOCK:
+        # 1. Sweep expired cache entries
+        expired_keys = [
+            k for k, (ts, eng, _) in _DUCKDB_ENGINE_CACHE.items()
+            if now - ts > _DUCKDB_CACHE_TTL_SECONDS
+        ]
+        for k in expired_keys:
+            _, eng, _ = _DUCKDB_ENGINE_CACHE.pop(k)
+            try:
+                eng.dispose()
+            except Exception as dispose_err:
+                logger.debug(f"Error disposing expired DuckDB engine for {k}: {dispose_err}")
+
+        # 2. Return cached engine if hit
+        if paths_key in _DUCKDB_ENGINE_CACHE:
+            ts, eng, cols = _DUCKDB_ENGINE_CACHE[paths_key]
+            acq_ms = (time.time() - start_time) * 1000.0
+            logger.info(f"[DUCKDB_POOL] Cache hit for paths {paths_key} (Acquisition latency: {acq_ms:.2f}ms)")
+            return eng, cols, acq_ms
+
+        # 3. LRU Eviction if max capacity reached
+        if len(_DUCKDB_ENGINE_CACHE) >= _MAX_DUCKDB_CACHE_SIZE:
+            oldest_key = min(_DUCKDB_ENGINE_CACHE.keys(), key=lambda k: _DUCKDB_ENGINE_CACHE[k][0])
+            _, old_eng, _ = _DUCKDB_ENGINE_CACHE.pop(oldest_key)
+            try:
+                old_eng.dispose()
+            except Exception:
+                pass
+
+        # 4. Create new pooled in-memory DuckDB engine & initialize dataset view
+        logger.info(f"[DUCKDB_POOL] Cache miss. Constructing pooled DuckDB engine for paths: {paths_key}")
+        engine = create_engine("duckdb:///:memory:")
+        
+        valid_readers = []
+        for path_item in paths_key:
+            if path_item.lower().endswith(".parquet"):
+                valid_readers.append(f"SELECT * FROM read_parquet('{path_item}')")
+            else:
+                valid_readers.append(f"SELECT * FROM read_csv_auto('{path_item}', sample_size=10000, nullstr='NULL')")
+        
+        if not valid_readers:
+            union_sql = "SELECT 1 WHERE FALSE"
+        else:
+            union_sql = " SELECT * FROM (" + " UNION ALL BY NAME ".join(valid_readers) + ")"
+
+        with engine.connect() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS dataset;"))
+            conn.execute(text(f"CREATE VIEW dataset AS SELECT row_number() OVER () AS row_id, * FROM ({union_sql});"))
+            
+            for idx, path_item in enumerate(paths_key):
+                view_name = f"dataset_{idx+1}"
+                conn.execute(text(f"DROP VIEW IF EXISTS {view_name};"))
+                reader = f"read_parquet('{path_item}')" if path_item.lower().endswith(".parquet") else f"read_csv_auto('{path_item}', sample_size=10000, nullstr='NULL')"
+                conn.execute(text(f"CREATE VIEW {view_name} AS SELECT row_number() OVER () AS row_id, * FROM {reader};"))
+            
+            try:
+                conn.commit()
+            except Exception:
+                pass
+                
+            res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name = 'dataset' AND column_name != 'row_id';"))
+            columns = [row[0] for row in res.fetchall()]
+
+        _DUCKDB_ENGINE_CACHE[paths_key] = (time.time(), engine, columns)
+        acq_ms = (time.time() - start_time) * 1000.0
+        logger.info(f"[DUCKDB_POOL] Initialized and cached DuckDB engine for {paths_key} (Acquisition latency: {acq_ms:.2f}ms)")
+        return engine, columns, acq_ms
+
+def invalidate_duckdb_engine_cache(paths: List[str]):
+    """Evicts the cached engine for a given set of file paths (e.g. on schema error or update)."""
+    paths_key = tuple(sorted(str(p).replace('\\', '/') for p in paths if p and os.path.exists(p)))
+    with _DUCKDB_CACHE_LOCK:
+        if paths_key in _DUCKDB_ENGINE_CACHE:
+            _, eng, _ = _DUCKDB_ENGINE_CACHE.pop(paths_key)
+            try:
+                eng.dispose()
+            except Exception as e:
+                logger.debug(f"Error disposing evicted DuckDB engine: {e}")
+
 
 class PandasQueryEngine:
     """
@@ -199,14 +356,8 @@ class PandasQueryEngine:
         if not paths_to_check:
             return []
         try:
-            temp_db_path = os.path.join(tempfile.gettempdir(), f"duckdb_{id(self)}.db")
-            engine = create_engine(f"duckdb:///{temp_db_path}")
-            with engine.connect() as conn:
-                union_sql = self._build_union_query(paths_to_check, with_row_id=False)
-                conn.execute(text("DROP VIEW IF EXISTS dataset;"))
-                conn.execute(text(f"CREATE VIEW dataset AS {union_sql};"))
-                result = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name = 'dataset';"))
-                return [row[0] for row in result.fetchall()]
+            _, columns, _ = get_pooled_duckdb_engine(paths_to_check)
+            return columns
         except Exception as e:
             logger.warning(f"Failed fetching schema columns for routing: {e}")
             return []
@@ -283,40 +434,12 @@ class PandasQueryEngine:
             
         from langchain_core.output_parsers import StrOutputParser
         # DUCKDB BINDING (CSV or PARQUET)
-        logger.info(f"Initializing DuckDB on dataset(s): {target_path} | total_paths: {len(paths_to_register)}")
+        logger.info(f"Acquiring pooled DuckDB engine on dataset(s): {target_path} | total_paths: {len(paths_to_register)}")
         engine = None
-        temp_db_path = None
         try:
             import asyncio
-            import uuid
-            temp_db_id = uuid.uuid4().hex
-            temp_db_path = os.path.join(tempfile.gettempdir(), f"duckdb_{temp_db_id}.db")
-            
-            def _setup_db():
-                eng = create_engine(f"duckdb:///{temp_db_path}")
-                
-                with eng.connect() as conn:
-                    union_sql = self._build_union_query(paths_to_register, with_row_id=True)
-                    conn.execute(text("DROP VIEW IF EXISTS dataset;"))
-                    conn.execute(text(f"CREATE VIEW dataset AS {union_sql};"))
-                    
-                    # Also register individual views (dataset_1, dataset_2, etc.) for backwards compatibility
-                    for idx, path_item in enumerate(paths_to_register):
-                        safe_path = str(path_item).replace('\\', '/')
-                        view_name = f"dataset_{idx+1}"
-                        conn.execute(text(f"DROP VIEW IF EXISTS {view_name};"))
-                        reader = f"read_parquet('{safe_path}')" if safe_path.lower().endswith(".parquet") else f"read_csv_auto('{safe_path}', sample_size=10000, nullstr='NULL')"
-                        conn.execute(text(f"CREATE VIEW {view_name} AS SELECT row_number() OVER () AS row_id, * FROM {reader};"))
-                    try:
-                        conn.commit()
-                    except:
-                        pass
-                        
-                    result = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name = 'dataset';"))
-                    cols = [row[0] for row in result.fetchall()]
-                return eng, cols
-                
-            engine, columns = await asyncio.to_thread(_setup_db)
+            engine, columns, acq_ms = await asyncio.to_thread(get_pooled_duckdb_engine, paths_to_register)
+            logger.info(f"[TELEMETRY] DuckDB engine acquisition completed in {acq_ms:.2f}ms")
 
             # 3. GENERATE DUCKDB SQL DIRECTLY
             prompt = ChatPromptTemplate.from_messages([
@@ -355,13 +478,17 @@ class PandasQueryEngine:
                  "   - When asking for 'details', 'full details', or information about a specific movie, person, or title (e.g. 'Ron''s Gone Wrong full details', 'details of King''s Man'), generate a SELECT * FROM dataset WHERE LOWER(\"Title\") LIKE '%ron%gone%wrong%'; (or corresponding name column). NEVER generate a COUNT(*) aggregation query when the user asks for details of a specific item!\n"
                  "   - When a title or search string contains an apostrophe or single quote (''), you MUST escape it by doubling the single quote in SQL (e.g., '%ron''s gone wrong%') OR omit the apostrophe using wildcards (e.g., '%ron%gone%wrong%').\n"
                  "   - When querying general details without an explicit WHERE name/title filter (e.g. 'show me all movies' or general overview), ALWAYS append LIMIT 10 to prevent large result sets from causing token overflow.\n"
-                 "20. SPECIFIC PROPERTY & RECORD LOOKUPS:\n"
+                 "20. PART NUMBERS, REPAIR KITS, MRP & SKU LOOKUPS:\n"
+                 "   - When the user asks for MRP, repair kit details, or technical part information (e.g. 'What is the MRP for Part No 29019292JA?'), search across part number and description columns using ILIKE with wildcards (e.g. \"HLAAP SALES PART NO\" ILIKE '%29019292JA%' OR \"HLAAP PART DESCRIPTION\" ILIKE '%29019292JA%' OR LOWER(CAST(dataset AS VARCHAR)) LIKE '%29019292ja%').\n"
+                 "   - If the part number or code contains hyphens or mixed alphanumeric strings, search with wildcards for the main core identifier (e.g. ILIKE '%29019292%').\n"
+                 "   - Always select relevant columns including Part Number, Description, OEM, MRP, DLP, HSN, and Standard Pack.\n"
+                 "21. SPECIFIC PROPERTY & RECORD LOOKUPS:\n"
                  "   - When the user asks for a specific attribute of an entity (e.g. 'What is the ArticleNo for PartNo 7803-9636473A?', 'What is the MRP of Part X?', 'What is the salary of John?'), ALWAYS generate a query that selects all columns (`SELECT * FROM dataset WHERE \"PartNo\" ILIKE '%7803-9636473A%' LIMIT 5;`) or includes both the identifier column and the requested property. NEVER select ONLY the isolated target column without the entity key, because downstream verification models require both to establish grounded truth.\n"
-                 "21. DIFFERENCE BETWEEN HIGHEST AND LOWEST / MIN-MAX ARITHMETIC:\n"
+                 "22. DIFFERENCE BETWEEN HIGHEST AND LOWEST / MIN-MAX ARITHMETIC:\n"
                  "   - When calculating the difference between the highest and lowest of a metric (e.g. 'difference between highest and lowest MRP', 'difference between max and min price/salary'):\n"
                  "   - ALWAYS generate: SELECT (MAX(TRY_CAST(\"col\" AS DOUBLE)) - MIN(TRY_CAST(\"col\" AS DOUBLE))) AS difference, MAX(TRY_CAST(\"col\" AS DOUBLE)) AS highest_val, MIN(TRY_CAST(\"col\" AS DOUBLE)) AS lowest_val FROM dataset;\n"
                  "   - If there are multiple candidate price columns (e.g. MRP, New MRP), pick the primary price/MRP column. NEVER write aliases containing SQL keywords like 'AS difference BETWEEN ...'.\n"
-                 "22. DIAMETER, MEASUREMENTS & MULTI-KEYWORD ENTITY FILTERING (e.g. Dia, Diameter, Ø180, clutch set):\n"
+                 "23. DIAMETER, MEASUREMENTS & MULTI-KEYWORD ENTITY FILTERING (e.g. Dia, Diameter, Ø180, clutch set):\n"
                  "   - In automotive/engineering datasets, 'Dia' stands for diameter and stores values like 'Ø180', 'Ø430', '180mm'.\n"
                  "   - For highest/lowest diameter (e.g. 'Which product has the highest diameter?'): Extract numeric digits and cast: SELECT * FROM dataset ORDER BY TRY_CAST(regexp_extract(\"Dia\", '[0-9]+') AS DOUBLE) DESC LIMIT 5;\n"
                  "   - For filtering by diameter and product type (e.g. 'List all Ø180 clutch sets'): Separate distinct attributes using AND across candidate columns: WHERE (\"Dia\" ILIKE '%180%' OR \"Description\" ILIKE '%180%') AND (\"Description\" ILIKE '%clutch%' OR \"Ceekay Part No\" ILIKE '%clutch%'). NEVER combine distinct concepts into a single literal string like '%180%clutch%'.\n"
@@ -410,10 +537,10 @@ class PandasQueryEngine:
             sql_query = _clean_sql_query(sql_query)
             logger.info(f"Generated DuckDB SQL: {sql_query} | Explanation: {query_plan.explanation}")
             
-            # Security check
-            forbidden_kw = ["INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "CREATE ", "REPLACE ", "EXEC ", "ATTACH ", "DETACH "]
-            if any(kw in sql_query.upper() for kw in forbidden_kw):
-                return "Error: Security violation - only read-only SELECT queries are permitted."
+            # Defense-in-depth SQL security validation
+            sec_err = validate_sql_security(sql_query)
+            if sec_err:
+                return sec_err
             
             # 5. EXECUTE SECURELY (with Layer 2 Self-Healing SQL Repair on Parser/Syntax Errors)
             rows = []
@@ -454,6 +581,10 @@ class PandasQueryEngine:
                     sql_query = _clean_sql_query(repaired_plan.sql)
                     logger.info(f"Self-Healed DuckDB SQL: {sql_query} | Explanation: {repaired_plan.explanation}")
                     
+                    sec_err_repair = validate_sql_security(sql_query)
+                    if sec_err_repair:
+                        return sec_err_repair
+                    
                     rows, col_names = await asyncio.to_thread(_execute_sql, sql_query)
                     query_plan = repaired_plan
                 except Exception as e_retry:
@@ -472,8 +603,14 @@ class PandasQueryEngine:
                          "You are an enterprise DuckDB SQL expert. The previous SQL query returned 0 rows because the WHERE filter was too strict or queried the wrong column.\n"
                          "CRITICAL RECOVERY RULES:\n"
                          "1. Rewrite the DuckDB SELECT query on table 'dataset' using case-insensitive partial string matching (ILIKE or LOWER(\"col\") LIKE '%val%') so matching rows are found.\n"
-                         "2. If searching for multiple keywords (e.g. diameter 180 and clutch set), separate with AND across candidate columns (e.g. (Dia ILIKE '%180%' OR Description ILIKE '%180%') AND Description ILIKE '%clutch%').\n"
-                         "3. Omit hyphens, apostrophes, and punctuation by inserting wildcards between alphanumeric tokens (e.g. '%7803%9636473%a%'). Select all columns (`SELECT * FROM dataset ...`).\n\n"
+                          "2. If searching for an entity or movie title, check across candidate text columns using OR (e.g., LOWER(\"Title\") LIKE '%val%' OR LOWER(\"Overview\") LIKE '%val%').\n"
+                          "3. If searching for multiple keywords (e.g. diameter 180 and clutch set), separate with AND across candidate columns (e.g. (Dia ILIKE '%180%' OR Description ILIKE '%180%') AND Description ILIKE '%clutch%').\n"
+                          "4. Omit hyphens, apostrophes, and punctuation by inserting wildcards between alphanumeric tokens (e.g. '%7803%9636473%a%', '%ron%gone%wrong%'). Select all columns (`SELECT * FROM dataset ...`).\n"
+                          "5. PARENTHESES RULE: Any OR-grouped conditions combined with a shared AND filter\n"
+                          "   MUST be explicitly parenthesized. SQL evaluates AND before OR, so\n"
+                          "   \"A OR B AND C\" silently becomes \"A OR (B AND C)\" — almost never what's intended.\n"
+                          "   WRONG:  WHERE col1 LIKE '%x%' OR col2 LIKE '%x%' AND col3 LIKE '%y%'\n"
+                          "   RIGHT:  WHERE (col1 LIKE '%x%' OR col2 LIKE '%x%') AND col3 LIKE '%y%'\n\n"
                          "Available columns in 'dataset':\n{columns}\n\n"
                          "Return ONLY valid JSON with 'sql' and 'explanation' without markdown fences."),
                         ("user",
@@ -487,6 +624,24 @@ class PandasQueryEngine:
                     })
                     fuzzy_plan = DuckDBSemanticQuery(**fuzzy_dict)
                     sql_query = _clean_sql_query(fuzzy_plan.sql)
+                    
+                    def _has_unparenthesized_or_and(sql: str) -> bool:
+                        where_clause = sql.split("WHERE", 1)[-1] if "WHERE" in sql.upper() else sql
+                        return bool(re.search(r"\bOR\b(?!.*\)).*\bAND\b", where_clause, re.IGNORECASE)) \
+                            and "(" not in where_clause
+                            
+                    if _has_unparenthesized_or_and(sql_query):
+                        logger.warning(f"Unparenthesized OR...AND detected in generated SQL: {sql_query}. Auto-wrapping OR conditions in parentheses.")
+                        if " WHERE " in sql_query.upper():
+                            # Crude but effective programmatic wrap
+                            parts = re.split(r'\bWHERE\b', sql_query, maxsplit=1, flags=re.IGNORECASE)
+                            where_part = parts[1]
+                            # Split by AND, wrap any part containing OR
+                            and_parts = re.split(r'\bAND\b', where_part, flags=re.IGNORECASE)
+                            for i, part in enumerate(and_parts):
+                                if re.search(r'\bOR\b', part, re.IGNORECASE) and "(" not in part:
+                                    and_parts[i] = f" ({part.strip()}) "
+                            sql_query = f"{parts[0]} WHERE {' AND '.join(and_parts)}"
                     logger.info(f"Layer 3 Healed DuckDB SQL: {sql_query} | Explanation: {fuzzy_plan.explanation}")
                     
                     rows, col_names = await asyncio.to_thread(_execute_sql, sql_query)
@@ -495,7 +650,7 @@ class PandasQueryEngine:
                     logger.warning(f"Fuzzy retry failed: {fuzzy_err}")
 
             if not rows:
-                return f"{query_plan.explanation}\nNo records matched your query."
+                return f"Error: {query_plan.explanation}\nNo records matched your query. Not present in dataset."
                 
             formatted = ""
             # Format clean, enterprise-grade response
@@ -527,15 +682,6 @@ class PandasQueryEngine:
             
         except Exception as e:
             logger.error(f"PandasQueryEngine Execution Failed: {e}", exc_info=True)
+            if paths_to_register:
+                invalidate_duckdb_engine_cache(paths_to_register)
             return f"Error during data analysis: {str(e)}"
-        finally:
-            if engine is not None:
-                try:
-                    engine.dispose()
-                except Exception:
-                    pass
-            if temp_db_path and os.path.exists(temp_db_path):
-                try:
-                    os.remove(temp_db_path)
-                except Exception:
-                    pass

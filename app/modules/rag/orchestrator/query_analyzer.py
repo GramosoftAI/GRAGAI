@@ -1,6 +1,7 @@
 import re
 import json
 import logging
+import asyncio
 from enum import Enum
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
@@ -24,7 +25,7 @@ class QueryIntent(Enum):
 class QueryMetadata(BaseModel):
     query_embedding: Optional[List[float]] = None
     quarter: Optional[str] = Field(None, description="E.g., Q1, Q2, Q3, Q4")
-    year: Optional[str] = Field(None, description="E.g., 2023, 2024, FY23")
+    year: Optional[Any] = Field(None, description="E.g., 2023, 2024, FY23")
     company: Optional[str] = Field(None, description="Company name mentioned in query")
     document_type: Optional[str] = Field(None, description="E.g., 10-Q, 10-K, Earnings Call")
     primary_topic: Optional[str] = Field(None, description="Primary domain topic (e.g., Accounting, Revenue, Tax)")
@@ -34,6 +35,7 @@ class QueryMetadata(BaseModel):
     vector_subquery: Optional[str] = Field(None, description="Extracted sub-query meant for unstructured document/text data with pronouns resolved.")
     query_embedding: Optional[List[float]] = Field(None, description="Cached embedding of the query")
     structured_queries: List[str] = Field(default_factory=list, description="A list of structured/rephrased queries to try in order.")
+    target_kb_id: Optional[str] = Field(None, description="Explicitly targeted Knowledge Base ID from fast-routing gate")
 
 
 class AnalysisResult(BaseModel):
@@ -50,7 +52,7 @@ class QueryAnalyzer:
     """
     
     def __init__(self):
-        self.llm_client = DeepInfraLLMClient()
+        self.llm_client = DeepInfraLLMClient.get_instance()
         
     @staticmethod
     def normalize_query_text(text: str) -> str:
@@ -64,7 +66,7 @@ class QueryAnalyzer:
         text = re.sub(r'[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff\u200b]', ' ', text)
         return text.strip()
 
-    async def analyze_query(self, query: str, kb_context: str = "", chat_history: Optional[str] = None, tenant_id: Optional[str] = None, user_id: Optional[str] = None) -> AnalysisResult:
+    async def analyze_query(self, query: str, kb_context: str = "", chat_history: Optional[str] = None, tenant_id: Optional[str] = None, user_id: Optional[str] = None, session_id: Optional[str] = None) -> AnalysisResult:
         """
         Uses LLM to extract intent and metadata in a single pass.
         """
@@ -90,7 +92,7 @@ class QueryAnalyzer:
             if re.search(r'\b(serial\s*number|part\s*number|part\s*no|partno|article\s*no|articleno|article\s*number|sr\s*no|sr\.\s*no|sl\s*no|sl\.\s*no|item\s*code|hsn\s*code|model\s*number|product\s*code|product\s*details|details\s+for|details\s+of)\b', q_strip, re.IGNORECASE):
                 is_tabular_override = True
 
-        kb_context_section = f"\n[ACTIVE KNOWLEDGE BASES CONTEXT]\nThe user is searching across these knowledge bases. Use this context to deduce the meaning of ambiguous terms:\n{kb_context}\n" if kb_context else ""
+        kb_context_section = f"\n[ACTIVE KNOWLEDGE BASES CONTEXT & SCHEMA VOCABULARY]\nThe user is searching across these knowledge bases. Use the provided column names and sample categorical values to resolve ambiguous terms and identify structured tabular queries:\n{kb_context}\n" if kb_context else ""
         
         chat_history_section = ""
         if chat_history:
@@ -106,7 +108,7 @@ TASKS:
 2. KEYWORDS: Extract key search terms/entities in `keywords` list.
 3. TABULAR: Set `is_tabular` to true if query asks for numbers, sums, counts, prices, salary, HSN, table records; false otherwise.
 4. COMPOSITE: If query asks both tabular and text questions, split into `tabular_subquery` and `vector_subquery` (resolving pronouns). Otherwise null.
-5. INTENT: One of FACT, CALCULATION, COMPARISON, TEMPORAL, STRUCTURAL, TABLE, SUMMARY, WHY, UNKNOWN.
+5. INTENT: One of FACT, CALCULATION, COMPARISON, TEMPORAL, STRUCTURAL, TABLE, SUMMARY, WHY, GRAPH, UNKNOWN.
 
 CRITICAL TASK: STRUCTURED QUERY REPHRASING
 You must generate an array of 3 optimized retrieval queries based on the user's input in the `structured_queries` field inside the `metadata` object. 
@@ -141,6 +143,7 @@ INTENTS:
 - TABLE: Explicitly asking about a table or cell.
 - SUMMARY: Needs an overview or tl;dr.
 - WHY: Needs reasoning or explanation.
+- GRAPH: Requires relationship/connected-entity reasoning, graph traversal, or knowledge-graph-based retrieval.
 - UNKNOWN: Fallback if nothing matches.
 
 Return ONLY valid JSON:
@@ -198,9 +201,8 @@ QUERY:
 """
         from app.core.llm.routing import LLMTask
         
-        import asyncio
-        # We will try up to 2 times (1 initial + 1 retry)
-        max_attempts = 2
+        # We will try up to 1 times (no retries to bound latency)
+        max_attempts = 1
         for attempt in range(max_attempts):
             try:
                 response = await asyncio.wait_for(
@@ -212,7 +214,9 @@ QUERY:
                         enable_thinking=False,
                         model=self.llm_client.model_intent,
                         timeout=30.0, # Resilient timeout to handle provider load
-                        task=LLMTask.INTENT_DETECTION
+                        task=LLMTask.INTENT_DETECTION,
+                        tenant_id=tenant_id,
+                        user_id=user_id
                     ),
                     timeout=32.0
                 )
@@ -235,31 +239,36 @@ QUERY:
                 metadata_dict = data.get("metadata", {})
                 keywords = metadata_dict.get("keywords", [])
                 
-                # If keywords are empty and we have a retry left, modify prompt and retry
-                if not keywords and attempt < max_attempts - 1:
-                    logger.warning("QueryAnalyzer returned empty keywords. Retrying with explicit repair instruction.")
-                    prompt += "\n\nCRITICAL REPAIR INSTRUCTION: You previously returned an empty keywords list. You MUST extract the key entities/nouns from this query into the `keywords` array."
-                    continue
-                    
-                # Final fallback NLP extraction (using LLM as requested, since spaCy is missing)
-                if not keywords and attempt == max_attempts - 1:
-                    logger.warning("QueryAnalyzer LLM retry failed to produce keywords. Running fast NLP fallback extraction.")
-                    fallback_prompt = f"Extract the most important nouns or proper nouns from this query. Output ONLY a comma-separated list of words. Query: {query}"
-                    try:
-                        fallback_resp = await self.llm_client.generate_cloud(
-                            prompt=fallback_prompt, 
-                            system_prompt="You are a strict keyword extractor.",
-                            temperature=0.0,
-                            max_tokens=30,
-                            model=self.llm_client.model_intent
-                        )
-                        keywords = [k.strip().strip('"\'') for k in fallback_resp.split(",") if k.strip()]
-                        logger.info("keyword_extraction_fallback_triggered: nlp_fallback")
-                    except Exception as fallback_err:
-                        logger.error(f"NLP fallback keyword extraction failed: {fallback_err}")
-                elif keywords:
-                    tier = "llm_initial" if attempt == 0 else "llm_retry"
-                    logger.info(f"keyword_extraction_fallback_triggered: {tier}")
+                # Skip fallback if it's a tabular query, since keywords are only for vector search
+                is_tabular = data.get("is_tabular", False)
+                if not keywords and is_tabular:
+                    logger.info("Skipping keyword extraction fallback for tabular query.")
+                else:
+                    # If keywords are empty and we have a retry left, modify prompt and retry
+                    if not keywords and attempt < max_attempts - 1:
+                        logger.warning("QueryAnalyzer returned empty keywords. Retrying with explicit repair instruction.")
+                        prompt += "\n\nCRITICAL REPAIR INSTRUCTION: You previously returned an empty keywords list. You MUST extract the key entities/nouns from this query into the `keywords` array."
+                        continue
+                        
+                    # Final fallback NLP extraction (using LLM as requested, since spaCy is missing)
+                    if not keywords and attempt == max_attempts - 1:
+                        logger.warning("QueryAnalyzer LLM retry failed to produce keywords. Running fast NLP fallback extraction.")
+                        fallback_prompt = f"Extract the most important nouns or proper nouns from this query. Output ONLY a comma-separated list of words. Query: {query}"
+                        try:
+                            fallback_resp = await self.llm_client.generate_cloud(
+                                prompt=fallback_prompt, 
+                                system_prompt="You are a strict keyword extractor.",
+                                temperature=0.0,
+                                max_tokens=30,
+                                model=self.llm_client.model_intent
+                            )
+                            keywords = [k.strip().strip('"\'') for k in fallback_resp.split(",") if k.strip()]
+                            logger.info("keyword_extraction_fallback_triggered: nlp_fallback")
+                        except Exception as fallback_err:
+                            logger.error(f"NLP fallback keyword extraction failed: {fallback_err}")
+                    elif keywords:
+                        tier = "llm_initial" if attempt == 0 else "llm_retry"
+                        logger.info(f"keyword_extraction_fallback_triggered: {tier}")
                     
                 intent_str = data.get("intent", "UNKNOWN").upper()
                 try:
@@ -291,7 +300,6 @@ QUERY:
                 )
                 
             except Exception as e:
-                import asyncio
                 if isinstance(e, asyncio.TimeoutError):
                     logger.error(f"QueryAnalyzer LLM request timed out on attempt {attempt + 1}")
                 else:
@@ -299,14 +307,25 @@ QUERY:
                     
                 if attempt == max_attempts - 1:
                     logger.warning("QueryAnalyzer exhausted retries. Falling back to heuristic defaults.")
+                    
+                    # Heuristic Fallback Rewrite: check for pinned KB
+                    fallback_query = q_strip
+                    if session_id:
+                        from app.modules.rag.file_router.router import _SESSION_PINNED_KBS
+                        pinned = _SESSION_PINNED_KBS.get(session_id)
+                        if pinned:
+                            pinned_name = pinned.get("name")
+                            fallback_query = f"{q_strip} {pinned_name}"
+                            logger.info(f"QueryAnalyzer timeout: Appended pinned KB '{pinned_name}' to fallback query.")
+                    
                     # Fallback path: treat as SUMMARY/FACT heuristically so request isn't blocked
                     return AnalysisResult(
                         intent=QueryIntent.SUMMARY,
                         metadata=QueryMetadata(
-                            keywords=[q_strip],
-                            corrected_query=q_strip
+                            keywords=[fallback_query],
+                            corrected_query=fallback_query
                         ),
-                        is_tabular=is_tabular_override,
+                        is_tabular=False,
                         confidence=0.5,
                         reasoning=f"Provider timeout/error fallback. Original error: {e}"
                     )

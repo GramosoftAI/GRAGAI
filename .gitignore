@@ -85,6 +85,12 @@ vector_extracted/
 scratch*.py
 scratch_mod*.py
 test_chunk*.py
+old_service.py
+test_widget.html
+remote_responses_log.json
+*.patch
+diff*.patch
+diff*.txt
 
 # ==========================================================
 # Documentation / Analysis (Local Only)
@@ -282,7 +288,10 @@ test_*.py
 
 frontend/
 data/parquet/*.parquet
+data/parquet/*.json
+data/parquet/active_datasets.json
 repair.py
 
 RAG_Test_Analytics_Report_of_gramosoft_site.md
 RAG_Test_Analytics_Report_of_gramosoft_site_old.md
+

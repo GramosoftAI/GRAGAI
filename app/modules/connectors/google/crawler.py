@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from app.core.connectors import CheckpointedConnector, SlimDocument, HierarchyNode, ConnectorCheckpoint, StageCompletion
-from .auth import GoogleAuthManager, execute_google_request
+from .auth import GoogleAuthManager, execute_google_request, DRIVE_SCOPES
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class GoogleDriveConnector(CheckpointedConnector[ConnectorCheckpoint]):
         return ids
 
     def load_credentials(self, credentials: Dict[str, Any]) -> Dict[str, Any] | None:
-        return self.auth_manager.load_credentials(credentials)
+        return self.auth_manager.load_credentials(credentials, scopes=DRIVE_SCOPES)
 
     def build_dummy_checkpoint(self) -> ConnectorCheckpoint:
         return ConnectorCheckpoint(

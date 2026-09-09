@@ -3,7 +3,8 @@ import os
 import logging
 import time
 import json
-from typing import Optional, List
+import duckdb
+from typing import Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class ParquetIngester:
         # Automatic Header Offset / Multi-row Header Cleaner
         unnamed_cols = [c for c in df.columns if '__UNNAMED__' in c.upper() or c.strip() == '' or c.lower().startswith('unnamed')]
         if len(unnamed_cols) >= 2 and len(df) > 1:
-            for row_idx in range(min(3, len(df))):
+            for row_idx in range(min(5, len(df))):
                 row_vals = [str(df[c][row_idx] or '').strip() for c in df.columns]
                 non_empty = [v for v in row_vals if v and not v.startswith('__UNNAMED__') and not v.lower().startswith('unnamed')]
                 if len(non_empty) >= len(df.columns) * 0.4:
@@ -46,12 +47,13 @@ class ParquetIngester:
                     break
 
         # Sanitize column names: strip trailing dots, newlines, and excess whitespace
+        from app.core.excel_extractor import ExcelExtractor
         sanitized_cols = []
         seen_cols = {}
-        for c in df.columns:
-            clean_c = str(c).replace('\n', ' ').strip().rstrip('.').strip()
+        for i, c in enumerate(df.columns):
+            clean_c = ExcelExtractor._normalize_header(str(c)) if hasattr(ExcelExtractor, '_normalize_header') else str(c).replace('\n', ' ').strip().rstrip('.').strip()
             if not clean_c:
-                clean_c = "Column"
+                clean_c = f"column_{i+1}"
             if clean_c in seen_cols:
                 seen_cols[clean_c] += 1
                 clean_c = f"{clean_c}_{seen_cols[clean_c]}"
@@ -65,7 +67,7 @@ class ParquetIngester:
         return df
 
     @staticmethod
-    def ingest_to_parquet(file_path: str, output_dir: str = "data/parquet", dataset_name: Optional[str] = None) -> tuple[Optional[str], dict]:
+    def ingest_to_parquet(file_path: str, output_dir: str = "data/parquet", dataset_name: Optional[str] = None) -> tuple[Optional[str], dict, dict]:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File {file_path} not found.")
             
@@ -76,7 +78,8 @@ class ParquetIngester:
             
         os.makedirs(output_dir, exist_ok=True)
         base_name = os.path.basename(file_path)
-        name_without_ext = dataset_name or os.path.splitext(base_name)[0]
+        raw_name = dataset_name or os.path.splitext(base_name)[0]
+        name_without_ext = os.path.splitext(raw_name)[0] if raw_name.lower().endswith(('.csv', '.xlsx', '.xls', '.parquet')) else raw_name
         
         # PRODUCTION FIX: Parquet File Lock Contention (Versioning)
         # We append a timestamp so active queries on older files are never violently locked out.
@@ -84,7 +87,7 @@ class ParquetIngester:
         versioned_filename = f"{name_without_ext}_{timestamp}.parquet"
         output_path = os.path.join(output_dir, versioned_filename)
         
-        logger.info(f"Starting memory-safe versioned ingestion for {file_path}")
+        logger.info(f"Starting memory-safe versioned ingestion for {file_path} (registry key={name_without_ext})")
         
         try:
             sheet_filenames = []
@@ -116,6 +119,7 @@ class ParquetIngester:
                 try:
                     excel_reader = fastexcel.read_excel(file_path)
                     sheet_names = excel_reader.sheet_names
+                    logger.info(f"Discovered Excel sheet names in {file_path}: {sheet_names}")
                 except Exception as e:
                     logger.warning(f"fastexcel failed reading sheet names ({e}), falling back to default sheet")
                     sheet_names = [None]
@@ -167,6 +171,8 @@ class ParquetIngester:
                 with open(registry_path, 'r') as f:
                     registry = json.load(f)
             
+            old_versioned_filename = registry.get(name_without_ext)
+            
             registry[name_without_ext] = versioned_filename
             if sheet_filenames:
                 registry[f"{name_without_ext}__sheets"] = sheet_filenames
@@ -176,19 +182,62 @@ class ParquetIngester:
             with open(registry_path, 'w') as f:
                 json.dump(registry, f, indent=4)
                 
-            # Extract categorical registry
+            # Extract schema and categorical registry
             categorical_registry = {}
+            schema_registry = {}
             try:
                 df = pl.read_parquet(output_path)
                 for col in df.columns:
+                    schema_registry[col] = str(df[col].dtype)
                     if df[col].dtype == pl.String or df[col].dtype == pl.Utf8:
                         unique_vals = df[col].drop_nulls().unique().to_list()
                         if len(unique_vals) < 50:
                             categorical_registry[col] = unique_vals
             except Exception as e:
-                logger.warning(f"Failed to extract categorical values: {e}")
+                logger.warning(f"Failed to extract schema and categorical values: {e}")
+                df = None
+                            
+            # Build ID index using duckdb to ensure we don't miss numeric IDs
+            id_index = {}
+            id_index_path = os.path.join(output_dir, f"{name_without_ext}_idindex.json")
+            if df is not None:
+                try:
+                    t0 = time.time()
+                    con = duckdb.connect()
+                    # We consider any column a potential ID column if it's not a tiny categorical
+                    for col in df.columns:
+                        if col in categorical_registry:
+                            continue
+                        
+                        # Read unique values cast to string, upper-cased and trimmed
+                        query = f"""
+                            SELECT DISTINCT UPPER(TRIM(CAST("{col}" AS VARCHAR))) 
+                            FROM read_parquet(?)
+                            WHERE "{col}" IS NOT NULL
+                        """
+                        values = con.execute(query, [output_path]).fetchall()
+                        
+                        # Filter out purely short noise, keep if reasonable cardinality
+                        vals = [v[0] for v in values if v[0] and len(v[0]) > 2]
+                        if 0 < len(vals) < 100000:
+                            id_index[col] = vals
+                    
+                    with open(id_index_path, 'w') as f:
+                        json.dump(id_index, f)
+                    
+                    logger.info(f"Built ID index for {name_without_ext} in {time.time()-t0:.2f}s: {len(id_index)} columns, {sum(len(v) for v in id_index.values())} total values")
+                except Exception as e:
+                    logger.warning(f"Failed to build ID index: {e}")
                 
-            return output_path, categorical_registry
+            # POST-SUCCESS CLEANUP: Safely remove obsolete previous versions after reference update
+            ParquetIngester._cleanup_obsolete_versions(
+                dataset_name=name_without_ext,
+                active_filename=versioned_filename,
+                output_dir=output_dir,
+                old_versioned_filename=old_versioned_filename
+            )
+
+            return output_path, categorical_registry, schema_registry
             
         except Exception as e:
             logger.error(f"Failed to ingest file to Parquet: {e}")
@@ -208,47 +257,102 @@ class ParquetIngester:
         return n
 
     @staticmethod
+    def _cleanup_obsolete_versions(dataset_name: str, active_filename: str, output_dir: str, old_versioned_filename: Optional[str] = None):
+        """
+        Safely removes obsolete, unreferenced versioned Parquet files for a given dataset
+        only AFTER new file creation and registry update have succeeded.
+        """
+        try:
+            # 1. Clean explicit previous file recorded in registry if present
+            if old_versioned_filename and old_versioned_filename != active_filename:
+                old_file_path = os.path.join(output_dir, old_versioned_filename)
+                if os.path.exists(old_file_path):
+                    try:
+                        os.remove(old_file_path)
+                        logger.info(f"Post-success cleanup: Removed previous Parquet version {old_file_path}")
+                    except Exception as err:
+                        logger.warning(f"Post-success cleanup: Could not delete prior version {old_file_path} (may be locked): {err}")
+
+            # 2. Sweep for any untracked orphan files matching {dataset_name}_*.parquet that are not active_filename
+            if os.path.exists(output_dir):
+                prefix = f"{dataset_name}_"
+                for fname in os.listdir(output_dir):
+                    if fname.startswith(prefix) and fname.endswith(".parquet") and fname != active_filename:
+                        orphan_path = os.path.join(output_dir, fname)
+                        try:
+                            os.remove(orphan_path)
+                            logger.info(f"Post-success cleanup: Removed orphan Parquet version {orphan_path}")
+                        except Exception as err:
+                            logger.warning(f"Post-success cleanup: Could not remove orphan file {orphan_path}: {err}")
+        except Exception as e:
+            logger.error(f"Error during post-success Parquet cleanup for {dataset_name}: {e}")
+
+    @staticmethod
     def get_active_dataset(dataset_name: str, output_dir: str = "data/parquet") -> Optional[str]:
-        """Retrieves the filepath of the most recent version of a dataset."""
+        """
+        Retrieves the filepath of the most recent version of a dataset.
+        Includes single-source-of-truth registry lookup + resilient fuzzy fallback sweep.
+        """
+        if not dataset_name:
+            return None
+
         if not os.path.isabs(output_dir):
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             output_dir = os.path.join(base_dir, output_dir)
-            
+
         clean_name = ParquetIngester._clean_dataset_name(dataset_name)
+        clean_key = clean_name
+        if clean_key.lower().endswith(('.csv', '.xlsx', '.xls', '.parquet')):
+            clean_key = os.path.splitext(clean_key)[0]
+
+        # 1. Primary Registry Lookup
         registry_path = os.path.join(output_dir, "active_datasets.json")
         if os.path.exists(registry_path):
-            with open(registry_path, 'r') as f:
-                registry = json.load(f)
-                # 1. Exact match
-                if dataset_name in registry:
-                    p = os.path.join(output_dir, registry[dataset_name])
-                    if os.path.exists(p):
-                        return p
-                # 2. Cleaned name match
-                if clean_name in registry:
-                    p = os.path.join(output_dir, registry[clean_name])
-                    if os.path.exists(p):
-                        return p
-                # 3. Case-insensitive / normalized search
-                norm_target = clean_name.lower().replace(" ", "").replace("_", "").replace("-", "")
-                for k, v in registry.items():
-                    if k.endswith("__sheets"):
-                        continue
-                    k_norm = k.lower().replace(" ", "").replace("_", "").replace("-", "")
-                    if k_norm == norm_target:
-                        p = os.path.join(output_dir, v)
-                        if os.path.exists(p):
-                            return p
+            try:
+                with open(registry_path, 'r') as f:
+                    registry = json.load(f)
+                    lookup_keys = [clean_key, clean_name, dataset_name, dataset_name.strip()]
+                    for key in lookup_keys:
+                        if key in registry:
+                            candidate = os.path.join(output_dir, registry[key])
+                            if os.path.exists(candidate):
+                                return candidate
+                            logger.warning(f"[PARQUET_REGISTRY] Key '{key}' in registry points to missing file '{candidate}'. Running fallback sweep...")
+                    
+                    # Case-insensitive / normalized search in registry
+                    norm_target = clean_name.lower().replace(" ", "").replace("_", "").replace("-", "")
+                    for k, v in registry.items():
+                        if k.endswith("__sheets"):
+                            continue
+                        k_norm = k.lower().replace(" ", "").replace("_", "").replace("-", "")
+                        if k_norm == norm_target:
+                            candidate = os.path.join(output_dir, v)
+                            if os.path.exists(candidate):
+                                return candidate
+            except Exception as reg_err:
+                logger.warning(f"[PARQUET_REGISTRY] Failed to read registry at {registry_path}: {reg_err}")
 
-        # 4. Physical directory scan fallback
-        import glob
-        pattern = os.path.join(output_dir, f"{clean_name}*.parquet")
-        matches = glob.glob(pattern)
-        if matches:
-            # Sort newest first
-            matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-            return matches[0]
+        # 2. Resilient Fuzzy / Glob Fallback Sweep
+        if os.path.exists(output_dir):
+            target_prefix = f"{clean_key.lower()}_"
+            target_exact = f"{clean_key.lower()}.parquet"
 
+            candidates = []
+            for fname in os.listdir(output_dir):
+                fn_lower = fname.lower()
+                if fn_lower == target_exact or (fn_lower.startswith(target_prefix) and fn_lower.endswith(".parquet")):
+                    full_p = os.path.join(output_dir, fname)
+                    if os.path.exists(full_p):
+                        mtime = os.path.getmtime(full_p)
+                        candidates.append((mtime, full_p))
+
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                selected_path = candidates[0][1]
+                logger.warning(f"[PARQUET_REGISTRY_FALLBACK] Resolved dataset '{dataset_name}' to newest parquet file '{selected_path}' via fuzzy fallback sweep.")
+                return selected_path
+
+        logger.error(f"[PARQUET_REGISTRY] Could not find any parquet file for dataset_name='{dataset_name}' in '{output_dir}'")
         return None
 
     @staticmethod
@@ -298,36 +402,50 @@ class ParquetIngester:
 
     @staticmethod
     def delete_active_dataset(dataset_name: str, output_dir: str = "data/parquet") -> bool:
-        """Deletes the physical Parquet file and its registry entry from active_datasets.json."""
+        """Deletes all physical Parquet file(s) and registry entry for a dataset."""
         if not os.path.isabs(output_dir):
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             output_dir = os.path.join(base_dir, output_dir)
             
         registry_path = os.path.join(output_dir, "active_datasets.json")
-        if not os.path.exists(registry_path):
-            return False
-            
+        deleted_any = False
         try:
-            with open(registry_path, 'r') as f:
-                registry = json.load(f)
+            registry = {}
+            if os.path.exists(registry_path):
+                with open(registry_path, 'r') as f:
+                    registry = json.load(f)
                 
-            if dataset_name in registry:
-                filename = registry[dataset_name]
-                file_path = os.path.join(output_dir, filename)
-                
-                # Delete physical file
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    logger.info(f"Deleted physical Parquet file: {file_path}")
-                else:
-                    logger.warning(f"Physical Parquet file not found to delete: {file_path}")
-                
-                # Remove from registry
-                del registry[dataset_name]
-                with open(registry_path, 'w') as f:
-                    json.dump(registry, f, indent=4)
-                logger.info(f"Removed registry entry for {dataset_name}")
-                return True
+                if dataset_name in registry:
+                    filename = registry[dataset_name]
+                    file_path = os.path.join(output_dir, filename)
+                    
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                            logger.info(f"Deleted physical Parquet file: {file_path}")
+                            deleted_any = True
+                        except Exception as err:
+                            logger.warning(f"Physical Parquet file not found or locked: {file_path}: {err}")
+                    
+                    del registry[dataset_name]
+                    with open(registry_path, 'w') as f:
+                        json.dump(registry, f, indent=4)
+                    logger.info(f"Removed registry entry for {dataset_name}")
+
+            # Also sweep and remove any orphaned versioned files matching {dataset_name}_*.parquet
+            if os.path.exists(output_dir):
+                prefix = f"{dataset_name}_"
+                for fname in os.listdir(output_dir):
+                    if fname.startswith(prefix) and fname.endswith(".parquet"):
+                        orphan_path = os.path.join(output_dir, fname)
+                        try:
+                            os.remove(orphan_path)
+                            logger.info(f"Deleted orphaned versioned Parquet file: {orphan_path}")
+                            deleted_any = True
+                        except Exception as err:
+                            logger.warning(f"Could not delete orphan Parquet file {orphan_path}: {err}")
+                            
+            return deleted_any
         except Exception as e:
             logger.error(f"Failed to delete active dataset {dataset_name}: {e}")
-        return False
+            return False

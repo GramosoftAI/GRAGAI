@@ -631,9 +631,40 @@ class KnowledgeBaseService:
             if progress_callback:
                 await progress_callback(70, "Generating Document Embeddings")
 
-            # 3. GENERATE EMBEDDINGS (Optimized Batching)
+            # 3. GENERATE EMBEDDINGS (Context-Augmented Vector Embedding Input)
             t_embed_start = _time.time()
-            embeddings, emb_tokens = await EmbeddingGenerator.generate_embeddings_batch_with_usage(chunks)
+            
+            embedding_inputs = []
+            kb_name_str = (kb.name or "Document").strip()
+            generic_sections = {"main content", "introduction", "none", "", "n/a", "general"}
+            generic_categories = {"general_document", "general", "other", "unknown", ""}
+            
+            clean_category = (document_category or "").strip()
+            has_specific_category = clean_category.lower() not in generic_categories
+            
+            for i, chunk_text in enumerate(chunks):
+                sec = None
+                if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i]:
+                    sec = chunk_metadata_list[i].get("section")
+                
+                sec_str = str(sec).strip() if sec is not None else ""
+                
+                if sec_str and sec_str.lower() not in generic_sections:
+                    prefix = f"Document: {kb_name_str} | Section: {sec_str}"
+                elif has_specific_category:
+                    prefix = f"Document: {kb_name_str} | Type: {clean_category}"
+                else:
+                    prefix = f"Document: {kb_name_str}"
+                
+                if len(prefix) > 150:
+                    prefix = prefix[:147] + "..."
+                    
+                embedding_inputs.append(f"{prefix}\n\n{chunk_text}")
+
+            if embedding_inputs:
+                logger.info(f"Sample embedding context prefix: {embedding_inputs[0][:150]!r}")
+
+            embeddings, emb_tokens = await EmbeddingGenerator.generate_embeddings_batch_with_usage(embedding_inputs)
             audit_run.embedding_tokens = emb_tokens
             audit_run.embedding_cost_usd = (emb_tokens / 1000000.0) * 0.01
             # Yield control back to event loop so server stays responsive
@@ -724,6 +755,15 @@ class KnowledgeBaseService:
                     entities.add(match)
                 return [{"name": e, "type": "KEYWORD"} for e in sorted(list(entities))[:20]]
 
+            # Enterprise Smart KG Distributed Sampling:
+            # Deterministically select ~15 chunks distributed across beginning, middle, and end of the document.
+            total_chunks = len(chunks)
+            llm_budget = 15
+            if total_chunks <= llm_budget:
+                llm_chunk_indices = set(range(total_chunks))
+            else:
+                llm_chunk_indices = {round(i * (total_chunks - 1) / (llm_budget - 1)) for i in range(llm_budget)}
+
             async def safe_extract_unified(chunk_id: str, text: str, idx: int):
                 # Fast-Path: Skip LLM extraction for fluff chunks or purely structured spreadsheet chunks to save time
                 if skip_all_llm_extraction or not is_dense_chunk(text):
@@ -743,10 +783,10 @@ class KnowledgeBaseService:
                     cached_result["_metadata"]["cached"] = True
                     return cached_result
 
-                # Enterprise Smart KG Sampling:
-                # Run LLM KG extraction on top 15 chunks per document (with a 45-second timeout); 
-                # 0-ms Fast Deterministic Regex Entity Extraction on secondary chunks (idx >= 15)
-                if idx >= 15:
+                # Enterprise Smart KG Distributed Sampling:
+                # Run LLM KG extraction on ~15 distributed chunks per document; 
+                # 0-ms Fast Deterministic Regex Entity Extraction on secondary chunks (idx not in llm_chunk_indices)
+                if idx not in llm_chunk_indices:
                     routing_stats["fast_regex"] += 1
                     fast_entities = _fast_regex_extract_entities(text)
                     result = {"entities": fast_entities, "triplets": [], "structured": {"identifiers": [], "sections": []}, "_metadata": {"fast_regex": True, "chunk_idx": idx}}
@@ -923,6 +963,7 @@ class KnowledgeBaseService:
             structured_entities_to_save = []
             structured_sections_to_save = []
             for i, result in enumerate(structured_results):
+                chunk_page = chunk_metadata_list[i].get("page_number") if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else None
                 for ident in result.get("identifiers", []):
                     structured_entities_to_save.append(
                         DocumentEntity(
@@ -933,7 +974,7 @@ class KnowledgeBaseService:
                             start_offset=ident.get("start_offset"),
                             end_offset=ident.get("end_offset"),
                             source_text=ident.get("source_text"),
-                            page_number=1, # Assuming 1 for simplicity here, can be enhanced
+                            page_number=ident.get("page_number") or chunk_page,
                             confidence=ident.get("confidence", 1.0),
                             entity_status="REVIEW" if float(ident.get("confidence", 1.0)) < 0.80 else "VERIFIED"
                         )
@@ -945,7 +986,7 @@ class KnowledgeBaseService:
                             document_id=uuid.UUID(kb_id),
                             section_name=sec["name"],
                             section_json=sec["content"],
-                            page_number=1
+                            page_number=sec.get("page_number") or chunk_page
                         )
                     )
             
@@ -961,7 +1002,7 @@ class KnowledgeBaseService:
 
 
 
-            # 5. BATCH CREATE CHUNK NODES
+            # 5. BATCH CREATE CHUNK NODES & STAGE IN POSTGRESQL
 
             chunk_ids = [str(uuid.uuid4()) for _ in range(len(chunks))]
             chunk_section_map = {
@@ -970,202 +1011,140 @@ class KnowledgeBaseService:
                 if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i]
             }
 
+            # Full untruncated chunk text stored in Neo4j payload
             chunk_data = [{
-
                 "chunk_id": chunk_ids[i], "tenant_id": str(self.tenant_id), "kb_id": kb_id,
-
-                "text": chunks[i][:1000], "position": i, "token_count": TextChunker.estimate_tokens(chunks[i]),
-
+                "text": chunks[i], "position": i, "token_count": TextChunker.estimate_tokens(chunks[i]),
                 "embedding": embeddings[i], "created_at": datetime.utcnow().isoformat(),
-
                 "metadata": json.dumps(chunk_metadata_list[i]) if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else "{}",
                 "chunk_type": chunk_metadata_list[i].get("chunk_type", "generic") if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else "generic",
                 "section": chunk_metadata_list[i].get("section") if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else None,
                 "sheet": chunk_metadata_list[i].get("sheet") if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else None,
                 "source_type": chunk_metadata_list[i].get("source_type", source_type) if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else source_type
-
             } for i in range(len(chunks))]
 
-
-
-            # Save chunks to PostgreSQL pgvector table
-
+            # Save full untruncated chunks to PostgreSQL pgvector table
             for i in range(len(chunks)):
-
                 pg_chunk = DocumentChunk(
-
                     id=uuid.UUID(chunk_ids[i]),
-
                     tenant_id=self.tenant_id,
-
                     kb_id=uuid.UUID(kb_id),
-
                     text=chunks[i],
-
                     chunk_index=i,
-
                     embedding=embeddings[i],
-                    
                     section=chunk_section_map.get(chunk_ids[i]),
-                    
                     metadata_json=chunk_metadata_list[i] if chunk_metadata_list and i < len(chunk_metadata_list) and chunk_metadata_list[i] else {}
-
                 )
-
                 self.db.add(pg_chunk)
 
             logger.info(f" Staged {len(chunks)} chunks in PostgreSQL")
 
-
-
-            batch_create_query = """
-
-            WITH $chunks AS chunk_list
-
-            UNWIND chunk_list AS data
-
-            CREATE (c:Chunk {
-
-                id: data.chunk_id, tenant_id: $tenant_id, kb_id: data.kb_id,
-
-                text: data.text, position: data.position, token_count: data.token_count,
-
-                embedding: data.embedding, created_at: data.created_at,
-
-                source: data.source, metadata: data.metadata,
-                chunk_type: data.chunk_type, section: data.section,
-                sheet: data.sheet, source_type: data.source_type
-
-            })
-
-            WITH c, data
-
-            MATCH (kb:KnowledgeBase {id: data.kb_id, tenant_id: $tenant_id})
-
-            CREATE (kb)-[:HAS_CHUNK]->(c)
-
-            """
-
-            await retry_neo4j_operation(lambda: self.neo4j_repo.execute_write(batch_create_query, {"chunks": chunk_data}))
-
-            logger.info(f" Created {len(chunks)} chunks in Neo4j")
-
-
-
-            # 6. COMPUTE SEMANTIC SIMILARITIES (O(n) but fast for small docs)
-
+            # 6. COMPUTE SEMANTIC SIMILARITIES
             similar_pairs = []
-
             if len(embeddings) < settings.similarity_brute_force_threshold:
-
                 for i in range(len(embeddings)):
-
                     for j in range(i + 1, len(embeddings)):
-
                         sim = EmbeddingGenerator.cosine_similarity(embeddings[i], embeddings[j])
-
                         if sim >= settings.similarity_min_threshold:
-
                             similar_pairs.append({"chunk_id_1": chunk_ids[i], "chunk_id_2": chunk_ids[j], "similarity": sim})
-
-                # Cap similarities
-
                 similar_pairs = sorted(similar_pairs, key=lambda x: x["similarity"], reverse=True)[:len(chunks) * settings.max_similar_per_chunk]
 
-
-
-            # 7. PARALLELIZE RELATIONSHIP CREATION
-
-            relationship_tasks = []
-
-            
-
-            # NEXT rels
-
+            # 7. PREPARE RELATIONSHIP DATA
             next_data = [{"id1": chunk_ids[i], "id2": chunk_ids[i+1]} for i in range(len(chunk_ids)-1)]
 
-            if next_data:
-
-                relationship_tasks.append(retry_neo4j_operation(lambda: self.neo4j_repo.execute_write(
-
-                    "UNWIND $rels AS r MATCH (c1:Chunk {id: r.id1, tenant_id: $tenant_id}) MATCH (c2:Chunk {id: r.id2, tenant_id: $tenant_id}) CREATE (c1)-[:NEXT]->(c2)",
-
-                    {"rels": next_data}
-
-                )))
-
-
-
-            # SIMILAR rels
-
-            if similar_pairs:
-
-                relationship_tasks.append(retry_neo4j_operation(lambda: self.neo4j_repo.execute_write(
-
-                    "UNWIND $pairs AS p MATCH (c1:Chunk {id: p.chunk_id_1, tenant_id: $tenant_id}) MATCH (c2:Chunk {id: p.chunk_id_2, tenant_id: $tenant_id}) CREATE (c1)-[:SIMILAR {similarity: p.similarity}]->(c2) CREATE (c2)-[:SIMILAR {similarity: p.similarity}]->(c1)",
-
-                    {"pairs": similar_pairs}
-
-                )))
-
-
-
-            # MENTIONS rels
-
             mentions_data = []
-
             for idx, ents in entities_by_chunk.items():
+                for e in ents: 
+                    mentions_data.append({"chunk_id": chunk_ids[idx], "text": e["text"], "type": e["type"], "conf": e["confidence"]})
 
-                for e in ents: mentions_data.append({"chunk_id": chunk_ids[idx], "text": e["text"], "type": e["type"], "conf": e["confidence"]})
-
-            if mentions_data:
-
-                relationship_tasks.append(retry_neo4j_operation(lambda: self.neo4j_repo.execute_write(
-
-                    "UNWIND $rels AS r MERGE (e:Entity {tenant_id: $tenant_id, text: r.text, type: r.type}) WITH e, r MATCH (c:Chunk {id: r.chunk_id, tenant_id: $tenant_id}) CREATE (c)-[:MENTIONS {confidence: r.conf}]->(e)",
-
-                    {"rels": mentions_data}
-
-                )))
-
-
-
-            await asyncio.gather(*relationship_tasks)
-
-            logger.info(" Created all relationships in parallel")
-
-
-
-            # 8. TRIPLET PERSISTENCE
-
+            # 8. TRIPLET PERSISTENCE DATA
             triplet_stats = {"triplets_extracted": 0, "triplet_entities": 0, "triplet_relationships": 0}
-
             if use_triplets and triplet_results:
+                for i, res in enumerate(triplet_results): 
+                    res.chunk_id = chunk_ids[i]
 
-                from ...core.triplet_extractor import TripletGraphWriter
-
-                for i, res in enumerate(triplet_results): res.chunk_id = chunk_ids[i]
-
-                persist_result = await TripletGraphWriter(str(self.tenant_id)).persist_triplets(triplet_results)
-
-                triplet_stats = {"triplets_extracted": persist_result.get("triplets_created", 0), "triplet_entities": persist_result.get("entities_created", 0), "triplet_relationships": persist_result.get("relationships_created", 0)}
-
-            # 8.5 GRAPH CLEANUP (NEW) - Run Asynchronously
-            async def run_cleanup_async(tenant_id_str: str, kb_id_str: str):
+            # 8.5 ASYNCHRONOUS BACKGROUND NEO4J SYNCHRONIZATION
+            async def run_neo4j_sync_async(
+                neo4j_repo,
+                tenant_id_str: str,
+                kb_id_str: str,
+                doc_filename: str,
+                c_data: list,
+                n_data: list,
+                s_pairs: list,
+                m_data: list,
+                has_triplets: bool,
+                t_results: list
+            ):
                 try:
-                    logger.info(f"Background graph cleanup started for tenant {tenant_id_str} and KB {kb_id_str}...")
+                    logger.info(f"Background Neo4j sync started for KB {kb_id_str} ({len(c_data)} chunks)...")
+                    batch_create_query = """
+                    WITH $chunks AS chunk_list
+                    UNWIND chunk_list AS data
+                    CREATE (c:Chunk {
+                        id: data.chunk_id, tenant_id: $tenant_id, kb_id: data.kb_id,
+                        text: data.text, position: data.position, token_count: data.token_count,
+                        embedding: data.embedding, created_at: data.created_at,
+                        source: data.source, metadata: data.metadata,
+                        chunk_type: data.chunk_type, section: data.section,
+                        sheet: data.sheet, source_type: data.source_type
+                    })
+                    WITH c, data
+                    MATCH (kb:KnowledgeBase {id: data.kb_id, tenant_id: $tenant_id})
+                    CREATE (kb)-[:HAS_CHUNK]->(c)
+                    """
+                    await retry_neo4j_operation(lambda: neo4j_repo.execute_write(batch_create_query, {"chunks": c_data}))
+
+                    rel_tasks = []
+                    if n_data:
+                        rel_tasks.append(retry_neo4j_operation(lambda: neo4j_repo.execute_write(
+                            "UNWIND $rels AS r MATCH (c1:Chunk {id: r.id1, tenant_id: $tenant_id}) MATCH (c2:Chunk {id: r.id2, tenant_id: $tenant_id}) CREATE (c1)-[:NEXT]->(c2)",
+                            {"rels": n_data}
+                        )))
+                    if s_pairs:
+                        rel_tasks.append(retry_neo4j_operation(lambda: neo4j_repo.execute_write(
+                            "UNWIND $pairs AS p MATCH (c1:Chunk {id: p.chunk_id_1, tenant_id: $tenant_id}) MATCH (c2:Chunk {id: p.chunk_id_2, tenant_id: $tenant_id}) CREATE (c1)-[:SIMILAR {similarity: p.similarity}]->(c2) CREATE (c2)-[:SIMILAR {similarity: p.similarity}]->(c1)",
+                            {"pairs": s_pairs}
+                        )))
+                    if m_data:
+                        rel_tasks.append(retry_neo4j_operation(lambda: neo4j_repo.execute_write(
+                            "UNWIND $rels AS r MERGE (e:Entity {tenant_id: $tenant_id, text: r.text, type: r.type}) WITH e, r MATCH (c:Chunk {id: r.chunk_id, tenant_id: $tenant_id}) CREATE (c)-[:MENTIONS {confidence: r.conf}]->(e)",
+                            {"rels": m_data}
+                        )))
+
+                    if rel_tasks:
+                        await asyncio.gather(*rel_tasks)
+
+                    if has_triplets and t_results:
+                        from ...core.triplet_extractor import TripletGraphWriter
+                        await TripletGraphWriter(tenant_id_str).persist_triplets(t_results)
+
+                    # Run background graph cleanup
                     from ...core.graph_cleanup import GraphCleanupService
                     cleanup_service = GraphCleanupService(tenant_id=tenant_id_str, kb_id=kb_id_str)
-                    stats = await cleanup_service.cleanup_graph()
-                    logger.info(f"Background graph cleanup completed for tenant {tenant_id_str} and KB {kb_id_str}: {stats}")
-                except Exception as cleanup_err:
-                    logger.error(f"Background graph cleanup failed for tenant {tenant_id_str} and KB {kb_id_str}: {cleanup_err}", exc_info=True)
+                    await cleanup_service.cleanup_graph()
 
-            cleanup_stats = {"total_merges": 0, "relationships_deduplicated": 0}
-            # Start cleanup task in background, avoiding blocking the main ingestion pipeline completion
-            asyncio.create_task(run_cleanup_async(str(self.tenant_id), str(kb_id)))
+                    logger.info(f"[NEO4J_SYNC] Completed successfully | file={doc_filename} | kb_id={kb_id_str} | chunks={len(c_data)} | status=COMPLETED")
+                except Exception as sync_err:
+                    logger.error(f"[NEO4J_SYNC] Failed | file={doc_filename} | kb_id={kb_id_str} | chunks={len(c_data)} | status=FAILED | error={str(sync_err)}", exc_info=True)
+
+            # Start Neo4j sync in background so user-facing request doesn't wait unnecessarily
+            doc_file_label = getattr(kb, "name", None) or s3_path or source or str(kb_id)
+            asyncio.create_task(run_neo4j_sync_async(
+                self.neo4j_repo,
+                str(self.tenant_id),
+                str(kb_id),
+                doc_file_label,
+                chunk_data,
+                next_data,
+                similar_pairs,
+                mentions_data,
+                use_triplets,
+                triplet_results if use_triplets else []
+            ))
 
             # 9. FINAL UPDATE
+            cleanup_stats = {"total_merges": 0, "relationships_deduplicated": 0}
 
             neo4j_end_time = time.time()
             write_duration_ms = int((neo4j_end_time - neo4j_start_time) * 1000)
@@ -1533,6 +1512,29 @@ class KnowledgeBaseService:
                     kb_dict["connected_integration"] = 'outlook'
                 elif kb.source == 'web_scraper':
                     kb_dict["connected_integration"] = 'web_scraper'
+
+            # Format integration KB names to display "<file name> (google drive)" or "<Provider> Knowledge"
+            if kb_dict.get("connected_integration") == "google_drive":
+                curr_name = (kb_dict.get("name") or "").strip()
+                if "(google drive)" not in curr_name.lower() and curr_name.lower() != "google drive knowledge":
+                    if getattr(kb, "parsed_path", None):
+                        kb_dict["name"] = f"{kb.parsed_path} (google drive)"
+                    elif getattr(kb, "source", None) and not kb.source.startswith("google_drive") and kb.source != "user_upload":
+                        kb_dict["name"] = f"{kb.source} (google drive)"
+                    else:
+                        kb_dict["name"] = "Google Drive Knowledge"
+            elif kb_dict.get("connected_integration") == "sharepoint":
+                curr_name = (kb_dict.get("name") or "").strip()
+                if "(sharepoint)" not in curr_name.lower() and curr_name.lower() != "sharepoint knowledge":
+                    kb_dict["name"] = f"{kb.parsed_path} (sharepoint)" if getattr(kb, "parsed_path", None) else "SharePoint Knowledge"
+            elif kb_dict.get("connected_integration") == "gmail":
+                curr_name = (kb_dict.get("name") or "").strip()
+                if "(gmail)" not in curr_name.lower() and curr_name.lower() != "gmail knowledge":
+                    kb_dict["name"] = "Gmail Knowledge"
+            elif kb_dict.get("connected_integration") == "outlook":
+                curr_name = (kb_dict.get("name") or "").strip()
+                if "(outlook)" not in curr_name.lower() and curr_name.lower() != "outlook knowledge":
+                    kb_dict["name"] = "Outlook Knowledge"
             
             run_info = kb_runs.get(kb.id)
             if run_info:
@@ -2644,7 +2646,7 @@ class KnowledgeBaseService:
             if not db_conn:
                 return format_error("No registered Google Drive connection found for this KB", meta={"status_code": 404})
 
-            credentials = db_conn.connection_params.get("credentials", {})
+            credentials = db_conn.connection_params.get("credentials") or db_conn.connection_params
             
             from app.modules.connectors.google.crawler import GoogleDriveConnector
             connector = GoogleDriveConnector()
@@ -2713,10 +2715,12 @@ class KnowledgeBaseService:
             connector.load_credentials(credentials_dict)
             
             # Update Knowledge Base source to reflect Google Drive connection
-            effective_email = user_email or connector.auth_manager.primary_admin_email or "unknown_email"
+            effective_email = user_email or credentials_dict.get("primary_admin_email") or connector.auth_manager.primary_admin_email or "unknown_email"
             pg_kb = await self.repository.get_by_id(kb_id)
             if pg_kb:
                 pg_kb.source = f"google_drive({effective_email})"
+                if not pg_kb.name or "(google drive)" not in pg_kb.name.lower():
+                    pg_kb.name = "Google Drive Knowledge"
                 self.db.add(pg_kb)
                 await self.db.commit()
                 
@@ -2727,12 +2731,13 @@ class KnowledgeBaseService:
                         lambda: self.neo4j_repo.execute_write(
                             """
                             MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
-                            SET kb.source = $new_source
+                            SET kb.source = $new_source, kb.name = $new_name
                             """,
                             {
                                 "kb_id": kb_id,
                                 "tenant_id": str(self.tenant_id),
-                                "new_source": f"google_drive({effective_email})"
+                                "new_source": f"google_drive({effective_email})",
+                                "new_name": pg_kb.name
                             }
                         )
                     )
@@ -2741,11 +2746,10 @@ class KnowledgeBaseService:
             
             checkpoint = connector.build_dummy_checkpoint()
 
-            
-
             files_synced = 0
-
             folders_synced = 0
+            synced_filenames = []
+            partial_failures = []
 
             
 
@@ -2791,6 +2795,22 @@ class KnowledgeBaseService:
                     
                     if all_file_ids:
                         meta_files = await connector.get_files_metadata(list(all_file_ids))
+                        if meta_files:
+                            first_name = meta_files[0].get("name", "File")
+                            init_name = f"{first_name} (google drive)" if len(meta_files) == 1 else f"{first_name} + {len(meta_files)-1} files (google drive)"
+                            try:
+                                pg_kb_pre = await self.repository.get_by_id(kb_id)
+                                if pg_kb_pre:
+                                    pg_kb_pre.name = init_name
+                                    self.db.add(pg_kb_pre)
+                                    await self.db.commit()
+                                await self.neo4j_repo.execute_write(
+                                    "MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id}) SET kb.name = $name",
+                                    {"kb_id": kb_id, "tenant_id": str(self.tenant_id), "name": init_name}
+                                )
+                            except Exception as pre_err:
+                                logger.warning(f"Failed to set initial KB name from meta: {pre_err}")
+
                         for f in meta_files:
                             yield SlimDocument(
                                 id=f["id"], source="google_drive", 
@@ -2915,26 +2935,107 @@ class KnowledgeBaseService:
                     # 1. CSV / Excel
 
                     if mime_type == "text/csv" or "spreadsheet" in mime_type or filename.endswith((".csv", ".xlsx", ".xls")):
+                        logger.info(f"Piping Google Drive tabular file '{filename}' to Parquet/DuckDB ingestion service")
+                        import tempfile, os, hashlib
+                        from app.core.parquet_ingester import ParquetIngester
 
-                        logger.info(f"Piping {filename} to tabular excel/csv ingestion service")
+                        ext = os.path.splitext(filename)[1] or (".csv" if "csv" in mime_type else ".xlsx")
+                        temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
+                        try:
+                            with os.fdopen(temp_fd, 'wb') as f:
+                                f.write(file_bytes)
 
-                        ingest_res = await self.ingest_excel_or_csv(
+                            dataset_name = os.path.splitext(filename)[0]
+                            file_hash = hashlib.sha256(file_bytes).hexdigest()
+                            output_path, categorical_registry, schema_registry = ParquetIngester.ingest_to_parquet(
+                                temp_path, dataset_name=dataset_name
+                            )
 
-                            kb_id=kb_id,
+                            from sqlalchemy import update
+                            from app.modules.knowledge_bases.models import KnowledgeBase
+                            await self.db.execute(
+                                update(KnowledgeBase)
+                                .where(KnowledgeBase.id == uuid.UUID(kb_id))
+                                .values(
+                                    name=f"{filename} (google drive)",
+                                    file_hash=file_hash,
+                                    parsed_path=dataset_name,
+                                    description="excel_parquet",
+                                    categorical_values=categorical_registry,
+                                    dataset_schema=schema_registry
+                                )
+                            )
+                            await self.db.commit()
 
-                            file_bytes=file_bytes,
+                            # Update Neo4j KnowledgeBase node
+                            try:
+                                from app.core.neo4j_retry import retry_neo4j_operation
+                                await retry_neo4j_operation(
+                                    lambda: self.neo4j_repo.execute_write(
+                                        """
+                                        MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                                        SET kb.parsed_path = $parsed_path, kb.document_category = 'dataset'
+                                        """,
+                                        {
+                                            "kb_id": kb_id,
+                                            "tenant_id": str(self.tenant_id),
+                                            "parsed_path": dataset_name
+                                        }
+                                    )
+                                )
+                            except Exception as neo_err:
+                                logger.warning(f"Failed to update Neo4j KB parsed_path: {neo_err}")
 
-                            filename=filename,
+                            # THRESHOLD-BASED DUAL INGESTION: Row-by-Row text chunks + Vector Embeddings
+                            try:
+                                import polars as pl
+                                df_parquet = pl.read_parquet(output_path)
+                                row_count = df_parquet.height
+                                logger.info(f"Threshold Dual-Ingestion: Dataset '{dataset_name}' has {row_count} rows.")
+                                
+                                chunks_text_list = []
+                                if row_count > 0:
+                                    if row_count <= 3000:
+                                        for idx, row_dict in enumerate(df_parquet.to_dicts()):
+                                            fields = [f"{c}: {v}" for c, v in row_dict.items() if v is not None and str(v).strip() != ""]
+                                            if fields:
+                                                chunks_text_list.append(f"[Dataset: {dataset_name} | Row {idx + 1}]\n" + " | ".join(fields))
+                                    else:
+                                        batch_size = 20
+                                        dicts = df_parquet.to_dicts()
+                                        for b_i in range(0, row_count, batch_size):
+                                            batch = dicts[b_i : b_i + batch_size]
+                                            batch_lines = []
+                                            for r_offset, r_data in enumerate(batch):
+                                                fields = [f"{c}: {v}" for c, v in r_data.items() if v is not None and str(v).strip() != ""]
+                                                if fields:
+                                                    batch_lines.append(f"Row {b_i + r_offset + 1}: " + " | ".join(fields))
+                                            if batch_lines:
+                                                chunks_text_list.append(f"[Dataset: {dataset_name} | Rows {b_i + 1} to {min(b_i + batch_size, row_count)}]\n" + "\n".join(batch_lines))
 
-                            mime_type=mime_type,
-
-                            source="google_drive"
-
-                        )
-
-                        if ingest_res.get("success"):
+                                if chunks_text_list:
+                                    combined_text = "\n\n---\n\n".join(chunks_text_list)
+                                    await self.ingest_document(
+                                        kb_id=kb_id,
+                                        document_text=combined_text,
+                                        source=f"{filename} (google drive)",
+                                        parsed_path=output_path
+                                    )
+                                    logger.info(f"Dual-Ingestion successfully generated {len(chunks_text_list)} text chunks for KB {kb_id}.")
+                            except Exception as dual_err:
+                                logger.warning(f"[DUAL_INGESTION_FAILED] Dual-Ingestion text chunking failed for {filename}: {dual_err}")
+                                partial_failures.append({
+                                    "file": filename,
+                                    "stage": "dual_ingestion",
+                                    "status": "sql_only",
+                                    "error": str(dual_err)
+                                })
 
                             files_synced += 1
+                            synced_filenames.append(filename)
+                        finally:
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
 
                     
 
@@ -3018,13 +3119,14 @@ class KnowledgeBaseService:
 
                                 document_text=text,
 
-                                source="google_drive"
+                                source=f"{filename} (google drive)"
 
                             )
 
                             if ingest_res.get("success"):
 
                                 files_synced += 1
+                                synced_filenames.append(filename)
 
                                 
 
@@ -3070,7 +3172,26 @@ class KnowledgeBaseService:
 
                         })
 
-            
+            if synced_filenames:
+                final_kb_name = f"{synced_filenames[0]} (google drive)" if len(synced_filenames) == 1 else f"{synced_filenames[0]} + {len(synced_filenames) - 1} files (google drive)"
+            else:
+                final_kb_name = "Google Drive Knowledge"
+
+            try:
+                pg_kb_final = await self.repository.get_by_id(kb_id)
+                if pg_kb_final:
+                    pg_kb_final.name = final_kb_name
+                    self.db.add(pg_kb_final)
+                    await self.db.commit()
+                await self.neo4j_repo.execute_write(
+                    """
+                    MATCH (kb:KnowledgeBase {id: $kb_id, tenant_id: $tenant_id})
+                    SET kb.name = $new_name
+                    """,
+                    {"kb_id": kb_id, "tenant_id": str(self.tenant_id), "new_name": final_kb_name}
+                )
+            except Exception as final_name_err:
+                logger.warning(f"Failed to update final KB name: {final_name_err}")
 
             return format_success(
 
@@ -3084,11 +3205,17 @@ class KnowledgeBaseService:
 
                     "folders_synced": folders_synced,
 
+                    "partial_failures": partial_failures,
+
                     "sync_duration_seconds": time.time() - sync_start_time
 
                 },
 
-                meta={"message": "Google Drive synchronized with Knowledge Graph successfully"}
+                meta={
+                    "message": "Google Drive synchronized with Knowledge Graph successfully"
+                    if not partial_failures
+                    else f"Google Drive synchronized with {len(partial_failures)} partial failure(s)"
+                }
 
             )
 
@@ -3734,7 +3861,7 @@ class KnowledgeBaseService:
             from app.utils.formatters import format_error
             return format_error(f'Failed to sync Outlook: {e}')
 
-    async def save_table_rows(self, kb_id: str, table_rows: list):
+    async def save_table_rows(self, kb_id: str, table_rows: list, filename: str = None, global_identifiers: dict = None):
         """
         Saves extracted structured tables directly to PostgreSQL (no Neo4j syncing required for tables).
         """
@@ -3804,7 +3931,7 @@ class KnowledgeBaseService:
                     DocumentTableRow(
                         tenant_id=self.tenant_id,
                         kb_id=uuid.UUID(kb_id),
-                        page_number=row.get("page_number", 1),
+                        page_number=row.get("page_number"),
                         table_index=row.get("table_index", 0),
                         row_index=row.get("row_index", 0),
                         part_number=str(part_number)[:255] if part_number else None,
@@ -3822,6 +3949,15 @@ class KnowledgeBaseService:
                 # Every column with a non-empty value is included to ensure
                 # nothing is lost (UOS, GST%, SL.NO, custom columns, etc.).
                 chunk_parts = []
+                if filename:
+                    chunk_parts.append(f"Source File: {filename}")
+                section_heading = row.get("section_heading")
+                if section_heading:
+                    chunk_parts.append(f"Section: {section_heading}")
+                if global_identifiers:
+                    for k, v in global_identifiers.items():
+                        chunk_parts.append(f"Document {k.title()}: {v}")
+                    
                 for col_name, col_value in row_data.items():
                     val = str(col_value).strip() if col_value else ""
                     if not val:
@@ -3831,13 +3967,19 @@ class KnowledgeBaseService:
                 
                 if chunk_parts:
                     chunk_texts.append("\n".join(chunk_parts))
-                    chunk_metadatas.append({
+                    chunk_meta = {
                         "chunk_type": "table_row",
-                        "page_number": row.get("page_number", 1),
+                        "page_number": row.get("page_number"),
                         "table_index": row.get("table_index", 0),
                         "row_index": row.get("row_index", 0),
+                        "filename": filename,
+                        "section_heading": section_heading,
+                        "global_identifiers": global_identifiers,
                         "row_data": row_data
-                    })
+                    }
+                    if "sheet_name" in row:
+                        chunk_meta["sheet_name"] = row["sheet_name"]
+                    chunk_metadatas.append(chunk_meta)
                 
             self.db.add_all(db_rows)
             

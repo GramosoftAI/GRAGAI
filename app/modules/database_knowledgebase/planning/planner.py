@@ -371,10 +371,17 @@ class QueryPlanner:
                     # 2. Must be entity_type == "TABLE" (columns are not entity tables)
                     # 3. Must NOT be an n-gram (bigrams are concept binding, not primary tables)
                     # 4. Must NOT be a likely verb (verbs are action/filter concepts)
+                    is_exact_table_ngram = False
+                    if getattr(r, "metadata", {}).get("is_ngram") and r.resolved_to:
+                        r_tbl_norm = r.resolved_to.lower().split(".")[-1].replace("_", "")
+                        tok_norm = r.token.lower().replace(" ", "").replace("_", "").rstrip("s")
+                        if r_tbl_norm == tok_norm or tok_norm in r_tbl_norm:
+                            is_exact_table_ngram = True
+
                     if (
                         r.confidence == EntityConfidence.HIGH
                         and r.entity_type == "TABLE"
-                        and not getattr(r, "metadata", {}).get("is_ngram")
+                        and (not getattr(r, "metadata", {}).get("is_ngram") or is_exact_table_ngram)
                         and not getattr(r, "metadata", {}).get("likely_verb")
                         and r.resolved_to
                     ):
@@ -489,6 +496,8 @@ class QueryPlanner:
         # Collect candidate tables in retrieval whose decomposed tokens, clean names, domain concepts, or columns appear in query
         DOMAIN_CONCEPTS = {
             "payroll_contract": {"earn", "earns", "earning", "compensation", "salary", "wage", "pay"},
+            "payroll_deduction": {"deduction", "deductions", "deduct", "payroll deduction", "payroll deductions"},
+            "payroll_payslip": {"payslip", "payslips", "pay slip", "pay slips"},
             "asset_assetassignment": {"device", "devices", "hardware", "equipment", "asset", "assets", "laptop", "hold"},
             "base_rotatingshiftassign": {"schedule", "shift", "roster", "rotating", "work schedule"},
             "pms_employeeobjective": {"okr", "okrs", "objective", "objectives", "goal", "goals", "quarterly goals"},
@@ -617,9 +626,38 @@ class QueryPlanner:
                             return new_a
             return None
 
+        # Check explicit domain keywords first to avoid random token collisions from all_table_plans
+        explicit_target_table = None
+        if any(w in q_lower for w in ("deduction", "deductions")):
+            explicit_target_table = "payroll_deduction"
+        elif any(w in q_lower for w in ("payslip", "pay slip", "salary slip")):
+            explicit_target_table = "payroll_payslip"
+        elif any(w in q_lower for w in ("salary", "wage", "contract")):
+            explicit_target_table = "payroll_contract"
+        elif any(w in q_lower for w in ("attendance", "check in", "clock in", "punch", "worked", "checkin", "clockin")):
+            explicit_target_table = "attendance_attendance"
+        elif any(w in q_lower for w in ("leave", "vacation", "absence", "time off")):
+            if any(w in q_lower for w in ("balance", "available", "remaining")):
+                explicit_target_table = "leave_availableleave"
+            else:
+                explicit_target_table = "leave_leaverequest"
+        elif any(w in q_lower for w in ("asset", "assets", "laptop", "device", "hardware", "equipment")):
+            explicit_target_table = "asset_asset"
+        elif any(w in q_lower for w in ("department", "departments")):
+            explicit_target_table = "base_department"
+        elif any(w in q_lower for w in ("employee", "employees", "staff", "person", "people", "member", "members", "who", "highest-paid", "lowest-paid")):
+            explicit_target_table = "employee_employee"
+
         # Anchor table takes highest precedence as primary table
         if anchor_alias:
             primary_alias = anchor_alias
+        elif explicit_target_table and not any(w in q_lower for w in ("all employees in", "list all employees", "list employees")):
+            target_alias = _get_or_create_table_alias(explicit_target_table, role="PRIMARY")
+            if target_alias:
+                primary_alias = target_alias
+                anchor_alias = target_alias
+            else:
+                primary_alias = all_table_plans[0].alias if all_table_plans else "t"
         else:
             specific_alias = None
             for tp in all_table_plans:
@@ -629,63 +667,11 @@ class QueryPlanner:
                         break
             if specific_alias and not any(w in q_lower for w in ("all employees in", "list all employees", "list employees")):
                 primary_alias = specific_alias
-            elif any(w in q_lower for w in ("employee", "employees", "staff", "person", "people", "member", "members", "who", "highest-paid", "lowest-paid")):
-                emp_alias = _get_or_create_table_alias("employee_employee", role="PRIMARY")
-                if emp_alias:
-                    primary_alias = emp_alias
-                    anchor_alias = emp_alias
-                else:
-                    primary_alias = all_table_plans[0].alias if all_table_plans else "t"
-            elif any(w in q_lower for w in ("attendance", "check in", "clock in", "punch", "worked", "checkin", "clockin")):
-                att_alias = _get_or_create_table_alias("attendance_attendance", role="PRIMARY")
-                if att_alias:
-                    primary_alias = att_alias
-                    anchor_alias = att_alias
-                else:
-                    primary_alias = all_table_plans[0].alias if all_table_plans else "t"
-            elif any(w in q_lower for w in ("payslip", "pay slip", "salary slip")):
-                pay_alias = _get_or_create_table_alias("payroll_payslip", role="PRIMARY")
-                if pay_alias:
-                    primary_alias = pay_alias
-                    anchor_alias = pay_alias
-                else:
-                    primary_alias = all_table_plans[0].alias if all_table_plans else "t"
-            elif any(w in q_lower for w in ("leave", "vacation", "absence", "time off")):
-                if any(w in q_lower for w in ("balance", "available", "remaining")):
-                    leave_alias = _get_or_create_table_alias("leave_availableleave", role="PRIMARY")
-                else:
-                    leave_alias = _get_or_create_table_alias("leave_leaverequest", role="PRIMARY")
-                if leave_alias:
-                    primary_alias = leave_alias
-                    anchor_alias = leave_alias
-                else:
-                    primary_alias = all_table_plans[0].alias if all_table_plans else "t"
-            elif any(w in q_lower for w in ("salary", "wage", "contract")):
-                contract_alias = _get_or_create_table_alias("payroll_contract", role="PRIMARY")
-                if contract_alias:
-                    primary_alias = contract_alias
-                    anchor_alias = contract_alias
-                else:
-                    primary_alias = all_table_plans[0].alias if all_table_plans else "t"
-            elif any(w in q_lower for w in ("deduction", "deductions")):
-                ded_alias = _get_or_create_table_alias("payroll_deduction", role="PRIMARY")
-                if ded_alias:
-                    primary_alias = ded_alias
-                    anchor_alias = ded_alias
-                else:
-                    primary_alias = all_table_plans[0].alias if all_table_plans else "t"
-            elif any(w in q_lower for w in ("asset", "assets", "laptop", "device", "hardware", "equipment")):
-                asset_alias = _get_or_create_table_alias("asset_asset", role="PRIMARY")
-                if asset_alias:
-                    primary_alias = asset_alias
-                    anchor_alias = asset_alias
-                else:
-                    primary_alias = all_table_plans[0].alias if all_table_plans else "t"
-            elif any(w in q_lower for w in ("department", "departments")):
-                dept_alias = _get_or_create_table_alias("base_department", role="PRIMARY")
-                if dept_alias:
-                    primary_alias = dept_alias
-                    anchor_alias = dept_alias
+            elif explicit_target_table:
+                target_alias = _get_or_create_table_alias(explicit_target_table, role="PRIMARY")
+                if target_alias:
+                    primary_alias = target_alias
+                    anchor_alias = target_alias
                 else:
                     primary_alias = all_table_plans[0].alias if all_table_plans else "t"
             else:
@@ -900,7 +886,7 @@ class QueryPlanner:
                 active_target_aliases.add(a)
             elif has_loan_intent and t_name in ("payroll_loan", "payroll_loaninstallment", "employee_employee"):
                 active_target_aliases.add(a)
-            elif has_deduction_intent and t_name in ("payroll_deduction", "payroll_contract", "employee_employee"):
+            elif has_deduction_intent and t_name in ("payroll_deduction", "employee_employee"):
                 active_target_aliases.add(a)
             elif has_salary_intent and t_name in ("payroll_contract", "employee_employeeworkinformation", "employee_employee"):
                 active_target_aliases.add(a)
