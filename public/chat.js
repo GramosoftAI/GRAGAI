@@ -13,8 +13,6 @@
   const headerAlign = script.getAttribute("data-header-align") || "center";
   const headerNameAttr = script.getAttribute("data-header-name");
   const headerName = headerNameAttr !== null ? headerNameAttr : "Gsearch AI";
-  const headerSubtextAttr = script.getAttribute("data-header-subtext");
-  const headerSubtext = headerSubtextAttr !== null ? headerSubtextAttr : "The team can also help";
   const agentLabelAttr = script.getAttribute("data-agent-label");
   const agentLabel = agentLabelAttr !== null ? agentLabelAttr : "Agent";
   const themeTextColor = script.getAttribute("data-theme-text-color") || "#ffffff";
@@ -87,97 +85,22 @@
       z-index: 2147483647 !important;
       opacity: 0;
       visibility: hidden;
-      transform: scale(0.05);
-      transition: opacity 0.22s cubic-bezier(0.25, 1, 0.5, 1), transform 0.25s cubic-bezier(0.25, 1, 0.5, 1), visibility 0.25s;
+      transform: translateY(30px);
+      transition: opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1), transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.35s;
       will-change: transform, opacity;
       isolation: isolate;
     }
     .grag-iframe-container.show {
       visibility: visible;
       opacity: 1;
-      transform: scale(1);
-      /* macOS-style spring bounce launch animation */
-      transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1), transform 0.38s cubic-bezier(0.34, 1.56, 0.64, 1);
+      transform: translateY(0);
     }
     @media (min-width: 641px) {
       .grag-iframe-container.center-search {
-        transform: translateX(-50%) scale(0.05);
+        transform: translateX(-50%) translateY(30px);
       }
       .grag-iframe-container.center-search.show {
-        transform: translateX(-50%) scale(1);
-      }
-    }
-
-    /* Disable scaling transforms on search mode iframe container */
-    .grag-iframe-container.search-mode {
-      transform: none !important;
-      transition: opacity 0.08s ease-in-out, visibility 0.08s !important;
-    }
-    .grag-iframe-container.search-mode.show {
-      transform: none !important;
-      transition: opacity 0.08s ease-in-out, visibility 0.08s !important;
-    }
-    @media (min-width: 641px) {
-      .grag-iframe-container.search-mode.center-search {
-        transform: translateX(-50%) !important;
-      }
-      .grag-iframe-container.search-mode.center-search.show {
-        transform: translateX(-50%) !important;
-      }
-    }
-
-    /* Search Bar Wrapper Coordinated transitions */
-    .grag-search-wrapper {
-      position: fixed !important;
-      z-index: 999998 !important;
-      box-sizing: border-box !important;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
-      transition: opacity 0.08s ease-in-out;
-      will-change: opacity;
-      padding: 0 8px !important;
-    }
-    .grag-search-wrapper.layout-center {
-      bottom: 40px;
-      left: 50%;
-      right: auto;
-      transform: translateX(-50%) scale(1);
-      width: 90%;
-      max-width: 680px;
-    }
-    .grag-search-wrapper.layout-right {
-      bottom: 40px;
-      right: 40px;
-      left: auto;
-      transform: scale(1);
-      width: 90%;
-      max-width: 420px;
-    }
-    @media (max-width: 640px) {
-      .grag-search-wrapper.layout-center,
-      .grag-search-wrapper.layout-right {
-        left: 16px !important;
-        right: 16px !important;
-        transform: none !important;
-        width: calc(100% - 32px) !important;
-        bottom: 32px !important;
-      }
-    }
-
-    /* Hidden transitions */
-    .grag-search-wrapper.layout-center.hidden {
-      opacity: 0 !important;
-      transform: translateX(-50%) !important;
-      pointer-events: none !important;
-    }
-    .grag-search-wrapper.layout-right.hidden {
-      opacity: 0 !important;
-      transform: none !important;
-      pointer-events: none !important;
-    }
-    @media (max-width: 640px) {
-      .grag-search-wrapper.layout-center.hidden,
-      .grag-search-wrapper.layout-right.hidden {
-        transform: none !important;
+        transform: translateX(-50%) translateY(0);
       }
     }
     .grag-search-glow {
@@ -242,8 +165,19 @@
   `;
   document.head.appendChild(styleEl);
 
-  // Declare iframe reference (to be lazily loaded)
-  let iframe = null;
+  // Create Iframe element
+  const iframe = document.createElement("iframe");
+  iframe.className = "grag-iframe-container";
+  if (chatType === "search" && position === "center") {
+    iframe.classList.add("center-search");
+  }
+  iframe.style.border = "none";
+  iframe.style.background = "transparent";
+  iframe.style.borderRadius = "24px";
+  iframe.style.zIndex = "2147483647";
+  iframe.setAttribute("allowtransparency", "true");
+  iframe.setAttribute("allow", "clipboard-write");
+  iframe.src = `${baseUrl}/widget?agentId=${agentId}&tenantId=${tenantId}&chatType=${chatType}&themeColor=${encodeURIComponent(themeColor)}&headerLogo=${encodeURIComponent(resolvedHeaderLogo)}&headerAlign=${encodeURIComponent(headerAlign)}&headerName=${encodeURIComponent(headerName)}&agentLabel=${encodeURIComponent(agentLabel)}&themeTextColor=${encodeURIComponent(themeTextColor)}&botAvatar=${encodeURIComponent(resolvedBotAvatar)}&buttonIcon=${encodeURIComponent(resolvedButtonIcon)}&buttonAlign=${encodeURIComponent(buttonAlign)}&showButtonText=${showButtonText}&buttonText=${encodeURIComponent(buttonText)}&initialMessage=${encodeURIComponent(initialMessage)}&displaySources=${displaySources}&allowDownloads=${allowDownloads}&displayCopy=${displayCopy}&displayFeedback=${displayFeedback}&linkSafety=${linkSafety}&leadCollection=${leadCollection}&leadFields=${encodeURIComponent(leadFields)}&leadTiming=${leadTiming}&escalationEnabled=${escalationEnabled}&escalationLink=${encodeURIComponent(escalationLink)}`;
 
 
   // Declared search wrapper reference
@@ -251,44 +185,24 @@
 
   // Global window resize and responsive dimensions
   const updateIframeDimensions = () => {
-    if (!iframe) return;
     const isMobile = window.innerWidth <= 640;
     if (isMobile) {
       iframe.style.width = "calc(100% - 32px)";
-      iframe.style.top = "auto";
+      iframe.style.height = "calc(100% - 40px)";
+      iframe.style.top = "20px";
+      iframe.style.bottom = "20px";
       iframe.style.right = "16px";
       iframe.style.left = "16px";
       iframe.style.borderRadius = "24px";
-      iframe.style.transformOrigin = "center bottom";
-
-      if (chatType === "search") {
-        iframe.style.bottom = "-6px"; // Aligned bottom (gives mobile widget 32px input bar baseline match with 38px bottom padding)
-        iframe.style.height = "calc(100% - 60px)";
-      } else {
-        iframe.style.bottom = "95px";
-        iframe.style.height = "calc(100% - 180px)";
-      }
     } else {
       iframe.style.top = "auto";
       iframe.style.borderRadius = "24px";
-
-      // Set macOS-style transform origin dynamically matching layout trigger
-      if (chatType === "search") {
-        if (position === "center") {
-          iframe.style.transformOrigin = "center bottom";
-        } else {
-          iframe.style.transformOrigin = position === "left" ? "left bottom" : "right bottom";
-        }
-      } else {
-        iframe.style.transformOrigin = buttonAlign === "left" ? "left bottom" : "right bottom";
-      }
-
       if (chatType === "search") {
         if (position === "center") {
           const safeHeight = Math.min(520, window.innerHeight - 60);
           iframe.style.width = "680px";
           iframe.style.height = safeHeight + "px";
-          iframe.style.bottom = "-4px"; // Aligned bottom (gives desktop widget 40px input bar baseline match with 44px bottom padding)
+          iframe.style.bottom = "30px";
           iframe.style.left = "50%";
           iframe.style.right = "auto";
         } else {
@@ -296,7 +210,7 @@
           const safeHeight = Math.min(520, window.innerHeight - 60);
           iframe.style.width = "420px";
           iframe.style.height = safeHeight + "px";
-          iframe.style.bottom = "-4px"; // Aligned bottom (gives desktop widget 40px input bar baseline match with 44px bottom padding)
+          iframe.style.bottom = "30px";
           iframe.style.right = "40px";
           iframe.style.left = "auto";
         }
@@ -315,11 +229,29 @@
 
   const updateSearchWrapperDimensions = () => {
     if (!searchWrapper) return;
-    searchWrapper.classList.remove("layout-center", "layout-right");
-    if (position === "center") {
-      searchWrapper.classList.add("layout-center");
+    const isMobile = window.innerWidth <= 640;
+    if (isMobile) {
+      searchWrapper.style.left = "50%";
+      searchWrapper.style.transform = "translateX(-50%)";
+      searchWrapper.style.right = "auto";
+      searchWrapper.style.width = "92%";
+      searchWrapper.style.bottom = "20px";
     } else {
-      searchWrapper.classList.add("layout-right");
+      if (position === "center") {
+        searchWrapper.style.bottom = "30px";
+        searchWrapper.style.left = "50%";
+        searchWrapper.style.transform = "translateX(-50%)";
+        searchWrapper.style.width = "90%";
+        searchWrapper.style.maxWidth = "680px";
+      } else {
+        // right
+        searchWrapper.style.bottom = "30px";
+        searchWrapper.style.right = "40px";
+        searchWrapper.style.left = "auto";
+        searchWrapper.style.transform = "none";
+        searchWrapper.style.width = "90%";
+        searchWrapper.style.maxWidth = "420px";
+      }
     }
   };
 
@@ -328,109 +260,56 @@
     updateSearchWrapperDimensions();
   });
 
-  // Lazy initialization of the iframe
-  const initIframe = () => {
-    if (iframe) return iframe;
+  // Set initial layouts
+  updateIframeDimensions();
 
-    // Create Iframe element
-    iframe = document.createElement("iframe");
-    iframe.className = "grag-iframe-container";
-    if (chatType === "search") {
-      iframe.classList.add("search-mode");
-      if (position === "center") {
-        iframe.classList.add("center-search");
-      }
-    }
-    iframe.style.border = "none";
-    iframe.style.background = "transparent";
-    iframe.style.borderRadius = "24px";
-    iframe.style.zIndex = "2147483647";
-    iframe.setAttribute("allowtransparency", "true");
-    iframe.setAttribute("allow", "clipboard-write");
-    iframe.loading = "lazy";
-    iframe.src = `${baseUrl}/widget?agentId=${agentId}&tenantId=${tenantId}&chatType=${chatType}&themeColor=${encodeURIComponent(themeColor)}&headerLogo=${encodeURIComponent(resolvedHeaderLogo)}&headerAlign=${encodeURIComponent(headerAlign)}&headerName=${encodeURIComponent(headerName)}&headerSubtext=${encodeURIComponent(headerSubtext)}&agentLabel=${encodeURIComponent(agentLabel)}&themeTextColor=${encodeURIComponent(themeTextColor)}&botAvatar=${encodeURIComponent(resolvedBotAvatar)}&buttonIcon=${encodeURIComponent(resolvedButtonIcon)}&buttonAlign=${encodeURIComponent(buttonAlign)}&showButtonText=${showButtonText}&buttonText=${encodeURIComponent(buttonText)}&initialMessage=${encodeURIComponent(initialMessage)}&displaySources=${displaySources}&allowDownloads=${allowDownloads}&displayCopy=${displayCopy}&displayFeedback=${displayFeedback}&linkSafety=${linkSafety}&leadCollection=${leadCollection}&leadFields=${encodeURIComponent(leadFields)}&leadTiming=${leadTiming}&escalationEnabled=${escalationEnabled}&escalationLink=${encodeURIComponent(escalationLink)}&placeholder=${encodeURIComponent(placeholder)}`;
-
-    // Set dimensions and append to body
-    updateIframeDimensions();
-    document.body.appendChild(iframe);
-    return iframe;
-  };
-
-  let isClosingFromPopstate = false;
+  document.body.appendChild(iframe);
 
   const openIframe = (initialQuery = "") => {
-    // Hide search bar wrapper smoothly using class transition
+    // Hide search bar wrapper to prevent double input boxes
     if (chatType === "search" && searchWrapper) {
-      searchWrapper.classList.add("hidden");
+      searchWrapper.style.display = "none";
     }
 
-    const currentIframe = initIframe();
-    currentIframe.classList.add("show");
-
-    // Push state to browser history so back button closes it on mobile
-    if (window.innerWidth <= 640) {
-      if (window.history.state?.gragWidgetOpen !== true) {
-        window.history.pushState({ gragWidgetOpen: true }, "");
-      }
-    }
+    iframe.classList.add("show");
 
     // Focus the input inside the iframe
     setTimeout(() => {
-      currentIframe.contentWindow.postMessage({ type: "focus-input" }, "*");
+      iframe.contentWindow.postMessage({ type: "focus-input" }, "*");
     }, 200);
 
     // Send initial query via postMessage to avoid slow reloads
     if (initialQuery) {
       setTimeout(() => {
-        currentIframe.contentWindow.postMessage({ type: "send-query", query: initialQuery }, "*");
+        iframe.contentWindow.postMessage({ type: "send-query", query: initialQuery }, "*");
       }, 50);
     }
   };
 
   const closeIframe = () => {
-    if (iframe) {
-      if (chatType === "search") {
-        // Trigger close animation inside search widget first
-        iframe.contentWindow.postMessage({ type: "start-close-animation" }, "*");
-      } else {
-        iframe.classList.remove("show");
-        // Clean up browser history state if we pushed it and are NOT closing from popstate
-        if (window.innerWidth <= 640 && !isClosingFromPopstate && window.history.state?.gragWidgetOpen === true) {
-          window.history.back();
-        }
-      }
+    iframe.classList.remove("show");
+
+    // Show search bar wrapper back
+    if (chatType === "search" && searchWrapper) {
+      searchWrapper.style.display = "block";
+      updateSearchWrapperDimensions();
     }
   };
-
-  // Listen to browser back button popstate
-  window.addEventListener("popstate", (event) => {
-    if (iframe && iframe.classList.contains("show")) {
-      isClosingFromPopstate = true;
-      closeIframe();
-      isClosingFromPopstate = false;
-    }
-  });
 
   // Listen to postMessage from the iframe widget to close/collapse the chat window
   window.addEventListener("message", (event) => {
     if (event.data && (event.data.type === "close-chat" || event.data.type === "close")) {
-      if (iframe) {
-        iframe.classList.remove("show");
-      }
-      if (window.innerWidth <= 640 && !isClosingFromPopstate && window.history.state?.gragWidgetOpen === true) {
-        window.history.back();
-      }
-      if (chatType === "search" && searchWrapper) {
-        searchWrapper.classList.remove("hidden");
-        updateSearchWrapperDimensions();
-      }
+      closeIframe();
     }
   });
 
   if (chatType === "search") {
     // --- Style 2: Search Bar Style Chat ---
     searchWrapper = document.createElement("div");
-    searchWrapper.className = "grag-search-wrapper";
+    searchWrapper.style.position = "fixed";
+    searchWrapper.style.zIndex = "999998";
+    searchWrapper.style.boxSizing = "border-box";
+    searchWrapper.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
     updateSearchWrapperDimensions();
 
@@ -447,7 +326,6 @@
     inputBar.style.padding = "6px 8px 6px 18px";
     inputBar.style.gap = "12px";
     inputBar.style.boxSizing = "border-box";
-    inputBar.style.height = "46px";
 
     // Left Icon (Clock/History SVG)
     const leftIcon = document.createElement("span");
@@ -472,10 +350,8 @@
     input.style.background = "transparent";
     input.style.color = "#18181b";
     input.style.fontSize = "15px";
-    input.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
-    input.style.padding = "0";
-    input.style.height = "20px";
-    input.style.lineHeight = "20px";
+    input.style.fontFamily = "inherit";
+    input.style.padding = "8px 0";
 
     // Right Send Button
     const sendBtn = document.createElement("button");
@@ -502,9 +378,6 @@
       glowContainer.classList.add("active");
       openIframe("");
       input.blur();
-    };
-    input.onmouseenter = () => {
-      initIframe();
     };
     input.onblur = () => {
       if (input.value.trim() === "") {
@@ -548,44 +421,20 @@
       openIframe("");
     };
 
-    // Powered by Gramosoft label wrapper
-    const poweredByContainer = document.createElement("div");
-    poweredByContainer.style.display = "none";
-    poweredByContainer.style.justifyContent = "center";
-    poweredByContainer.style.marginTop = "6px";
-
+    // Powered by Gramosoft label
     const poweredBy = document.createElement("a");
     poweredBy.href = "https://gsearchai.com/";
     poweredBy.target = "_blank";
     poweredBy.rel = "noopener noreferrer";
-    poweredBy.style.display = "inline-flex";
-    poweredBy.style.alignItems = "center";
-    poweredBy.style.justifyContent = "center";
-    poweredBy.style.gap = "4px";
-    poweredBy.style.padding = "4px 12px";
+    poweredBy.style.display = "block";
+    poweredBy.style.textAlign = "center";
+    poweredBy.style.marginTop = "6px";
     poweredBy.style.fontSize = "11px";
-    poweredBy.style.color = "#18181b";
-    poweredBy.style.fontWeight = "600";
+    poweredBy.style.color = "#a1a1aa";
     poweredBy.style.userSelect = "none";
     poweredBy.style.textDecoration = "none";
     poweredBy.style.cursor = "pointer";
-    poweredBy.style.borderRadius = "100px";
-    poweredBy.style.background = "#ffffff";
-    poweredBy.style.border = "1px solid #d4d4d8";
-    poweredBy.style.boxShadow = "0 2px 6px rgba(0, 0, 0, 0.08)";
-    poweredBy.style.transition = "all 0.2s ease-in-out";
-    poweredBy.innerHTML = `Powered by <span style="font-weight: 750; color: ${themeColor};">Gsearch</span>`;
-
-    poweredBy.addEventListener("mouseenter", () => {
-      poweredBy.style.transform = "translateY(-1px)";
-      poweredBy.style.boxShadow = "0 4px 12px rgba(0, 0, 0, 0.12)";
-    });
-    poweredBy.addEventListener("mouseleave", () => {
-      poweredBy.style.transform = "none";
-      poweredBy.style.boxShadow = "0 2px 6px rgba(0, 0, 0, 0.08)";
-    });
-
-    poweredByContainer.appendChild(poweredBy);
+    poweredBy.innerHTML = `Powered by <span style="font-weight: 600; color: #71717a;">Gsearch</span>`;
 
     // Assemble and render elements
     inputBar.appendChild(leftIcon);
@@ -593,7 +442,7 @@
     inputBar.appendChild(sendBtn);
     glowContainer.appendChild(inputBar);
     searchWrapper.appendChild(glowContainer);
-    searchWrapper.appendChild(poweredByContainer);
+    searchWrapper.appendChild(poweredBy);
     document.body.appendChild(searchWrapper);
   } else {
     // --- Style 1: Classic Icon Style Chat ---
@@ -652,21 +501,11 @@
 
     // Toggle click trigger
     button.onclick = () => {
-      if (iframe && iframe.classList.contains("show")) {
+      if (iframe.classList.contains("show")) {
         closeIframe();
       } else {
         openIframe();
       }
     };
-    button.onmouseenter = () => {
-      initIframe();
-    };
-  }
-
-  // Pre-load the iframe widget in the background so it responds instantly
-  if (document.readyState === "complete" || document.readyState === "interactive") {
-    initIframe();
-  } else {
-    window.addEventListener("DOMContentLoaded", () => initIframe());
   }
 })();

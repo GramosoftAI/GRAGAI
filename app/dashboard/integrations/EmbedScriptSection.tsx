@@ -1,5 +1,5 @@
 "use client";
-import { Flex, Typography, Card, Button, Tooltip, App, Radio, Input, Modal, Switch, Spin, Tabs} from "antd";
+import { Flex, Typography, Card, Button, Tooltip, App, Radio, Input, Modal, Switch, Spin, Tabs, Select } from "antd";
 import {
   CopyOutlined,
   CheckCircleOutlined,
@@ -19,9 +19,11 @@ import {
   LinkOutlined,
   LikeOutlined,
   DislikeOutlined,
+  TeamOutlined,
+  UserOutlined,
   CustomerServiceOutlined,
 } from "@ant-design/icons";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { SiCrowdsource } from "react-icons/si";
 import axios from "axios";
 import AgentList from "../../components/ui/AgentList";
@@ -58,6 +60,7 @@ type ChatSession = {
   created_at: string;
 };
 
+// Preset colors for brand theme picker
 const COLOR_PRESETS = [
   { name: "Teal", hex: "#0fb5a1" },
   { name: "Blue", hex: "#0066cc" },
@@ -66,6 +69,7 @@ const COLOR_PRESETS = [
   { name: "Red", hex: "#ef4444" },
 ];
 
+// SVG Data URLs for Presets (Valid inline SVGs ensuring no broken images)
 const LOGO_PRESET_DARK = "";
 const LOGO_PRESET_LIGHT = "";
 const LOGO_PRESET_MINI = "";
@@ -106,8 +110,10 @@ export default function EmbedScriptSection() {
   const [agent, setAgent] = useState<{ id: string; name: string } | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [getAgents] = useAxios<AgentListResponse>({ endpoint: "GETAGENTLIST", hideErrorMsg: true });
+  const [saveEmbedConfig, saveEmbedConfigLoading] = useAxios({ endpoint: "SAVE_EMBED_CONFIG", hideErrorMsg: true });
+  const [getEmbedConfig] = useAxios({ endpoint: "GET_EMBED_CONFIG", hideErrorMsg: true });
 
-  
+  // 1. Core Layout & Theme States
   const [chatType, setChatType] = useState<"icon" | "search">("icon");
   const [position, setPosition] = useState<"center" | "right">("center");
   const [placeholderText, setPlaceholderText] = useState("Ask about web scraping, Zyte API, anything data extraction...");
@@ -116,23 +122,22 @@ export default function EmbedScriptSection() {
   const [btnBgColor, setBtnBgColor] = useState<string>("#0fb5a1");
   const [btnBorderColor, setBtnBorderColor] = useState<string>("#0fb5a1");
 
-  
+  // 2. Header Styles States
   const [headerLogo, setHeaderLogo] = useState<string>(LOGO_PRESET_DARK);
   const [headerAlignment, setHeaderAlignment] = useState<"left" | "center">("center");
   const [headerName, setHeaderName] = useState<string>("Gsearch AI");
-  const [headerSubtext, setHeaderSubtext] = useState<string>("The team can also help");
 
-  
+  // 3. Bot Identity States
   const [botAvatar, setBotAvatar] = useState<string>("chat");
   const [agentLabel, setAgentLabel] = useState<string>("Agent");
 
-  
+  // 4. Entry Button States
   const [buttonIcon, setButtonIcon] = useState<string>("chat");
   const [buttonAlignment, setButtonAlignment] = useState<"left" | "right">("right");
   const [showButtonText, setShowButtonText] = useState<boolean>(true);
   const [buttonText, setButtonText] = useState<string>("Help");
 
-  
+  // 5. Content States
   const [initialMessage, setInitialMessage] = useState<string>("Hi! I'm your AI Support Agent. How can I help you today?");
   const [displaySources, setDisplaySources] = useState<boolean>(true);
   const [allowDownloads, setAllowDownloads] = useState<boolean>(false);
@@ -140,7 +145,7 @@ export default function EmbedScriptSection() {
   const [displayFeedback, setDisplayFeedback] = useState<boolean>(true);
   const [linkSafety, setLinkSafety] = useState<boolean>(true);
 
-  
+  // 6. Lead Collection & Support Escalation States
   const [leadCollection, setLeadCollection] = useState<boolean>(false);
   const [leadFields, setLeadFields] = useState<string>("name,email");
   const [leadTiming, setLeadTiming] = useState<string>("pre-chat");
@@ -153,6 +158,7 @@ export default function EmbedScriptSection() {
   const [draftEscalationEnabled, setDraftEscalationEnabled] = useState<boolean>(false);
   const [draftEscalationLink, setDraftEscalationLink] = useState<string>("");
 
+  // Modal Customizer Draft States
   const [isCustomizerOpen, setIsCustomizerOpen] = useState(false);
   const [draftChatType, setDraftChatType] = useState<"icon" | "search">("icon");
   const [draftPosition, setDraftPosition] = useState<"center" | "right">("center");
@@ -165,10 +171,10 @@ export default function EmbedScriptSection() {
   const [draftHeaderLogo, setDraftHeaderLogo] = useState<string>(headerLogo);
   const [draftHeaderAlignment, setDraftHeaderAlignment] = useState<"left" | "center">(headerAlignment);
   const [draftHeaderName, setDraftHeaderName] = useState<string>("Gsearch AI");
-  const [draftHeaderSubtext, setDraftHeaderSubtext] = useState<string>("The team can also help");
   const [draftBotAvatar, setDraftBotAvatar] = useState<string>("chat");
   const [draftAgentLabel, setDraftAgentLabel] = useState<string>("Agent");
 
+  // Logo Placement Visibility States
   const [showInHeader, setShowInHeader] = useState<boolean>(true);
   const [showInChat, setShowInChat] = useState<boolean>(true);
   const [showInEmbed, setShowInEmbed] = useState<boolean>(false);
@@ -189,10 +195,12 @@ export default function EmbedScriptSection() {
   const [draftDisplayFeedback, setDraftDisplayFeedback] = useState<boolean>(displayFeedback);
   const [draftLinkSafety, setDraftLinkSafety] = useState<boolean>(linkSafety);
 
+  // Upload Loading States
   const [uploadingHeaderLogo, setUploadingHeaderLogo] = useState(false);
   const [uploadingBotAvatar, setUploadingBotAvatar] = useState(false);
   const [uploadingButtonIcon, setUploadingButtonIcon] = useState(false);
 
+  // Helper to reliably extract Authorization Token from cookies
   const getAuthToken = (): string => {
     if (typeof window === "undefined") return "";
     let token = getCookie("AUTH_TOKEN") || getCookie("auth_token") || getCookie("token") || getCookie("access_token") || "";
@@ -211,49 +219,57 @@ export default function EmbedScriptSection() {
     return token;
   };
 
-  useEffect(() => {
-    const fetchEmbedCustomization = async () => {
-      try {
-        const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
-        const token = getAuthToken();
-        const authHeader = token ? (token.startsWith("Bearer ") ? token : `Bearer ${token}`) : "";
+  // ── Track version for Optimistic Concurrency Control ──────────────────────
+  const [savedConfigVersion, setSavedConfigVersion] = useState<number | null>(null);
 
-        const tenantId = localStorage.getItem("tenantId") || agentresp?.[0]?.tenant_id || "default_tenant";
-        const res = await fetch(`${baseUrl}/embed/customization?tenant_id=${tenantId}`, {
-          headers: authHeader ? { Authorization: authHeader } : {},
-          credentials: "include"
-        });
+  // ── Load full embed config from backend when agent selection changes ───────
+  const loadConfigForAgent = useCallback((agentId: string) => {
+    getEmbedConfig(
+      { path: `/${agentId}` } as any,
+      (payload: any) => {
+        const data = payload?.data ?? payload;
+        if (!data) return;
 
-        if (res.ok) {
-          const result = await res.json();
-          const data = result.data ?? result;
-          if (data) {
-            if (data.logo_url) {
-              const proxyUrl = toProxyLogoUrl(data.logo_url);
-              setHeaderLogo(proxyUrl);
-              setDraftHeaderLogo(proxyUrl);
-            }
-            if (typeof data.show_in_header === "boolean") {
-              setShowInHeader(data.show_in_header);
-              setDraftShowInHeader(data.show_in_header);
-            }
-            if (typeof data.show_in_chat === "boolean") {
-              setShowInChat(data.show_in_chat);
-              setDraftShowInChat(data.show_in_chat);
-            }
-            if (typeof data.show_in_embed === "boolean") {
-              setShowInEmbed(data.show_in_embed);
-              setDraftShowInEmbed(data.show_in_embed);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn("Failed to fetch customization:", err);
+        // Track the version for OCC on next save
+        if (typeof data.version === "number") setSavedConfigVersion(data.version);
+
+        // Populate APPLIED state (what the snippet shows)
+        if (data.theme_color) setThemeColor(data.theme_color);
+        if (data.theme_text_color) setThemeTextColor(data.theme_text_color);
+        if (data.btn_bg_color) setBtnBgColor(data.btn_bg_color);
+        if (data.btn_border_color) setBtnBorderColor(data.btn_border_color);
+        if (data.header_logo) { const u = toProxyLogoUrl(data.header_logo); setHeaderLogo(u); setDraftHeaderLogo(u); }
+        if (data.header_align) setHeaderAlignment(data.header_align as "left" | "center");
+        if (data.header_name) setHeaderName(data.header_name);
+        if (data.agent_label) setAgentLabel(data.agent_label);
+        if (data.bot_avatar) setBotAvatar(data.bot_avatar);
+        if (data.chat_type) setChatType(data.chat_type as "icon" | "search");
+        if (data.position) setPosition(data.position as "center" | "right");
+        if (data.placeholder_text) setPlaceholderText(data.placeholder_text);
+        if (data.button_icon) setButtonIcon(data.button_icon);
+        if (data.button_align) setButtonAlignment(data.button_align as "left" | "right");
+        if (typeof data.show_button_text === "boolean") setShowButtonText(data.show_button_text);
+        if (data.button_text) setButtonText(data.button_text);
+        if (data.initial_message) setInitialMessage(data.initial_message);
+        if (typeof data.display_sources === "boolean") setDisplaySources(data.display_sources);
+        if (typeof data.allow_downloads === "boolean") setAllowDownloads(data.allow_downloads);
+        if (typeof data.display_copy === "boolean") setDisplayCopyBtn(data.display_copy);
+        if (typeof data.display_feedback === "boolean") setDisplayFeedback(data.display_feedback);
+        if (typeof data.link_safety === "boolean") setLinkSafety(data.link_safety);
+        if (typeof data.lead_collection === "boolean") setLeadCollection(data.lead_collection);
+        if (Array.isArray(data.lead_fields)) setLeadFields(data.lead_fields.join(","));
+        if (data.lead_timing) setLeadTiming(data.lead_timing);
+        if (typeof data.escalation_enabled === "boolean") setEscalationEnabled(data.escalation_enabled);
+        if (data.escalation_link !== undefined) setEscalationLink(data.escalation_link);
+        if (typeof data.show_in_header === "boolean") { setShowInHeader(data.show_in_header); setDraftShowInHeader(data.show_in_header); }
+        if (typeof data.show_in_chat === "boolean") { setShowInChat(data.show_in_chat); setDraftShowInChat(data.show_in_chat); }
+        if (typeof data.show_in_embed === "boolean") { setShowInEmbed(data.show_in_embed); setDraftShowInEmbed(data.show_in_embed); }
       }
-    };
-    fetchEmbedCustomization();
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Sandbox Live Preview States (Inside Modal)
   const [previewMessages, setPreviewMessages] = useState<any[]>([]);
   const [previewInput, setPreviewInput] = useState("");
   const [previewIsTyping, setPreviewIsTyping] = useState(false);
@@ -261,6 +277,7 @@ export default function EmbedScriptSection() {
   const [previewLeadFormSubmitted, setPreviewLeadFormSubmitted] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
+  // Auto-scroll chat body on new preview messages
   useEffect(() => {
     const chatContainer = document.getElementById("embed-sandbox-chat-messages");
     if (chatContainer) {
@@ -270,6 +287,7 @@ export default function EmbedScriptSection() {
 
   const isWideLayout = draftChatType === "search" && draftPosition === "center";
 
+  // Dynamic Theme state observer
   const [isDarkTheme, setIsDarkTheme] = useState(false);
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -309,6 +327,7 @@ export default function EmbedScriptSection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Reset sandbox chat state when switching draft modes in live preview
   useEffect(() => {
     setPreviewMessages([]);
     setPreviewIsOpen(false);
@@ -316,6 +335,7 @@ export default function EmbedScriptSection() {
     setPreviewInput("");
   }, [draftChatType, draftPosition]);
 
+  // Open customizer and copy values to drafts
   const openCustomizer = () => {
     setDraftChatType(chatType);
     setDraftPosition(position);
@@ -327,7 +347,6 @@ export default function EmbedScriptSection() {
     setDraftHeaderLogo(headerLogo);
     setDraftHeaderAlignment(headerAlignment);
     setDraftHeaderName(headerName);
-    setDraftHeaderSubtext(headerSubtext);
     setDraftBotAvatar(botAvatar);
     setDraftAgentLabel(agentLabel);
     setDraftButtonIcon(buttonIcon);
@@ -356,8 +375,17 @@ export default function EmbedScriptSection() {
     setIsCustomizerOpen(true);
   };
 
- 
+  // ── Load config when agent changes ───────────────────────────────────────
+  useEffect(() => {
+    if (agent?.id) {
+      loadConfigForAgent(agent.id);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent?.id]);
+
+  // Apply customizations and persist ALL fields to backend
   const handleApply = async () => {
+    // 1. Commit draft → applied state (updates the script snippet immediately)
     setChatType(draftChatType);
     setPosition(draftPosition);
     setPlaceholderText(draftPlaceholderText);
@@ -368,94 +396,90 @@ export default function EmbedScriptSection() {
     setHeaderLogo(draftHeaderLogo);
     setHeaderAlignment(draftHeaderAlignment);
     setHeaderName(draftHeaderName);
-    setHeaderSubtext(draftHeaderSubtext);
     setBotAvatar(draftBotAvatar);
     setAgentLabel(draftAgentLabel);
     setButtonIcon(draftButtonIcon);
     setButtonAlignment(draftButtonAlignment);
     setShowButtonText(draftShowButtonText);
     setButtonText(draftButtonText);
-
     setShowInHeader(draftShowInHeader);
     setShowInChat(draftShowInChat);
     setShowInEmbed(draftShowInEmbed);
-
     setInitialMessage(draftInitialMessage);
     setDisplaySources(draftDisplaySources);
     setAllowDownloads(draftAllowDownloads);
     setDisplayCopyBtn(draftDisplayCopyBtn);
     setDisplayFeedback(draftDisplayFeedback);
     setLinkSafety(draftLinkSafety);
-
     setLeadCollection(draftLeadCollection);
     setLeadFields(draftLeadFields);
     setLeadTiming(draftLeadTiming);
     setEscalationEnabled(draftEscalationEnabled);
     setEscalationLink(draftEscalationLink);
 
-    try {
-      const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
-      const token = getAuthToken();
-      const authHeader = token ? (token.startsWith("Bearer ") ? token : `Bearer ${token}`) : "";
-      const tenantId = localStorage.getItem("tenantId") || agentresp?.[0]?.tenant_id || "default_tenant";
+    // 2. Persist ALL 25+ fields via the new centralized embed config endpoint
+    if (agent?.id) {
+      const payload = {
+        agent_id: agent.id,
+        expected_version: savedConfigVersion ?? undefined, // OCC: send known version
+        change_reason: "Dashboard customizer apply",
+        // Theme
+        theme_color: draftThemeColor,
+        theme_text_color: draftThemeTextColor,
+        btn_bg_color: draftBtnBgColor,
+        btn_border_color: draftBtnBorderColor,
+        // Header
+        header_logo: draftHeaderLogo || "",
+        header_align: draftHeaderAlignment,
+        header_name: draftHeaderName,
+        // Bot Identity
+        agent_label: draftAgentLabel,
+        bot_avatar: draftBotAvatar,
+        // Chat Type & Layout
+        chat_type: draftChatType,
+        position: draftPosition,
+        placeholder_text: draftPlaceholderText,
+        // Button
+        button_icon: draftButtonIcon,
+        button_align: draftButtonAlignment,
+        show_button_text: draftShowButtonText,
+        button_text: draftButtonText,
+        // Content
+        initial_message: draftInitialMessage,
+        display_sources: draftDisplaySources,
+        allow_downloads: draftAllowDownloads,
+        display_copy: draftDisplayCopyBtn,
+        display_feedback: draftDisplayFeedback,
+        link_safety: draftLinkSafety,
+        // Lead Capture
+        lead_collection: draftLeadCollection,
+        lead_fields: draftLeadFields.split(",").map((f) => f.trim()).filter(Boolean),
+        lead_timing: draftLeadTiming,
+        // Escalation
+        escalation_enabled: draftEscalationEnabled,
+        escalation_link: draftEscalationLink,
+        // Logo Visibility
+        show_in_header: draftShowInHeader,
+        show_in_chat: draftShowInChat,
+        show_in_embed: draftShowInEmbed,
+      };
 
-      await fetch(`${baseUrl}/embed/customization`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: authHeader,
-        },
-        credentials: "include",
-        body: JSON.stringify({
-          logo_url: draftHeaderLogo || "",
-          show_in_header: draftShowInHeader,
-          show_in_chat: draftShowInChat,
-          show_in_embed: draftShowInEmbed
-        })
+      saveEmbedConfig({ data: payload }, (resp: any) => {
+        // Update the version tracker after a successful save
+        const newVersion = resp?.data?.config?.version;
+        if (typeof newVersion === "number") setSavedConfigVersion(newVersion);
       });
-
-      const getRes = await fetch(`${baseUrl}/embed/customization?tenant_id=${tenantId}`, {
-        method: "GET",
-        headers: {
-          ...(authHeader ? { Authorization: authHeader } : {})
-        },
-        credentials: "include"
-      });
-      if (getRes.ok) {
-        const result = await getRes.json();
-        const data = result.data ?? result;
-        if (data) {
-          if (data.logo_url) {
-            const proxyUrl = toProxyLogoUrl(data.logo_url);
-            setHeaderLogo(proxyUrl);
-            setDraftHeaderLogo(proxyUrl);
-          }
-          if (typeof data.show_in_header === "boolean") {
-            setShowInHeader(data.show_in_header);
-            setDraftShowInHeader(data.show_in_header);
-          }
-          if (typeof data.show_in_chat === "boolean") {
-            setShowInChat(data.show_in_chat);
-            setDraftShowInChat(data.show_in_chat);
-          }
-          if (typeof data.show_in_embed === "boolean") {
-            setShowInEmbed(data.show_in_embed);
-            setDraftShowInEmbed(data.show_in_embed);
-          }
-        }
-      }
-    } catch (err) {
-      console.warn("Failed to persist or fetch customization API:", err);
     }
 
     setIsCustomizerOpen(false);
     notification.success({
-      message: "Widget Configuration Applied",
-      description: "All header, content, bot avatar, entry button, and styling attributes have been updated.",
+      message: "Widget Configuration Saved",
+      description: "All settings have been saved to the database and the snippet is updated.",
       placement: "topRight",
     });
   };
 
+  // Revert draft changes and close
   const handleCancel = () => {
     setDraftChatType(chatType);
     setDraftPosition(position);
@@ -467,7 +491,6 @@ export default function EmbedScriptSection() {
     setDraftHeaderLogo(headerLogo);
     setDraftHeaderAlignment(headerAlignment);
     setDraftHeaderName(headerName);
-    setDraftHeaderSubtext(headerSubtext);
     setDraftBotAvatar(botAvatar);
     setDraftAgentLabel(agentLabel);
     setDraftButtonIcon(buttonIcon);
@@ -495,6 +518,7 @@ export default function EmbedScriptSection() {
     setIsCustomizerOpen(false);
   };
 
+  // Upload image file to backend API -> receive logo_url
   const uploadImageToBackend = async (file: File): Promise<string> => {
     const formData = new FormData();
     formData.append("logo", file);
@@ -534,6 +558,7 @@ export default function EmbedScriptSection() {
       if (target === "botAvatar") setDraftBotAvatar(logoUrl);
       if (target === "buttonIcon") setDraftButtonIcon(logoUrl);
 
+      // Target-specific boolean flags for PUT /api/v1/embed/customization:
       const targetShowHeader = target === "headerLogo";
       const targetShowChat = target === "botAvatar";
       const targetShowEmbed = target === "buttonIcon";
@@ -590,6 +615,7 @@ export default function EmbedScriptSection() {
     }
   };
 
+  // Generate dynamic embed script block based on APPLIED states
   const scriptCode = `<script src='${process.env.NEXT_PUBLIC_API_BASES_URL || "http://grag.gramopro.ai"}/chat.js'
   data-agent-id="${agent?.id || "YOUR_AGENT_ID"}"
   data-tenant-id="${agentresp?.[0]?.tenant_id || "YOUR_TENANT_ID"}"
@@ -601,7 +627,6 @@ export default function EmbedScriptSection() {
   data-header-logo="${headerLogo}"
   data-header-align="${headerAlignment}"
   data-header-name="${headerName}"
-  data-header-subtext="${headerSubtext}"
   data-agent-label="${agentLabel}"
   data-bot-avatar="${botAvatar}"
   data-button-icon="${buttonIcon}"
@@ -689,7 +714,7 @@ export default function EmbedScriptSection() {
     }, 1200);
   };
 
-  
+  // Preset arrays for Bot Avatar and Entry Button Icons
   const botAvatarPresets = [
     { id: "chat", icon: <MessageOutlined className="text-lg text-slate-500" /> },
     { id: "robot", icon: <RobotOutlined className="text-lg text-slate-500" /> },
@@ -708,7 +733,7 @@ export default function EmbedScriptSection() {
 
   return (
     <Flex vertical gap={40}>
-      
+      {/* Header Section */}
       <div className="space-y-3 max-w-3xl">
         <Title level={1} className="!m-0 !text-[var(--app-text)] !font-extrabold !text-3xl md:!text-5xl tracking-tight">
           Omnichannel Integrations
@@ -718,7 +743,7 @@ export default function EmbedScriptSection() {
         </Text>
       </div>
 
-      
+      {/* Embed Control card on page */}
       <Card
         className="bg-[var(--app-surface)] border border-[var(--app-border)] rounded-3xl shadow-md overflow-hidden"
         styles={{ body: { padding: "24px md:36px" } }}
@@ -773,7 +798,7 @@ export default function EmbedScriptSection() {
             </div>
           </div>
 
-          
+          {/* Code block window display */}
           <div className="relative group rounded-2xl border border-[var(--app-border)] bg-[var(--app-surface-muted)] overflow-hidden">
             <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--app-border)] bg-[var(--app-surface)]/50">
               <div className="flex gap-1.5">
@@ -828,9 +853,6 @@ export default function EmbedScriptSection() {
                 {"\n  "}
                 <span className="text-[#3b82f6]">data-header-name=</span>
                 <span className="text-emerald-500">{`"${headerName}"`}</span>
-                {"\n  "}
-                <span className="text-[#3b82f6]">data-header-subtext=</span>
-                <span className="text-emerald-500">{`"${headerSubtext}"`}</span>
                 {"\n  "}
                 <span className="text-[#3b82f6]">data-agent-label=</span>
                 <span className="text-emerald-500">{`"${agentLabel}"`}</span>
@@ -894,6 +916,7 @@ export default function EmbedScriptSection() {
         </Flex>
       </Card>
 
+      {/* FULL CUSTOMIZATION POPUP MODAL */}
       <Modal
         title={
           <div className="text-lg font-extrabold text-slate-800 dark:text-slate-100 border-b border-slate-100 dark:border-slate-800 pb-3 flex items-center gap-2">
@@ -919,7 +942,7 @@ export default function EmbedScriptSection() {
         className="custom-widget-modal"
       >
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 py-4 items-start">
-          
+          {/* Modal Left Column: Ant Design Tabs for Configurations (span 6) */}
           <div className="lg:col-span-6 flex flex-col gap-4">
             <Tabs
               defaultActiveKey="header"
@@ -959,6 +982,7 @@ export default function EmbedScriptSection() {
                         </div>
                       </div> */}
 
+                      {/* Selected Logo & Upload to S3 */}
                       <div>
                         <label className="text-xs font-semibold text-slate-500 block mb-1.5">Selected Logo:</label>
                         <div className="flex items-center gap-3">
@@ -980,7 +1004,7 @@ export default function EmbedScriptSection() {
                             )}
                           </div>
 
-                         
+                          {/* Cloud Upload Button */}
                           <label className="w-14 h-14 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-[#0fb5a1] cursor-pointer flex items-center justify-center bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:text-[#0fb5a1] transition-all shadow-sm">
                             {uploadingHeaderLogo ? (
                               <Spin size="small" />
@@ -1001,7 +1025,7 @@ export default function EmbedScriptSection() {
                         <p className="text-[10px] text-slate-400 mt-1.5 mb-0">Recommended size: 120 × 40 px or 3:1 aspect ratio (PNG, SVG, JPG, max 2MB)</p>
                       </div>
 
-                     
+                      {/* Header Title */}
                       <div>
                         <label className="text-xs font-semibold text-slate-500 block mb-1.5">Header Title</label>
                         <Input
@@ -1012,18 +1036,7 @@ export default function EmbedScriptSection() {
                         />
                       </div>
 
-                      
-                      <div>
-                        <label className="text-xs font-semibold text-slate-500 block mb-1.5">Header Subtext</label>
-                        <Input
-                          value={draftHeaderSubtext}
-                          onChange={(e) => setDraftHeaderSubtext(e.target.value)}
-                          placeholder="The team can also help"
-                          className="rounded-lg h-9 text-xs border-slate-300 dark:border-slate-700 dark:bg-slate-950 focus:border-[#0fb5a1]"
-                        />
-                      </div>
-
-                      
+                      {/* Logo Alignment */}
                       <div>
                         <label className="text-xs font-semibold text-slate-500 block mb-1.5">Alignment</label>
                         <Radio.Group
@@ -1047,7 +1060,7 @@ export default function EmbedScriptSection() {
                   ),
                   children: (
                     <div className="p-4 rounded-2xl bg-slate-50/70 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 space-y-3.5 min-h-[350px] max-h-[450px] overflow-y-auto custom-scrollbar">
-                     
+                      {/* Agent Message Label */}
                       <div>
                         <label className="font-bold text-xs text-slate-800 dark:text-slate-200 block mb-0.5">
                           Agent Chat Label
@@ -1063,7 +1076,7 @@ export default function EmbedScriptSection() {
                         />
                       </div>
 
-                      
+                      {/* Initial Message Section */}
                       <div>
                         <label className="font-bold text-xs text-slate-800 dark:text-slate-200 block mb-0.5">
                           Initial Message
@@ -1080,9 +1093,9 @@ export default function EmbedScriptSection() {
                         />
                       </div>
 
-                      
+                      {/* Switch Toggles List */}
                       <div className="space-y-2 pt-1">
-                        
+                        {/* 1. Display Sources */}
                         <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
                           <div className="flex items-start gap-2.5">
                             <div className="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-900 flex items-center justify-center text-slate-600 dark:text-slate-300 shrink-0 mt-0.5">
@@ -1100,7 +1113,7 @@ export default function EmbedScriptSection() {
                           />
                         </div>
 
-                        
+                        {/* 2. Allow Source Downloads */}
                         <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
                           <div className="flex items-start gap-2.5">
                             <div className="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-900 flex items-center justify-center text-slate-600 dark:text-slate-300 shrink-0 mt-0.5">
@@ -1121,7 +1134,7 @@ export default function EmbedScriptSection() {
                           />
                         </div>
 
-                        
+                        {/* 3. Display Copy Button */}
                         <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
                           <div className="flex items-start gap-2.5">
                             <div className="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-900 flex items-center justify-center text-slate-600 dark:text-slate-300 shrink-0 mt-0.5">
@@ -1139,7 +1152,7 @@ export default function EmbedScriptSection() {
                           />
                         </div>
 
-                        
+                        {/* 4. Display Feedback (Thumbs Up / Down) */}
                         <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
                           <div className="flex items-start gap-2.5">
                             <div className="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-900 flex items-center justify-center text-slate-600 dark:text-slate-300 shrink-0 mt-0.5">
@@ -1157,7 +1170,7 @@ export default function EmbedScriptSection() {
                           />
                         </div>
 
-                        
+                        {/* 5. Link Safety */}
                         <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
                           <div className="flex items-start gap-2.5">
                             <div className="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-900 flex items-center justify-center text-slate-600 dark:text-slate-300 shrink-0 mt-0.5">
@@ -1176,10 +1189,10 @@ export default function EmbedScriptSection() {
                         </div>
                       </div>
 
-                      
-                      <div className="border-t border-slate-200 dark:border-slate-800 my-4" />
+                      {/* Divider */}
+                      {/* <div className="border-t border-slate-200 dark:border-slate-800 my-4" /> */}
 
-                     
+                      {/* Lead & Support Escalation Section */}
                       <div className="space-y-3.5 pb-2">
                         {/* <div>
                           <h4 className="font-bold text-xs text-slate-800 dark:text-slate-200 m-0">Lead & Support Escalation</h4>
@@ -1238,8 +1251,8 @@ export default function EmbedScriptSection() {
                           </div>
                         )} */}
 
-                        
-                        <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
+                        {/* Escalation Toggle */}
+                        {/* <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
                           <div className="flex items-start gap-2.5">
                             <div className="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-900 flex items-center justify-center text-slate-600 dark:text-slate-300 shrink-0 mt-0.5">
                               <CustomerServiceOutlined className="text-xs" />
@@ -1254,9 +1267,9 @@ export default function EmbedScriptSection() {
                             onChange={(checked) => setDraftEscalationEnabled(checked)}
                             style={{ backgroundColor: draftEscalationEnabled ? draftThemeColor : undefined }}
                           />
-                        </div>
+                        </div> */}
 
-                        {draftEscalationEnabled && (
+                        {/* {draftEscalationEnabled && (
                           <div className="space-y-3 pl-2.5 border-l-2 border-slate-200 dark:border-slate-800 ml-3.5 animate-in fade-in slide-in-from-left duration-200">
                             <div className="space-y-1">
                               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
@@ -1270,7 +1283,7 @@ export default function EmbedScriptSection() {
                               />
                             </div>
                           </div>
-                        )}
+                        )} */}
                       </div>
                     </div>
                   ),
@@ -1368,7 +1381,7 @@ export default function EmbedScriptSection() {
                   ),
                   children: (
                     <div className="p-4 rounded-2xl bg-slate-50/70 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 space-y-4 min-h-[350px]">
-                     
+                      {/* Bot Identity Avatar Selection */}
                       <div>
                         <label className="text-xs font-bold uppercase tracking-wider text-slate-400 block mb-1.5">
                           Bot Identity Avatar
@@ -1652,7 +1665,7 @@ export default function EmbedScriptSection() {
           </div>
 
 
-          
+          {/* Modal Right Column: Live Web Sandbox Preview (span 6) */}
           <div className="lg:col-span-6 flex flex-col gap-3">
             <div className="flex justify-between items-center px-1">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
@@ -1663,7 +1676,7 @@ export default function EmbedScriptSection() {
               </span>
             </div>
 
-            
+            {/* Sandbox Browser frame mockup */}
             <div
               style={{
                 backgroundColor: isDarkTheme ? "#0f172a" : "#ffffff",
@@ -1671,7 +1684,7 @@ export default function EmbedScriptSection() {
               }}
               className="border rounded-2xl overflow-hidden shadow-xl w-full flex-1 flex flex-col relative min-h-[520px] h-[520px]"
             >
-              
+              {/* Browser bar */}
               <div
                 style={{
                   backgroundColor: isDarkTheme ? "#0b0f19" : "#f1f5f9",
@@ -1697,7 +1710,7 @@ export default function EmbedScriptSection() {
                 <div className="w-10" />
               </div>
 
-             
+              {/* Website canvas */}
               <div
                 style={{
                   background: isDarkTheme
@@ -1730,7 +1743,7 @@ export default function EmbedScriptSection() {
                   </p>
                 </div>
 
-                
+                {/* FLOATING ENTRY BUTTON PREVIEW */}
                 {draftChatType === "icon" && (
                   <div
                     onClick={() => setPreviewIsOpen(!previewIsOpen)}
@@ -1742,7 +1755,7 @@ export default function EmbedScriptSection() {
                     className={`absolute bottom-5 z-30 px-3.5 py-2.5 rounded-full shadow-xl flex items-center gap-2 cursor-pointer hover:scale-105 transition-all duration-200 animate-bounce [animation-duration:3s] ${draftButtonAlignment === "left" ? "left-5" : "right-5"
                       }`}
                   >
-                   
+                    {/* Render Selected Button Icon */}
                     {draftButtonIcon.startsWith("http") || draftButtonIcon.startsWith("blob:") || draftButtonIcon.startsWith("data:") ? (
                       <img src={draftButtonIcon} alt="Icon" className="w-5 h-5 rounded-full object-contain" />
                     ) : draftButtonIcon === "robot" ? (
@@ -1759,14 +1772,14 @@ export default function EmbedScriptSection() {
                       <MessageOutlined className="text-lg" style={{ color: draftThemeTextColor }} />
                     )}
 
-                   
+                    {/* Show Button Text if enabled */}
                     {draftShowButtonText && (
                       <span className="text-xs font-bold pr-0.5 select-none" style={{ color: draftThemeTextColor }}>{draftButtonText || "Help"}</span>
                     )}
                   </div>
                 )}
 
-                
+                {/* SEARCH BAR PREVIEW */}
                 {draftChatType === "search" && !previewIsOpen && (
                   <div
                     className={`absolute z-30 w-[90%] bottom-5 ${draftPosition === "center" ? "left-1/2 -translate-x-1/2" : "right-5"
@@ -1819,7 +1832,7 @@ export default function EmbedScriptSection() {
                   </div>
                 )}
 
-                
+                {/* CHAT MODAL OVERLAY PREVIEW */}
                 {previewIsOpen && (
                   <div
                     style={{
@@ -1834,7 +1847,7 @@ export default function EmbedScriptSection() {
                         : "right-5")
                       }`}
                   >
-                    
+                    {/* Header with Custom Header Logo & Alignment */}
                     <div
                       style={{
                         backgroundColor: isDarkTheme ? "#1e293b" : "#f8fafc",
@@ -1864,6 +1877,7 @@ export default function EmbedScriptSection() {
                         </div>
                       </div>
 
+                      {/* Escalation button in Header if enabled and lead form is NOT active */}
                       {draftEscalationEnabled && (!draftLeadCollection || previewLeadFormSubmitted) && (
                         <div className="mr-1 shrink-0 text-slate-400">
                           <EscalationHeaderLink
@@ -1894,7 +1908,7 @@ export default function EmbedScriptSection() {
                       />
                     ) : (
                       <>
-                       
+                        {/* Chat Feed with Bot Avatar */}
                         <div
                           id="embed-sandbox-chat-messages"
                           style={{ backgroundColor: isDarkTheme ? "#090d16" : "#f1f5f9" }}
@@ -1920,7 +1934,7 @@ export default function EmbedScriptSection() {
                                   const isUser = msg.role === "user";
                                   return (
                                     <div key={index} className={`flex items-start gap-2 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
-                                     
+                                      {/* Bot Avatar preview */}
                                       {!isUser && draftBotAvatar !== "none" && (
                                         <div
                                           className="w-6 h-6 rounded-full flex items-center justify-center overflow-hidden shrink-0 mt-1"
@@ -2019,7 +2033,7 @@ export default function EmbedScriptSection() {
                           <div ref={messagesEndRef} />
                         </div>
 
-                       
+                        {/* Chat Input Bar */}
                         <div
                           className="p-2.5 border-t rounded-b-2xl"
                           style={{

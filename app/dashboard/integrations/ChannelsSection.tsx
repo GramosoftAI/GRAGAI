@@ -17,15 +17,18 @@ export default function ChannelsSection() {
   const [googleModal, setGoogleModal] = useState(false);
   const [sharePointModal, setSharePointModal] = useState(false);
   
+  // The selected agent's info when opening the folder/site selection modal
   const [agentkbres, setagentkbres] = useState("");
   const [selectedAgent, setSelectedAgent] = useState<{ id: string; name: string } | null>(null);
 
+  // States to orchestrate the new IntegrationConnectModal
   const [connectModalType, setConnectModalType] = useState<"google" | "sharepoint" | "email" | "outlook" | null>(null);
   const [support, setSupport] = useState<string | null>(null);
 
   const [syncingGmail, setSyncingGmail] = useState(false);
   const [syncingOutlook, setSyncingOutlook] = useState(false);
 
+  // OAuth Registration effects (running after NextAuth callback redirect)
   useEffect(() => {
     if (!session?.refreshToken) return;
     if (!agentkbres) return;
@@ -110,6 +113,7 @@ export default function ChannelsSection() {
     }
   }, [session, agentkbres, support]);
 
+  // Gmail OAuth Registration & Auto-Sync Effect
   useEffect(() => {
     if (!session?.refreshToken) return;
     if (!agentkbres) return;
@@ -121,6 +125,7 @@ export default function ChannelsSection() {
       const client = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
       const secret = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_SECRET;
       try {
+        // 1. Register Gmail
         const registerResponse = await fetch(
           `${process.env.NEXT_PUBLIC_API_BASE_URL}/knowledge-bases/${agentkbres}/gmail/register`,
           {
@@ -145,6 +150,7 @@ export default function ChannelsSection() {
           throw new Error("Gmail registration failed");
         }
 
+        // 2. Sync Gmail
         const syncPayload = {
           folder_ids: ["INBOX", "SENT"],
           email: session?.user?.email,
@@ -166,6 +172,7 @@ export default function ChannelsSection() {
           throw new Error("Gmail sync failed");
         }
 
+        // Save connection state locally (fallback)
         const agentId = selectedAgent?.id || localStorage.getItem("selected_agent_id_temp") || agentkbres;
         const existing = localStorage.getItem(`mock_connections_${agentId}`);
         const list = existing ? JSON.parse(existing) : [];
@@ -188,6 +195,7 @@ export default function ChannelsSection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, agentkbres, support]);
 
+  // Outlook OAuth Registration & Auto-Sync Effect
   useEffect(() => {
     if (!session?.refreshToken) return;
     if (!agentkbres) return;
@@ -200,7 +208,7 @@ export default function ChannelsSection() {
       const secret = process.env.AZURE_AD_CLIENT_SECRET || process.env.NEXT_PUBLIC_MS_CLIENT_SECRET;
       const tenant = session.tenantId || process.env.AZURE_AD_TENANT_ID || "common";
       try {
-        
+        // 1. Register Outlook
         const registerResponse = await fetch(
           `${process.env.NEXT_PUBLIC_API_BASE_URL}/knowledge-bases/${agentkbres}/outlook/register`,
           {
@@ -226,6 +234,7 @@ export default function ChannelsSection() {
           throw new Error("Outlook registration failed");
         }
 
+        // 2. Sync Outlook
         const syncPayload = {
           folder_ids: ["Inbox", "Sent Items"],
           email: session?.user?.email,
@@ -247,6 +256,7 @@ export default function ChannelsSection() {
           throw new Error("Outlook sync failed");
         }
 
+        // Save connection state locally (fallback)
         const agentId = selectedAgent?.id || localStorage.getItem("selected_agent_id_temp") || agentkbres;
         const existing = localStorage.getItem(`mock_connections_${agentId}`);
         const list = existing ? JSON.parse(existing) : [];
@@ -269,6 +279,7 @@ export default function ChannelsSection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, agentkbres, support]);
 
+  // Load saved OAuth parameters from local storage after page redirect
   useEffect(() => {
     const savedKbId = localStorage.getItem("my_saved_kb_id");
     const openType = localStorage.getItem("files");
@@ -280,13 +291,14 @@ export default function ChannelsSection() {
     setSupport(openType);
   }, []);
 
+  // Modal event: when the user clicks "Connect" on an unsynced agent
   const handleConnectAgent = (agent: { id: string; name: string }, kbId: string) => {
     setSelectedAgent(agent);
     setagentkbres(kbId);
     localStorage.setItem("selected_agent_id_temp", agent.id);
     
     const currentType = connectModalType;
-    setConnectModalType(null);
+    setConnectModalType(null); // Close modal
     
     if (currentType === "email") {
       localStorage.setItem("my_saved_kb_id", kbId);
@@ -307,9 +319,11 @@ export default function ChannelsSection() {
         localStorage.setItem(`mock_connections_${agent.id}`, JSON.stringify(list));
       }
 
+      // Save to local storage for retrieval post-OAuth redirect
       localStorage.setItem("my_saved_kb_id", kbId);
       localStorage.setItem("files", currentType === "google" ? "google" : "share");
       
+      // Trigger OAuth
       if (currentType === "google") {
         signIn("google");
       } else {
@@ -318,13 +332,14 @@ export default function ChannelsSection() {
     }
   };
 
+  // Modal event: when the user clicks "Add" on an already synced agent
   const handleAddFolders = (agent: { id: string; name: string }, kbId: string) => {
     setSelectedAgent(agent);
     setagentkbres(kbId);
     localStorage.setItem("selected_agent_id_temp", agent.id);
     
     const type = connectModalType;
-    setConnectModalType(null);
+    setConnectModalType(null); // Close select modal
 
     if (type === "email") {
       if (session?.refreshToken) {
@@ -344,8 +359,10 @@ export default function ChannelsSection() {
       }
     } else {
       if (session?.refreshToken) {
+        // Session is active, set support to trigger the registration useEffect
         setSupport(type === "google" ? "google" : "share");
       } else {
+        // Session is not active, redirect to sign in to obtain credentials
         localStorage.setItem("my_saved_kb_id", kbId);
         localStorage.setItem("files", type === "google" ? "google" : "share");
         if (type === "google") {
@@ -365,6 +382,7 @@ export default function ChannelsSection() {
         </Title>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Google Drive Card */}
           <Card
             hoverable
             className="group relative overflow-hidden bg-[var(--app-surface)] border border-[var(--app-border)] rounded-3xl transition-all duration-300 hover:shadow-xl hover:shadow-blue-900/5 hover:-translate-y-1"
@@ -394,6 +412,7 @@ export default function ChannelsSection() {
             </div>
           </Card>
 
+          {/* SharePoint Card */}
           <Card
             hoverable
             className="group relative overflow-hidden bg-[var(--app-surface)] border border-[var(--app-border)] rounded-3xl transition-all duration-300 hover:shadow-xl hover:shadow-blue-900/5 hover:-translate-y-1"
@@ -423,6 +442,7 @@ export default function ChannelsSection() {
             </div>
           </Card>
 
+          {/* Email Card */}
           <Card
             hoverable
             className="group relative overflow-hidden bg-[var(--app-surface)] border border-[var(--app-border)] rounded-3xl transition-all duration-300 hover:shadow-xl hover:shadow-blue-900/5 hover:-translate-y-1"
@@ -452,6 +472,7 @@ export default function ChannelsSection() {
             </div>
           </Card>
 
+          {/* Outlook Card */}
           <Card
             hoverable
             className="group relative overflow-hidden bg-[var(--app-surface)] border border-[var(--app-border)] rounded-3xl transition-all duration-300 hover:shadow-xl hover:shadow-blue-900/5 hover:-translate-y-1"
@@ -483,7 +504,7 @@ export default function ChannelsSection() {
         </div>
       </Flex>
 
-  
+      {/* Integration Synced Agent Selector Modal */}
       {connectModalType && (
         <IntegrationConnectModal
           open={connectModalType !== null}
@@ -494,7 +515,7 @@ export default function ChannelsSection() {
         />
       )}
 
-    
+      {/* Folder selector modals */}
       <GoogleDriveFolderModal
         open={googleModal}
         kbId={agentkbres}
@@ -519,7 +540,7 @@ export default function ChannelsSection() {
 
 
 
-    
+      {/* Auto-Syncing Loader Modal */}
       <Modal
         open={syncingGmail || syncingOutlook}
         footer={null}
