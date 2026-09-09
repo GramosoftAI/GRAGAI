@@ -1542,7 +1542,9 @@ class QueryPlanner:
                                 should_project = True
                             elif c_low in ("dob", "date_of_birth") and is_dob_auth:
                                 should_project = True
-                            elif c_low == "experience" and is_exp_auth:
+                            elif c_low == "experience" and is_exp_auth and not any(
+                                w in q_lower for w in ("expired", "expiring", "expiry", "warranty", "asset")
+                            ):
                                 should_project = True
                             elif c_low == "gender" and is_gender_auth:
                                 should_project = True
@@ -1719,6 +1721,14 @@ class QueryPlanner:
                         if r_col == "email" and not is_email_auth:
                             continue
                         if r_col in ("dob", "date_of_birth") and not is_dob_auth:
+                            continue
+                        # Q08 fix: 'experience' must not be projected when the intent is about asset
+                        # expiry/expiring — the entity resolver false-positively matches 'exp' inside 'expired'.
+                        if r_col == "experience" and not is_exp_auth:
+                            continue
+                        if r_col == "experience" and is_exp_auth and any(
+                            w in q_lower for w in ("expired", "expiring", "expiry", "warranty", "asset")
+                        ):
                             continue
                         for a in needed_aliases:
                             if a in bridge_aliases:
@@ -2816,17 +2826,41 @@ class QueryPlanner:
                     or any(w in q_low for w in ("today", "this morning", "currently", "now"))
                 )
                 if is_today_intent:
-                    date_col = next((c for c in ("attendance_date", "date", "punch_date") if c in tbl.columns), None)
-                    if date_col and not any(p.table_alias == alias and p.column_name == date_col for p in predicates):
-                        predicates.append(
-                            PredicatePlan(
-                                table_alias=alias,
-                                column_name=date_col,
-                                operator="=",
-                                value="CURRENT_DATE",
-                                logical_operator="AND",
+                    if "latecomeearlyout" in t_name:
+                        # Q23 fix (Blocker): attendance_attendancelatecomeearlyout has no attendance_date.
+                        # The authoritative date is attendance_attendance.attendance_date via attendance_id_id FK.
+                        # Strip any non-authoritative modified_time / created_at = CURRENT_DATE predicates
+                        # injected by the generic resolver, then add a subquery predicate that constraints
+                        # attendance_id_id to only records whose parent attendance row is dated today.
+                        predicates = [
+                            p for p in predicates
+                            if not (p.table_alias == alias and p.column_name in ("modified_time", "created_at"))
+                        ]
+                        if not any(
+                            p.table_alias == alias and p.column_name == "attendance_id_id"
+                            for p in predicates
+                        ):
+                            predicates.append(
+                                PredicatePlan(
+                                    table_alias=alias,
+                                    column_name="attendance_id_id",
+                                    operator="IN",
+                                    value="(SELECT id FROM public.attendance_attendance WHERE attendance_date = CURRENT_DATE)",
+                                    logical_operator="AND",
+                                )
                             )
-                        )
+                    else:
+                        date_col = next((c for c in ("attendance_date", "date", "punch_date") if c in tbl.columns), None)
+                        if date_col and not any(p.table_alias == alias and p.column_name == date_col for p in predicates):
+                            predicates.append(
+                                PredicatePlan(
+                                    table_alias=alias,
+                                    column_name=date_col,
+                                    operator="=",
+                                    value="CURRENT_DATE",
+                                    logical_operator="AND",
+                                )
+                            )
 
                 # Deterministic ordering for singular punch queries (check-in, check-out)
                 is_punch_query = any(w in q_low for w in ("check in", "check-in", "checked in", "check out", "check-out", "checked out", "clock in", "clock-in", "clock out", "clock-out", "punch in", "punch out"))
@@ -2919,6 +2953,34 @@ class QueryPlanner:
                         aggregation=AggregateFunction.NONE,
                     )
                 ]
+                # Q19 fix: default to this-month when no explicit temporal scope is present.
+                # Avoids returning all-time aggregation for open-ended overtime questions.
+                has_explicit_temporal = any(
+                    w in q_low for w in (
+                        "today", "this morning", "yesterday",
+                        "this week", "last week",
+                        "this month", "last month",
+                        "this year", "last year",
+                        "all time", "history", "historical", "ever",
+                    )
+                ) or any(
+                    m in q_low for m in (
+                        "january", "february", "march", "april", "may", "june",
+                        "july", "august", "september", "october", "november", "december",
+                    )
+                )
+                if not has_explicit_temporal and not any(
+                    p.table_alias == att_alias and p.column_name == "attendance_date" for p in predicates
+                ):
+                    predicates.append(
+                        PredicatePlan(
+                            table_alias=att_alias,
+                            column_name="attendance_date",
+                            operator=">=",
+                            value="DATE_TRUNC('month', CURRENT_DATE)",
+                            logical_operator="AND",
+                        )
+                    )
 
         # I. Late & Early Count and Ranking (attendance_attendancelatecomeearlyout)
         is_top_late = any(w in q_low for w in ("most late", "highest late", "most late arrivals")) or ("who" in q_low and "late" in q_low and any(w in q_low for w in ("most", "highest")))
@@ -2984,6 +3046,35 @@ class QueryPlanner:
                         logical_operator="AND",
                     )
                 )
+            else:
+                # Q18 fix: default to this-month for early-leave count when no temporal scope given.
+                # Avoids returning an all-time aggregate for open-ended 'leave early' questions.
+                has_explicit_temporal_late = any(
+                    w in q_low for w in (
+                        "today", "this morning", "yesterday",
+                        "this week", "last week",
+                        "this month", "last month",
+                        "this year", "last year",
+                        "all time", "history", "historical", "ever",
+                    )
+                ) or any(
+                    m in q_low for m in (
+                        "january", "february", "march", "april", "may", "june",
+                        "july", "august", "september", "october", "november", "december",
+                    )
+                )
+                if not has_explicit_temporal_late and not any(
+                    p.table_alias == late_alias and p.column_name == "created_at" for p in predicates
+                ):
+                    predicates.append(
+                        PredicatePlan(
+                            table_alias=late_alias,
+                            column_name="created_at",
+                            operator=">=",
+                            value="DATE_TRUNC('month', CURRENT_DATE)",
+                            logical_operator="AND",
+                        )
+                    )
 
         # J. Absent Today Active Span Predicate (Blocker 2)
         if "absent" in q_low and any(w in q_low for w in ("today", "this morning", "currently", "now")):
