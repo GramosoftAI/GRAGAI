@@ -118,6 +118,9 @@ class EntityValueResolver:
         "requested", "request", "requesting", "requests", "taken", "take", "taking", "takes",
         "joined", "join", "joining", "joins", "worked", "work", "working", "works",
         "above", "below", "greater", "less", "than", "over", "under", "between", "equal", "equals", "exceeding", "exceeds",
+        "it", "its", "laptop", "laptops", "purchase", "purchased", "warranty", "expire", "expired", "expiring", "expiration", "bought",
+        "late", "early", "arrival", "arrivals", "absent", "absenteeism", "checkin", "checkout", "clockin", "clockout", "out", "in", "check", "clock", "cost", "soon",
+        "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
     }
 
     @classmethod

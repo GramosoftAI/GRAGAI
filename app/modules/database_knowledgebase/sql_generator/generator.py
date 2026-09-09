@@ -87,21 +87,32 @@ class CandidateSQLGenerator:
 
         # 3. Projections (SELECT items)
         for proj in plan.projections:
-            col_expr = exp.column(proj.column_name, table=proj.table_alias)
-            if proj.aggregation == AggregateFunction.COUNT:
-                select_item = exp.Count(this=col_expr)
-            elif proj.aggregation == AggregateFunction.COUNT_DISTINCT:
-                select_item = exp.Count(this=exp.Distinct(expressions=[col_expr]))
-            elif proj.aggregation == AggregateFunction.SUM:
-                select_item = exp.Sum(this=col_expr)
-            elif proj.aggregation == AggregateFunction.AVG:
-                select_item = exp.Avg(this=col_expr)
-            elif proj.aggregation == AggregateFunction.MIN:
-                select_item = exp.Min(this=col_expr)
-            elif proj.aggregation == AggregateFunction.MAX:
-                select_item = exp.Max(this=col_expr)
+            col_name_clean = proj.column_name.strip()
+            if any(col_name_clean.upper().startswith(fn) for fn in ("SUM(", "AVG(", "COUNT(", "MIN(", "MAX(", "ROUND(", "COALESCE(")) or "/" in col_name_clean:
+                try:
+                    parsed_expr = sqlglot.parse_one(col_name_clean, read="postgres")
+                    for c in parsed_expr.find_all(exp.Column):
+                        if not c.table:
+                            c.set("table", exp.to_identifier(proj.table_alias))
+                    select_item = parsed_expr
+                except Exception:
+                    select_item = exp.column(proj.column_name, table=proj.table_alias)
             else:
-                select_item = col_expr
+                col_expr = exp.column(proj.column_name, table=proj.table_alias)
+                if proj.aggregation == AggregateFunction.COUNT:
+                    select_item = exp.Count(this=col_expr)
+                elif proj.aggregation == AggregateFunction.COUNT_DISTINCT:
+                    select_item = exp.Count(this=exp.Distinct(expressions=[col_expr]))
+                elif proj.aggregation == AggregateFunction.SUM:
+                    select_item = exp.Sum(this=col_expr)
+                elif proj.aggregation == AggregateFunction.AVG:
+                    select_item = exp.Avg(this=col_expr)
+                elif proj.aggregation == AggregateFunction.MIN:
+                    select_item = exp.Min(this=col_expr)
+                elif proj.aggregation == AggregateFunction.MAX:
+                    select_item = exp.Max(this=col_expr)
+                else:
+                    select_item = col_expr
 
             if proj.output_alias:
                 select_item = exp.alias_(select_item, proj.output_alias)
@@ -183,6 +194,8 @@ class CandidateSQLGenerator:
                 f"{proj.table_alias}.{proj.column_name}"
                 for proj in plan.projections
                 if proj.aggregation == AggregateFunction.NONE
+                and not any(proj.column_name.strip().upper().startswith(fn) for fn in ("SUM(", "AVG(", "COUNT(", "MIN(", "MAX(", "ROUND(", "COALESCE("))
+                and "/" not in proj.column_name
             ]
             for col_str in non_agg_cols:
                 if col_str not in group_by_cols and col_str.split(".")[-1] not in group_by_cols:
@@ -198,13 +211,20 @@ class CandidateSQLGenerator:
 
         # 6. Order By
         for o in plan.order_by:
-            parts = o.expression.split(".")
-            if len(parts) == 2:
-                o_col = exp.column(parts[1], table=parts[0])
-            else:
-                o_col = exp.column(o.expression)
+            expr_str = o.expression.strip()
             desc = o.direction.value.upper() == "DESC"
-            query = query.order_by(exp.Ordered(this=o_col, desc=desc))
+            if any(expr_str.upper().startswith(fn) for fn in ("SUM(", "COUNT(", "AVG(", "MIN(", "MAX(", "ROUND(")):
+                try:
+                    o_expr = sqlglot.parse_one(expr_str, read="postgres")
+                except Exception:
+                    o_expr = exp.column(expr_str)
+            else:
+                parts = expr_str.split(".")
+                if len(parts) == 2:
+                    o_expr = exp.column(parts[1], table=parts[0])
+                else:
+                    o_expr = exp.column(expr_str)
+            query = query.order_by(exp.Ordered(this=o_expr, desc=desc))
 
         # 7. Limit
         if plan.limit:

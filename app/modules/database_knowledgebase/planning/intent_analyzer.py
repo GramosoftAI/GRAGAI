@@ -5,6 +5,7 @@ into structural query intent requirements.
 """
 
 from enum import Enum
+import datetime
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, ConfigDict, Field
@@ -163,6 +164,7 @@ class QueryIntentAnalyzer:
         (r"\bon friday\b", "DAY_OF_WEEK", 5),
         (r"\bfriday\b", "DAY_OF_WEEK", 5),
         (r"\bthis year\b", "RELATIVE_YEARS", 0),
+        (r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b", "CALENDAR_MONTH", lambda m: m.group(1).lower()),
     ]
 
     # Ranking patterns (e.g. "top 5", "first 10", "highest spending", "most frequently")
@@ -305,6 +307,23 @@ class QueryIntentAnalyzer:
             if any(a.function == AggregateFunction.COUNT and a.raw_match.lower() == "how many" for a in aggregations):
                 if re.search(r"\bhow many\s+(?:years\s+(?:of\s+)?)?experience\b", q_lower) or re.search(r"\bhow many\s+children\b", q_lower):
                     aggregations = [a for a in aggregations if not (a.function == AggregateFunction.COUNT and a.raw_match.lower() == "how many")]
+                elif re.search(r"\bhow many\s+hours\b", q_lower):
+                    # "how many hours" is a SUM of worked duration, not record COUNT
+                    aggregations = [a for a in aggregations if not (a.function == AggregateFunction.COUNT and a.raw_match.lower() == "how many")]
+                    aggregations.append(ExtractedAggregation(function=AggregateFunction.SUM, target_concept="hours", raw_match="how many hours"))
+
+            # Overtime queries: "how much overtime", "total overtime", or "most overtime" -> SUM
+            if any(w in q_lower for w in ("how much overtime", "total overtime", "overtime worked", "most overtime")) and not any(a.function == AggregateFunction.SUM and a.target_concept == "overtime" for a in aggregations):
+                aggregations.append(ExtractedAggregation(function=AggregateFunction.SUM, target_concept="overtime", raw_match="overtime"))
+
+            # Absenteeism queries: "highest absenteeism" or "days was ... absent" -> SUM of days absent
+            if any(w in q_lower for w in ("absenteeism", "days was", "days absent")) and not any(a.target_concept == "absenteeism" for a in aggregations):
+                aggregations.append(ExtractedAggregation(function=AggregateFunction.SUM, target_concept="absenteeism", raw_match="absenteeism"))
+
+            # Late arrivals queries: "most late arrivals" or "how many times was ... late" -> COUNT
+            if any(w in q_lower for w in ("late arrivals", "most late", "leave early", "early out")) or (any(w in q_lower for w in ("how many times", "times was")) and any(w in q_lower for w in ("late", "early"))):
+                if not any(a.target_concept == "late" for a in aggregations):
+                    aggregations.append(ExtractedAggregation(function=AggregateFunction.COUNT, target_concept="late", raw_match="late"))
 
         # 4. Extract Predicates (predicates initialized earlier to preserve exact date predicates)
         gt_match = cls.PRICE_GT_PATTERN.search(q_lower)
@@ -574,6 +593,119 @@ class QueryIntentAnalyzer:
                 )
             )
 
+        # Calendar Month Predicates: e.g. "for August", "in August"
+        month_match = re.search(r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b", q_lower)
+        if month_match:
+            m_name = month_match.group(1).lower()
+            month_numbers = {
+                "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+                "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12
+            }
+            m_num = month_numbers[m_name]
+            import calendar
+            curr_year = datetime.datetime.now().year
+            last_day = calendar.monthrange(curr_year, m_num)[1]
+            start_str = f"{curr_year}-{m_num:02d}-01"
+            end_str = f"{curr_year}-{m_num:02d}-{last_day:02d}"
+            predicates.append(
+                ExtractedPredicate(
+                    target_concept="date_range_start",
+                    operator=">=",
+                    value=start_str,
+                    raw_match=m_name,
+                )
+            )
+            predicates.append(
+                ExtractedPredicate(
+                    target_concept="date_range_end",
+                    operator="<=",
+                    value=end_str,
+                    raw_match=m_name,
+                )
+            )
+
+        # Late and Early Status Predicates
+        if any(w in q_lower for w in ("late", "late arrivals", "late arrival", "late come")):
+            predicates.append(
+                ExtractedPredicate(
+                    target_concept="late_status",
+                    operator="=",
+                    value="late_come",
+                    raw_match="late",
+                )
+            )
+        elif any(w in q_lower for w in ("leave early", "left early", "early out", "early departure")):
+            predicates.append(
+                ExtractedPredicate(
+                    target_concept="early_status",
+                    operator="=",
+                    value="early_out",
+                    raw_match="early",
+                )
+            )
+
+        # Asset Predicates
+        if any(w in q_lower for w in ("expiring soon", "expire soon", "expiring")):
+            predicates.append(
+                ExtractedPredicate(
+                    target_concept="expiring_soon",
+                    operator="=",
+                    value="soon",
+                    raw_match="expiring soon",
+                )
+            )
+        elif any(w in q_lower for w in ("are expired", "is expired", "which assets assigned to .* are expired")):
+            predicates.append(
+                ExtractedPredicate(
+                    target_concept="expired_asset",
+                    operator="<",
+                    value="CURRENT_DATE",
+                    raw_match="expired",
+                )
+            )
+
+        laptop_m = re.search(r"\b(laptop|desktop|monitor|tablet|vehicle)\b", q_lower)
+        if laptop_m and not any(p.target_concept == "asset_name" for p in predicates):
+            predicates.append(
+                ExtractedPredicate(
+                    target_concept="asset_name",
+                    operator="ILIKE",
+                    value=f"%{laptop_m.group(1)}%",
+                    raw_match=laptop_m.group(0),
+                )
+            )
+
+        asset_id_m = re.search(r"\b(?:asset\s+(?:id\s+)?|owns\s+asset\s+)(\d+)\b", q_lower)
+        if asset_id_m:
+            predicates.append(
+                ExtractedPredicate(
+                    target_concept="asset_id",
+                    operator="=",
+                    value=int(asset_id_m.group(1)),
+                    raw_match=asset_id_m.group(0),
+                )
+            )
+
+        # Absenteeism / Leave Predicates
+        if "absent" in q_lower:
+            predicates.append(
+                ExtractedPredicate(
+                    target_concept="leave_status",
+                    operator="=",
+                    value="approved",
+                    raw_match="absent",
+                )
+            )
+            if "today" in q_lower:
+                predicates.append(
+                    ExtractedPredicate(
+                        target_concept="absent_today",
+                        operator="=",
+                        value="today",
+                        raw_match="absent today",
+                    )
+                )
+
         # 5. Grouping Detection (e.g. "per customer", "by category", "in each department", "for each customer")
         grouping_required = False
         grouping_concept: Optional[str] = None
@@ -831,6 +963,16 @@ class QueryIntentAnalyzer:
                 temporal_intent = TemporalIntent.DATE_RANGE
         else:
             temporal_intent = TemporalIntent.CURRENT
+
+        # Deduplicate predicates while preserving order
+        dedup_predicates = []
+        seen_pred = set()
+        for p in predicates:
+            key = (p.target_concept, p.operator, str(p.value))
+            if key not in seen_pred:
+                seen_pred.add(key)
+                dedup_predicates.append(p)
+        predicates = dedup_predicates
 
         return QueryIntentAnalysis(
             user_query=query,

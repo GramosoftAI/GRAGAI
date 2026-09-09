@@ -5,6 +5,7 @@ Guarantees that no query plan invents tables, columns, or non-existent relationa
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 from ..exceptions import QueryPlanError, SchemaVersionMismatchError
 from ..schemas.canonical import DatabaseSchema, RelationshipType
@@ -65,6 +66,10 @@ class QueryPlanValidator:
 
             alias_to_table[tbl.alias] = (tbl.schema_name, tbl.table_name)
 
+        # Fail-closed guard: if plan confidence is 0.0 and no projections, it's an intentional fail-closed plan
+        if plan.confidence == 0.0 and not plan.projections:
+            return
+
         # 3. Validate Projections (SELECT columns)
         for proj in plan.projections:
             if proj.table_alias not in alias_to_table:
@@ -74,11 +79,15 @@ class QueryPlanValidator:
             s_name, t_name = alias_to_table[proj.table_alias]
             table = canonical_schema.get_schema(s_name).tables[t_name]
 
-            # Allow wildcard '*' or existing column
+            # Allow wildcard '*', existing column, or calculated expression whose referenced columns exist
             if proj.column_name != "*" and proj.column_name not in table.columns:
-                raise QueryPlanValidationError(
-                    f"Column '{proj.column_name}' does not exist on table '{s_name}.{t_name}'"
-                )
+                words = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", proj.column_name)
+                SQL_KEYWORDS = {"sum", "avg", "count", "min", "max", "round", "cast", "nullif", "as", "numeric", "decimal", "integer", "coalesce"}
+                col_words = [w for w in words if w.lower() not in SQL_KEYWORDS]
+                if not col_words or not all(w in table.columns for w in col_words):
+                    raise QueryPlanValidationError(
+                        f"Column '{proj.column_name}' does not exist on table '{s_name}.{t_name}'"
+                    )
 
         # 3.1 Projection Data Minimization & Sensitive Attributes Guard (Fail-Closed)
         SENSITIVE_FINANCIAL = {"basic_salary", "salary", "wage", "gross_pay", "net_pay", "basic_pay", "deduction", "allowance", "bonus", "hourly_rate", "payment_rate", "salary_hour", "revised_salary"}

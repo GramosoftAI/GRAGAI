@@ -58,6 +58,13 @@ class PlanValidator:
         Deterministically validate a QueryPlanIR.
         Returns PlanValidationResult(outcome=PASS) or PlanValidationResult(outcome=REJECT, reason_code=...).
         """
+        # Fail-closed guard: if plan confidence is 0.0 and no projections, it's an intentional fail-closed plan
+        if plan.confidence == 0.0 and not plan.projections:
+            return PlanValidationResult(
+                outcome=ValidationOutcome.PASS,
+                message="Plan intentionally failed closed",
+            )
+
         # 1. Schema version verification
         if canonical_schema.fingerprint and plan.schema_version:
             if plan.schema_version != canonical_schema.fingerprint:
@@ -169,12 +176,17 @@ class PlanValidator:
 
             if proj.column_name != "*" and proj.column_name != "1":
                 if proj.column_name.lower() not in {c.lower() for c in tbl_schema.columns.keys()}:
-                    return PlanValidationResult(
-                        outcome=ValidationOutcome.REJECT,
-                        reason_code=ValidationReasonCode.UNAUTHORIZED_COLUMN,
-                        message=f"Column '{proj.column_name}' does not exist on table '{tbl_schema.table_name}'",
-                        offending_object=f"{tbl_schema.table_name}.{proj.column_name}",
-                    )
+                    # Allow calculated expressions whose referenced columns exist
+                    words = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", proj.column_name)
+                    SQL_KEYWORDS = {"sum", "avg", "count", "min", "max", "round", "cast", "nullif", "as", "numeric", "decimal", "integer", "coalesce"}
+                    col_words = [w for w in words if w.lower() not in SQL_KEYWORDS]
+                    if not col_words or not all(w.lower() in {c.lower() for c in tbl_schema.columns.keys()} for w in col_words):
+                        return PlanValidationResult(
+                            outcome=ValidationOutcome.REJECT,
+                            reason_code=ValidationReasonCode.UNAUTHORIZED_COLUMN,
+                            message=f"Column '{proj.column_name}' does not exist on table '{tbl_schema.table_name}'",
+                            offending_object=f"{tbl_schema.table_name}.{proj.column_name}",
+                        )
 
             # Check aggregation function
             if proj.aggregation and getattr(proj.aggregation, "value", str(proj.aggregation)) not in {"NONE", None}:
