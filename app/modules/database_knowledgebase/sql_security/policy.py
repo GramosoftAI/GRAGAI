@@ -33,7 +33,7 @@ class SQLSecurityPolicyEngine:
         # Aggregates
         "COUNT", "SUM", "AVG", "MIN", "MAX",
         # Math & Formatting
-        "ROUND", "CEIL", "CEILING", "FLOOR", "ABS", "COALESCE", "NULLIF",
+        "ROUND", "CEIL", "CEILING", "FLOOR", "ABS", "COALESCE", "NULLIF", "LEAST", "GREATEST",
         # Temporal
         "EXTRACT", "DATE_TRUNC", "TIMESTAMP_TRUNC", "DATETIME_TRUNC", "NOW", "CURRENT_DATE", "CURRENT_TIMESTAMP", "AGE", "INTERVAL",
         # String

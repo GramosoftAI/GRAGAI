@@ -1568,14 +1568,16 @@ class QueryPlanner:
                                 should_project = True
                             elif c_low in ("asset_status", "status") and any(k in q_lower for k in ("status", "state", "condition")):
                                 should_project = True
-                            elif c_low in ("asset_purchase_cost", "purchase_cost", "cost", "price") and any(k in q_lower for k in ("cost", "price", "purchase", "bought")):
+                            elif c_low in ("asset_purchase_cost", "purchase_cost", "cost", "price") and any(k in q_lower for k in ("cost", "price", "how much", "amount", "worth", "value")):
                                 should_project = True
-                            elif c_low in ("asset_purchase_date", "purchase_date", "purchased_date") and any(k in q_lower for k in ("purchased", "bought", "when was")):
+                            elif c_low in ("asset_purchase_date", "purchase_date", "purchased_date") and any(k in q_lower for k in ("purchased", "bought", "when was", "purchase date", "date of purchase")):
                                 should_project = True
-                            elif c_low in ("warranty_date", "warranty_end_date", "warranty") and any(k in q_lower for k in ("warranty", "expire", "expired")):
-                                should_project = True
-                            elif c_low in ("expiry_date", "expiration_date") and any(k in q_lower for k in ("expire", "expired", "expiring")):
-                                should_project = True
+                            elif c_low in ("expiry_date", "expiration_date", "warranty_date", "warranty_end_date") and any(k in q_lower for k in ("expire", "expired", "expiring", "warranty")):
+                                if any(k in q_lower for k in ("expire", "expired", "expiring")):
+                                    if c_low == "expiry_date":
+                                        should_project = True
+                                elif c_low in ("warranty_date", "expiry_date"):
+                                    should_project = True
                             elif c_low == "notify_before" and any(k in q_lower for k in ("expiring", "notify", "soon")):
                                 should_project = True
 
@@ -1696,6 +1698,22 @@ class QueryPlanner:
                             continue
                         if (r_col in ("basic_salary", "salary", "wage", "gross_pay", "net_pay", "basic_pay") or "salary" in r_col or "wage" in r_col) and not is_fin_auth:
                             continue
+
+                        # Universal media/binary attachment guard (Blocker 6)
+                        MEDIA_KEYWORDS = ("image", "photo", "picture", "avatar", "attachment", "document", "file", "blob")
+                        has_media_intent = any(w in q_lower for w in ("image", "photo", "picture", "avatar", "attachment", "document", "file", "download", "view image", "show picture"))
+                        if any(m in r_col for m in MEDIA_KEYWORDS) and not has_media_intent:
+                            continue
+
+                        # Asset cost authorization guard (Blocker 6)
+                        has_cost_intent = any(w in q_lower for w in ("cost", "price", "how much", "amount", "worth", "value", "expensive", "cheap"))
+                        if (r_col in ("asset_purchase_cost", "purchase_cost", "cost", "price") or "cost" in r_col or "price" in r_col) and not has_cost_intent:
+                            continue
+
+                        # Warranty expiry vs start date guard (Blocker 6)
+                        if r_col in ("warranty_date", "warranty_start_date") and any(w in q_lower for w in ("expire", "expired", "expiring", "expiry")):
+                            continue
+
                         if r_col in ("phone", "mobile") and not is_phone_auth:
                             continue
                         if r_col == "email" and not is_email_auth:
@@ -2645,18 +2663,27 @@ class QueryPlanner:
         q_low = user_query.lower()
 
         # 1. Fail-closed security guard: strictly strip unauthorized sensitive columns
-        SENSITIVE_FINANCIAL = {"basic_salary", "salary", "wage", "gross_pay", "net_pay", "basic_pay", "deduction", "allowance", "bonus", "hourly_rate", "payment_rate", "salary_hour", "revised_salary"}
+        SENSITIVE_FINANCIAL = {
+            "basic_salary", "salary", "wage", "gross_pay", "net_pay", "basic_pay",
+            "deduction", "allowance", "bonus", "hourly_rate", "payment_rate",
+            "salary_hour", "revised_salary", "asset_purchase_cost", "purchase_cost",
+            "cost", "price"
+        }
         SENSITIVE_BANKING = {"bank_name", "account_number", "routing_number", "iban", "swift", "branch", "ifsc"}
         SENSITIVE_CONTACT = {"phone", "mobile", "telephone", "emergency_contact", "contact_number"}
         SENSITIVE_PII = {"dob", "date_of_birth", "age", "marital_status", "children", "passport_number", "ssn", "national_id"}
         SENSITIVE_LOCATION = {"address", "address_line", "postal_code", "zip_code"}
         SENSITIVE_CREDENTIALS = {"password", "secret", "token", "hash", "salt"}
+        MEDIA_KEYWORDS = ("image", "photo", "picture", "avatar", "attachment", "document", "file", "blob")
 
         is_fin_auth = any(w in q_low for w in ("salary", "wage", "earn", "earning", "make", "compensation", "payslip", "deduction", "allowance", "bonus", "gross pay", "net pay", "basic pay", "pay", "income", "basic_salary"))
         if is_fin_auth and any(w in q_low for w in ("show employees", "list employees", "which employees", "who are the employees", "employees in", "all employees")):
             if any(kw in q_low for kw in ("whose salary", "with salary", "salary >", "salary above", "salary <", "salary less", "salary greater")):
                 if not any(ask in q_low for ask in ("and their salary", "with their salary", "show salary", "what is their salary")):
                     is_fin_auth = False
+
+        has_cost_intent = any(w in q_low for w in ("cost", "price", "how much", "amount", "worth", "value", "expensive", "cheap"))
+        has_media_intent = any(w in q_low for w in ("image", "photo", "picture", "avatar", "attachment", "document", "file", "download", "view image", "show picture"))
 
         is_phone_auth = any(w in q_low for w in ("phone", "mobile", "cell", "telephone", "call", "contact number"))
         if is_phone_auth and "whose phone" in q_low and "available" in q_low and not any(ask in q_low for ask in ("show phone", "what is", "and their phone")):
@@ -2679,7 +2706,17 @@ class QueryPlanner:
                 safe_projections.append(proj)
                 continue
 
-            if (col_low in SENSITIVE_FINANCIAL or any(s in col_low for s in ("salary", "wage"))) and not is_fin_auth:
+            # Fail-closed media/attachment protection (Blocker 6)
+            if any(m in col_low for m in MEDIA_KEYWORDS) and not has_media_intent:
+                continue
+            # Fail-closed purchase cost protection (Blocker 6)
+            if col_low in ("asset_purchase_cost", "purchase_cost", "cost", "price") and not has_cost_intent:
+                continue
+            # Expiry vs warranty date protection (Blocker 6)
+            if col_low in ("warranty_date", "warranty_start_date") and any(w in q_low for w in ("expire", "expired", "expiring", "expiry")):
+                continue
+
+            if (col_low in SENSITIVE_FINANCIAL or any(s in col_low for s in ("salary", "wage"))) and not (is_fin_auth or has_cost_intent):
                 continue
             if col_low in SENSITIVE_CONTACT and not (is_phone_auth if col_low != "email" else is_email_auth):
                 continue
@@ -2772,7 +2809,7 @@ class QueryPlanner:
                         )
                     )
 
-            # D. Attendance Today / Current Punch
+            # D. Attendance Today / Current Punch / Singular Punch Semantics (Blocker 5)
             if "attendance" in t_name and "setting" not in t_name and "allowedip" not in t_name and "ip" not in t_name:
                 is_today_intent = (
                     getattr(analysis, "temporal_intent", None) == TemporalIntent.TODAY
@@ -2790,6 +2827,19 @@ class QueryPlanner:
                                 logical_operator="AND",
                             )
                         )
+
+                # Deterministic ordering for singular punch queries (check-in, check-out)
+                is_punch_query = any(w in q_low for w in ("check in", "check-in", "checked in", "check out", "check-out", "checked out", "clock in", "clock-in", "clock out", "clock-out", "punch in", "punch out"))
+                has_multi_intent = any(w in q_low for w in ("all", "every", "history", "times", "records", "list", "show attendance", "how many hours", "overtime", "percentage")) or any(m in q_low for m in ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"))
+                if is_punch_query and not has_multi_intent:
+                    date_col = next((c for c in ("attendance_date", "date") if c in tbl.columns), None)
+                    if date_col:
+                        is_earliest = any(w in q_low for w in ("first", "earliest"))
+                        direction = OrderDirection.ASC if is_earliest else OrderDirection.DESC
+                        if not any(o.expression.endswith(date_col) for o in order_by):
+                            order_by.insert(0, OrderByPlan(expression=f"{alias}.{date_col}", direction=direction))
+                        if limit is None or limit > 1:
+                            limit = 1
 
             # E. Latest Leave Request
             if "leaverequest" in t_name:
@@ -2935,7 +2985,45 @@ class QueryPlanner:
                     )
                 )
 
-        # J. Absent Days & Absenteeism Department Ranking
+        # J. Absent Today Active Span Predicate (Blocker 2)
+        if "absent" in q_low and any(w in q_low for w in ("today", "this morning", "currently", "now")):
+            lea_alias = next((a for a in needed_aliases if alias_to_table[a].table_name.lower() == "leave_leaverequest"), None)
+            if lea_alias:
+                # Remove single-point date predicates like end_date = CURRENT_DATE or start_date = CURRENT_DATE
+                predicates = [
+                    p for p in predicates
+                    if not (p.table_alias == lea_alias and p.column_name in ("start_date", "end_date", "requested_date"))
+                ]
+                predicates.append(
+                    PredicatePlan(
+                        table_alias=lea_alias,
+                        column_name="start_date",
+                        operator="<=",
+                        value="CURRENT_DATE",
+                        logical_operator="AND",
+                    )
+                )
+                predicates.append(
+                    PredicatePlan(
+                        table_alias=lea_alias,
+                        column_name="end_date",
+                        operator=">=",
+                        value="CURRENT_DATE",
+                        logical_operator="AND",
+                    )
+                )
+                if not any(p.table_alias == lea_alias and p.column_name == "status" for p in predicates):
+                    predicates.append(
+                        PredicatePlan(
+                            table_alias=lea_alias,
+                            column_name="status",
+                            operator="=",
+                            value="approved",
+                            logical_operator="AND",
+                        )
+                    )
+
+        # K. Absent Days & Absenteeism Department Ranking (Blockers 1, 3, 4)
         if "absenteeism" in q_low or ("department" in q_low and "highest" in q_low and "absent" in q_low):
             dept_alias = next((a for a in needed_aliases if alias_to_table[a].table_name.lower() == "base_department"), None)
             lea_alias = next((a for a in needed_aliases if alias_to_table[a].table_name.lower() == "leave_leaverequest"), None)
@@ -2956,27 +3044,7 @@ class QueryPlanner:
                             logical_operator="AND",
                         )
                     )
-        elif ("how many days" in q_low or "days was" in q_low or "absent days" in q_low) and "absent" in q_low:
-            lea_alias = next((a for a in needed_aliases if alias_to_table[a].table_name.lower() == "leave_leaverequest"), None)
-            if lea_alias:
-                projections = [
-                    ColumnProjectionPlan(
-                        table_alias=lea_alias,
-                        column_name="SUM(CAST(NULLIF(requested_days, '') AS NUMERIC))",
-                        output_alias="absent_days",
-                        aggregation=AggregateFunction.NONE,
-                    )
-                ]
-                if not any(p.table_alias == lea_alias and p.column_name == "status" for p in predicates):
-                    predicates.append(
-                        PredicatePlan(
-                            table_alias=lea_alias,
-                            column_name="status",
-                            operator="=",
-                            value="approved",
-                            logical_operator="AND",
-                        )
-                    )
+                # Bounded temporal scope: default to Year-to-Date (YTD) or current month (Blocker 4)
                 if "month" in q_low and not any(p.table_alias == lea_alias and p.column_name in ("start_date", "requested_date") for p in predicates):
                     predicates.append(
                         PredicatePlan(
@@ -2987,6 +3055,83 @@ class QueryPlanner:
                             logical_operator="AND",
                         )
                     )
+                elif not any(w in q_low for w in ("all time", "history", "historical", "ever")) and not any(p.table_alias == lea_alias and p.column_name in ("start_date", "requested_date") for p in predicates):
+                    predicates.append(
+                        PredicatePlan(
+                            table_alias=lea_alias,
+                            column_name="start_date",
+                            operator=">=",
+                            value="DATE_TRUNC('year', CURRENT_DATE)",
+                            logical_operator="AND",
+                        )
+                    )
+        elif ("how many days" in q_low or "days was" in q_low or "absent days" in q_low) and "absent" in q_low:
+            lea_alias = next((a for a in needed_aliases if alias_to_table[a].table_name.lower() == "leave_leaverequest"), None)
+            if lea_alias:
+                if "month" in q_low:
+                    # Remove any existing single start_date / end_date predicates for the month
+                    predicates = [
+                        p for p in predicates
+                        if not (p.table_alias == lea_alias and p.column_name in ("start_date", "end_date", "requested_date"))
+                    ]
+                    # Mathematical date overlap within month:
+                    # overlap = LEAST(end_date, monthEnd) - GREATEST(start_date, monthStart) + 1 (Blocker 1)
+                    overlap_expr = "SUM(LEAST(end_date, (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month - 1 day')::date) - GREATEST(start_date, DATE_TRUNC('month', CURRENT_DATE)::date) + 1)"
+                    projections = [
+                        ColumnProjectionPlan(
+                            table_alias=lea_alias,
+                            column_name=overlap_expr,
+                            output_alias="absent_days",
+                            aggregation=AggregateFunction.NONE,
+                        )
+                    ]
+                    if not any(p.table_alias == lea_alias and p.column_name == "status" for p in predicates):
+                        predicates.append(
+                            PredicatePlan(
+                                table_alias=lea_alias,
+                                column_name="status",
+                                operator="=",
+                                value="approved",
+                                logical_operator="AND",
+                            )
+                        )
+                    predicates.append(
+                        PredicatePlan(
+                            table_alias=lea_alias,
+                            column_name="start_date",
+                            operator="<=",
+                            value="DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month - 1 day'",
+                            logical_operator="AND",
+                        )
+                    )
+                    predicates.append(
+                        PredicatePlan(
+                            table_alias=lea_alias,
+                            column_name="end_date",
+                            operator=">=",
+                            value="DATE_TRUNC('month', CURRENT_DATE)",
+                            logical_operator="AND",
+                        )
+                    )
+                else:
+                    projections = [
+                        ColumnProjectionPlan(
+                            table_alias=lea_alias,
+                            column_name="SUM(CAST(NULLIF(requested_days, '') AS NUMERIC))",
+                            output_alias="absent_days",
+                            aggregation=AggregateFunction.NONE,
+                        )
+                    ]
+                    if not any(p.table_alias == lea_alias and p.column_name == "status" for p in predicates):
+                        predicates.append(
+                            PredicatePlan(
+                                table_alias=lea_alias,
+                                column_name="status",
+                                operator="=",
+                                value="approved",
+                                logical_operator="AND",
+                            )
+                        )
 
         # K. Prune false employee name literals matching calendar month names
         MONTH_NAMES = {"january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"}

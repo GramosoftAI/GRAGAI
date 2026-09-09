@@ -81,21 +81,45 @@ class QueryPlanValidator:
 
             # Allow wildcard '*', existing column, or calculated expression whose referenced columns exist
             if proj.column_name != "*" and proj.column_name not in table.columns:
-                words = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", proj.column_name)
-                SQL_KEYWORDS = {"sum", "avg", "count", "min", "max", "round", "cast", "nullif", "as", "numeric", "decimal", "integer", "coalesce"}
-                col_words = [w for w in words if w.lower() not in SQL_KEYWORDS]
-                if not col_words or not all(w in table.columns for w in col_words):
-                    raise QueryPlanValidationError(
-                        f"Column '{proj.column_name}' does not exist on table '{s_name}.{t_name}'"
-                    )
+                valid_calc = False
+                try:
+                    import sqlglot
+                    from sqlglot import exp
+                    parsed_expr = sqlglot.parse_one(proj.column_name, read="postgres")
+                    cols = [c.name.lower() for c in parsed_expr.find_all(exp.Column)]
+                    if cols and all(c in {col.lower() for col in table.columns.keys()} for c in cols):
+                        valid_calc = True
+                except Exception:
+                    pass
+
+                if not valid_calc:
+                    words = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", proj.column_name)
+                    SQL_KEYWORDS = {
+                        "sum", "avg", "count", "min", "max", "round", "cast", "nullif", "as",
+                        "numeric", "decimal", "integer", "coalesce", "least", "greatest",
+                        "date_trunc", "current_date", "current_timestamp", "now", "interval",
+                        "month", "year", "day", "date", "case", "when", "then", "else", "end",
+                        "extract", "dow"
+                    }
+                    col_words = [w for w in words if w.lower() not in SQL_KEYWORDS]
+                    if not col_words or not all(w in table.columns for w in col_words):
+                        raise QueryPlanValidationError(
+                            f"Column '{proj.column_name}' does not exist on table '{s_name}.{t_name}'"
+                        )
 
         # 3.1 Projection Data Minimization & Sensitive Attributes Guard (Fail-Closed)
-        SENSITIVE_FINANCIAL = {"basic_salary", "salary", "wage", "gross_pay", "net_pay", "basic_pay", "deduction", "allowance", "bonus", "hourly_rate", "payment_rate", "salary_hour", "revised_salary"}
+        SENSITIVE_FINANCIAL = {
+            "basic_salary", "salary", "wage", "gross_pay", "net_pay", "basic_pay",
+            "deduction", "allowance", "bonus", "hourly_rate", "payment_rate",
+            "salary_hour", "revised_salary", "asset_purchase_cost", "purchase_cost",
+            "cost", "price"
+        }
         SENSITIVE_BANKING = {"bank_name", "account_number", "routing_number", "iban", "swift", "branch", "ifsc"}
         SENSITIVE_CONTACT = {"phone", "mobile", "telephone", "emergency_contact", "contact_number"}
         SENSITIVE_PII = {"dob", "date_of_birth", "age", "marital_status", "children", "passport_number", "ssn", "national_id"}
         SENSITIVE_LOCATION = {"address", "address_line", "postal_code", "zip_code"}
         SENSITIVE_CREDENTIALS = {"password", "secret", "token", "hash", "salt"}
+        MEDIA_KEYWORDS = ("image", "photo", "picture", "avatar", "attachment", "document", "file", "blob")
 
         q_low = plan.user_query.lower()
 
@@ -104,6 +128,9 @@ class QueryPlanValidator:
             if any(kw in q_low for kw in ("whose salary", "with salary", "salary >", "salary above", "salary <", "salary less", "salary greater")):
                 if not any(ask in q_low for ask in ("and their salary", "with their salary", "show salary", "what is their salary")):
                     is_fin_auth = False
+
+        has_cost_intent = any(w in q_low for w in ("cost", "price", "how much", "amount", "worth", "value", "expensive", "cheap"))
+        has_media_intent = any(w in q_low for w in ("image", "photo", "picture", "avatar", "attachment", "document", "file", "download", "view image", "show picture"))
 
         is_phone_auth = any(w in q_low for w in ("phone", "mobile", "cell", "telephone", "call", "contact number"))
         if is_phone_auth and "whose phone" in q_low and "available" in q_low and not any(ask in q_low for ask in ("show phone", "what is", "and their phone")):
@@ -124,7 +151,11 @@ class QueryPlanValidator:
                 raise QueryPlanValidationError(
                     f"Projection security violation: Credentials column '{proj.column_name}' must never be projected [SECURITY_CRITICAL]"
                 )
-            if (col_low in SENSITIVE_FINANCIAL or any(s in col_low for s in ("salary", "wage"))) and not is_fin_auth:
+            if any(m in col_low for m in MEDIA_KEYWORDS) and not has_media_intent:
+                raise QueryPlanValidationError(
+                    f"Projection security violation: Unrequested media attachment '{proj.table_alias}.{proj.column_name}' cannot be projected [DATA_MINIMIZATION_VIOLATION]"
+                )
+            if (col_low in SENSITIVE_FINANCIAL or any(s in col_low for s in ("salary", "wage"))) and not (is_fin_auth or has_cost_intent):
                 raise QueryPlanValidationError(
                     f"Projection security violation: Unrequested financial column '{proj.table_alias}.{proj.column_name}' cannot be projected [DATA_MINIMIZATION_VIOLATION]"
                 )
