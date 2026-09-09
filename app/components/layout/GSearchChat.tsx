@@ -7,7 +7,7 @@ export default function GSearchChat() {
   const pathname = usePathname();
 
   // Do not load the chat widget on the widget page itself, or on the dashboard
-  if (pathname?.startsWith("/widget") || pathname?.startsWith("/dashboard")) {
+  if (pathname?.startsWith("/widget")) {
     return null;
   }
 
@@ -42,6 +42,7 @@ export default function GSearchChat() {
       data-lead-timing="pre-chat"
       data-escalation-enabled="false"
       data-escalation-link=""
+      data-button-bottom="55px"
     />
   );
 }
