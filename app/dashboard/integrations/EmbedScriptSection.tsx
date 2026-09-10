@@ -124,7 +124,7 @@ export default function EmbedScriptSection() {
   const [chatType, setChatType] = useState<"icon" | "search">("icon");
   const [searchMobileIcon, setSearchMobileIcon] = useState<boolean>(false);
   const [position, setPosition] = useState<"center" | "right">("center");
-  const [placeholderText, setPlaceholderText] = useState("Ask about web scraping, Zyte API, anything data extraction...");
+  const [placeholderText, setPlaceholderText] = useState("Ask anything");
   const [themeColor, setThemeColor] = useState("#0fb5a1");
   const [themeTextColor, setThemeTextColor] = useState<string>("#ffffff");
   const [btnBgColor, setBtnBgColor] = useState<string>("#0fb5a1");
@@ -171,7 +171,7 @@ export default function EmbedScriptSection() {
   const [draftChatType, setDraftChatType] = useState<"icon" | "search">("icon");
   const [draftSearchMobileIcon, setDraftSearchMobileIcon] = useState<boolean>(false);
   const [draftPosition, setDraftPosition] = useState<"center" | "right">("center");
-  const [draftPlaceholderText, setDraftPlaceholderText] = useState("Ask about web scraping, Zyte API, anything data extraction...");
+  const [draftPlaceholderText, setDraftPlaceholderText] = useState("Ask anything");
   const [draftThemeColor, setDraftThemeColor] = useState("#0fb5a1");
   const [draftThemeTextColor, setDraftThemeTextColor] = useState<string>("#ffffff");
   const [draftBtnBgColor, setDraftBtnBgColor] = useState<string>("#0fb5a1");
@@ -229,7 +229,7 @@ export default function EmbedScriptSection() {
   const resetToDefaults = () => {
     setChatType("icon");
     setPosition("center");
-    setPlaceholderText("Ask about web scraping, Zyte API, anything data extraction...");
+    setPlaceholderText("Ask anything");
     setThemeColor("#0fb5a1");
     setThemeTextColor("#ffffff");
     setBtnBgColor("#0fb5a1");
@@ -263,7 +263,7 @@ export default function EmbedScriptSection() {
     setDraftChatType("icon");
     setDraftSearchMobileIcon(false);
     setDraftPosition("center");
-    setDraftPlaceholderText("Ask about web scraping, Zyte API, anything data extraction...");
+    setDraftPlaceholderText("Ask anything");
     setDraftThemeColor("#0fb5a1");
     setDraftThemeTextColor("#ffffff");
     setDraftBtnBgColor("#0fb5a1");
@@ -360,7 +360,7 @@ export default function EmbedScriptSection() {
   const [previewMessages, setPreviewMessages] = useState<any[]>([]);
   const [previewInput, setPreviewInput] = useState("");
   const [previewIsTyping, setPreviewIsTyping] = useState(false);
-  const [previewIsOpen, setPreviewIsOpen] = useState(true);
+  const [previewIsOpen, setPreviewIsOpen] = useState(false);
   const [previewLeadFormSubmitted, setPreviewLeadFormSubmitted] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -464,6 +464,9 @@ export default function EmbedScriptSection() {
     setDraftEscalationLink(escalationLink);
 
     setPreviewLeadFormSubmitted(false);
+    setPreviewMessages([]);
+    setPreviewInput("");
+    setPreviewIsOpen(false);
     setIsCustomizerOpen(true);
   };
 
@@ -776,8 +779,7 @@ export default function EmbedScriptSection() {
         ...prev,
         {
           role: "assistant",
-          content: `This is a **live simulated response** using theme color (**${draftThemeColor}**)! \n\nOnce embedded, it streams real-time responses from AI Agent (**${agent?.name || "Gsearch AI"
-            }**).`,
+          content: `This is a live simulated response using theme color (${draftThemeColor})!\n\nOnce embedded, it streams real-time responses from AI Agent (${agent?.name || "Gsearch AI"}).`,
         },
       ]);
     }, 1200);
@@ -1787,86 +1789,126 @@ export default function EmbedScriptSection() {
                   </div>
                 )}
 
-                
-                {draftChatType === "search" && !previewIsOpen && (
+                {/* Search Bar Entry Trigger (When chatType === 'search') */}
+                {draftChatType === "search" && (
                   <div
-                    className={`absolute z-30 w-[90%] bottom-5 ${draftPosition === "center" ? "left-1/2 -translate-x-1/2" : "right-5"
-                      }`}
-                    style={{ maxWidth: draftPosition === "center" ? "90%" : "340px" }}
+                    onClick={() => {
+                      if (!previewIsOpen) setPreviewIsOpen(true);
+                    }}
+                    className={`absolute z-30 w-[94%] bottom-4 cursor-pointer transition-all duration-300 ${
+                      draftPosition === "center" ? "left-1/2 -translate-x-1/2 max-w-[440px]" : "right-4 max-w-[380px]"
+                    }`}
                   >
                     <div
-                      className="p-[1.5px] rounded-[24px] transition-all duration-300 shadow-md sandbox-glow-container"
-                      style={{ background: isDarkTheme ? "#334155" : "#cbd5e1" }}
+                      style={{
+                        padding: "2px",
+                        borderRadius: "26px",
+                        background: `linear-gradient(90deg, ${draftThemeColor}, ${draftThemeColor}ee, #ffffff, ${draftThemeColor}ee, ${draftThemeColor})`,
+                        backgroundSize: "300% 100%",
+                        animation: "borderShift 3s ease infinite",
+                        boxShadow: `0 4px 16px ${draftThemeColor}30`,
+                      }}
                     >
                       <div
                         style={{
-                          backgroundColor: isDarkTheme ? "#090d16" : "#ffffff",
-                          borderColor: isDarkTheme ? "#1e293b" : "#e2e8f0",
+                          display: "flex",
+                          alignItems: "center",
+                          background: isDarkTheme ? "#090d16" : "#ffffff",
+                          borderRadius: "24px",
+                          padding: "6px 8px 6px 16px",
+                          gap: "10px",
+                          minHeight: "44px",
+                          boxSizing: "border-box",
                         }}
-                        className="flex items-center border rounded-[22.5px] px-3.5 py-1.5 gap-2 w-full"
                       >
+                        <span style={{ display: "flex", alignItems: "center", color: "#71717a", cursor: "pointer" }}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="12" cy="12" r="10" />
+                            <polyline points="12 6 12 12 16 14" />
+                          </svg>
+                        </span>
                         <input
                           type="text"
                           value={previewInput}
+                          onFocus={() => {
+                            if (!previewIsOpen) setPreviewIsOpen(true);
+                          }}
                           onChange={(e) => setPreviewInput(e.target.value)}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") handlePreviewSend(previewInput);
                           }}
-                          placeholder={draftPlaceholderText}
+                          placeholder={draftPlaceholderText || "Ask anything"}
                           style={{
                             backgroundColor: "transparent",
-                            color: isDarkTheme ? "#ffffff" : "#1e293b",
+                            color: isDarkTheme ? "#ffffff" : "#18181b",
                             border: "none",
                             outline: "none",
                             flex: 1,
-                            fontSize: "11px",
-                            paddingTop: "4px",
-                            paddingBottom: "4px",
+                            fontSize: "13px",
+                            cursor: "text",
                           }}
                         />
                         <button
-                          onClick={() => handlePreviewSend(previewInput)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handlePreviewSend(previewInput);
+                          }}
                           disabled={!previewInput.trim()}
                           style={{
-                            background: previewInput.trim() ? draftThemeColor : isDarkTheme ? "#1e293b" : "#f1f5f9",
-                            color: previewInput.trim() ? "#ffffff" : isDarkTheme ? "#475569" : "#94a3b8",
+                            width: "30px",
+                            height: "30px",
+                            background: previewInput.trim() ? draftThemeColor : "#f4f4f5",
+                            color: previewInput.trim() ? "#ffffff" : "#a1a1aa",
+                            border: "none",
+                            borderRadius: "50%",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            cursor: previewInput.trim() ? "pointer" : "default",
+                            transition: "all 0.2s",
+                            flexShrink: 0,
                           }}
-                          className="w-6 h-6 rounded-full flex items-center justify-center border-none transition-all duration-200 cursor-pointer"
                         >
-                          ↑
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="12" y1="19" x2="12" y2="5"></line>
+                            <polyline points="5 12 12 5 19 12"></polyline>
+                          </svg>
                         </button>
                       </div>
                     </div>
                   </div>
                 )}
 
-                
+                {/* Floating Chat Window (Preview) */}
                 {previewIsOpen && (
                   <div
                     style={{
                       backgroundColor: isDarkTheme ? "#0f172a" : "#ffffff",
                       borderColor: isDarkTheme ? "#1e293b" : "#e2e8f0",
                     }}
-                    className={`absolute rounded-2xl shadow-2xl flex flex-col border z-40 transition-all duration-300 h-[360px] bottom-[84px] ${isWideLayout
-                      ? "w-[90%] left-1/2 -translate-x-1/2"
-                      : "w-[90%] max-w-[340px] " +
-                      (draftChatType === "icon" && draftButtonAlignment === "left"
-                        ? "left-5"
-                        : "right-5")
-                      }`}
+                    className={`absolute rounded-2xl shadow-lg flex flex-col border border-slate-200/80 dark:border-slate-800 z-40 transition-all duration-300 ${
+                      draftChatType === "search"
+                        ? draftPosition === "center"
+                          ? "w-[94%] max-w-[440px] left-1/2 -translate-x-1/2 bottom-[68px] h-[310px]"
+                          : "w-[94%] max-w-[380px] right-4 bottom-[68px] h-[310px]"
+                        : draftButtonAlignment === "left"
+                          ? "w-[90%] max-w-[340px] left-5 bottom-[84px] h-[360px]"
+                          : "w-[90%] max-w-[340px] right-5 bottom-[84px] h-[360px]"
+                    }`}
                   >
                     
+                    {/* Header */}
                     <div
                       style={{
-                        backgroundColor: isDarkTheme ? "#1e293b" : "#f8fafc",
-                        borderBottom: isDarkTheme ? "1px solid #334155" : "1px solid #e2e8f0",
+                        backgroundColor: isDarkTheme ? "#1e293b" : "#ffffff",
+                        borderBottom: isDarkTheme ? "1px solid #334155" : "1px solid #f0f0f0",
+                        padding: "10px 14px",
                       }}
-                      className={`flex items-center justify-between px-3.5 py-2.5 rounded-t-2xl ${draftHeaderAlignment === "center" ? "text-center" : "text-left"
-                        }`}
+                      className="flex items-center justify-between rounded-t-2xl shrink-0"
                     >
-                      <div className={`flex items-center gap-2 w-full ${draftHeaderAlignment === "center" ? "justify-center" : "justify-start"}`}>
+                      <div className={`flex items-center gap-2.5 w-full ${draftHeaderAlignment === "center" ? "justify-center" : "justify-start"}`}>
                         {draftHeaderLogo && (
-                          <div className="h-6 max-w-[100px] flex items-center">
+                          <div className="h-7 max-w-[100px] flex items-center">
                             {draftHeaderLogo.startsWith("http") || draftHeaderLogo.startsWith("blob:") || draftHeaderLogo.startsWith("data:") || draftHeaderLogo.startsWith("/") ? (
                               <img src={draftHeaderLogo} alt="Header Logo" className="max-h-full max-w-full object-contain" />
                             ) : (
@@ -1874,13 +1916,19 @@ export default function EmbedScriptSection() {
                             )}
                           </div>
                         )}
-                        <div>
+                        <div className={draftHeaderAlignment === "center" ? "text-center" : "text-left"}>
                           <div
-                            style={{ color: isDarkTheme ? "#ffffff" : "#1e293b" }}
-                            className="text-xs font-bold flex items-center gap-1 leading-none"
+                            style={{ color: isDarkTheme ? "#ffffff" : "#171717" }}
+                            className="text-xs font-bold flex items-center gap-1.5 leading-tight"
                           >
                             {draftHeaderName !== undefined && draftHeaderName !== null ? draftHeaderName : (agent?.name || "Gsearch AI")}
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          </div>
+                          <div
+                            style={{ color: isDarkTheme ? "#94a3b8" : "#737373" }}
+                            className="text-[10px] leading-tight mt-0.5"
+                          >
+                            {draftHeaderSubtext !== undefined && draftHeaderSubtext !== null ? draftHeaderSubtext : "The team can also help"}
                           </div>
                         </div>
                       </div>
@@ -1895,20 +1943,20 @@ export default function EmbedScriptSection() {
                         </div>
                       )}
 
-                      <div className="flex items-center gap-1.5 ml-2">
+                      <div className="flex items-center gap-1 ml-2 shrink-0">
                         <button
                           onClick={() => {
                             setPreviewMessages([]);
                             setPreviewInput("");
                           }}
-                          className="border-none bg-transparent text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer text-sm font-semibold p-1 rounded-md transition-all flex items-center justify-center"
+                          className="border-none bg-transparent text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer text-xs font-semibold p-1 rounded-md transition-all flex items-center justify-center"
                           title="New Chat"
                         >
-                          <EditOutlined className="text-sm" />
+                          <EditOutlined className="text-xs" />
                         </button>
                         <button
                           onClick={() => setPreviewIsOpen(false)}
-                          className="border-none bg-transparent text-slate-400 hover:text-slate-700 cursor-pointer text-sm font-semibold p-1"
+                          className="border-none bg-transparent text-slate-400 hover:text-slate-700 cursor-pointer text-xs font-semibold p-1"
                           title="Close chat"
                         >
                           ✕
@@ -1929,35 +1977,32 @@ export default function EmbedScriptSection() {
                     ) : (
                       <>
                        
+                        {/* Messages Area */}
                         <div
                           id="embed-sandbox-chat-messages"
-                          style={{ backgroundColor: isDarkTheme ? "#090d16" : "#f1f5f9" }}
-                          className="flex-1 overflow-y-auto p-3.5 flex flex-col gap-2.5 text-left"
+                          style={{
+                            backgroundColor: isDarkTheme ? "#090d16" : "#f8fafc",
+                            scrollbarWidth: "none",
+                            msOverflowStyle: "none",
+                          }}
+                          className="flex-1 overflow-y-auto p-3.5 flex flex-col gap-3 text-left rounded-b-2xl no-scrollbar [&::-webkit-scrollbar]:hidden"
                         >
                           {(() => {
                             const messagesToRender = previewMessages.length > 0
                               ? previewMessages
-                              : (draftInitialMessage ? [{ role: "assistant", content: draftInitialMessage }] : []);
-
-                            if (messagesToRender.length === 0) {
-                              return (
-                                <div className="flex flex-col items-center justify-center text-center h-full text-slate-400 p-4">
-                                  <MessageOutlined className="text-2xl mb-1.5 opacity-50" />
-                                  <span className="text-[10px]">No messages yet. Send a query to test!</span>
-                                </div>
-                              );
-                            }
+                              : [{ role: "assistant", content: draftInitialMessage || "Hi! I'm your AI Support Agent. How can I help you today?" }];
 
                             return (
                               <>
                                 {messagesToRender.map((msg: any, index: number) => {
                                   const isUser = msg.role === "user";
                                   return (
-                                    <div key={index} className={`flex items-start gap-2 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
+                                    <div key={index} className={`flex items-start gap-2.5 w-full ${isUser ? "flex-row-reverse" : "flex-row"}`}>
                                      
+                                      {/* Avatar */}
                                       {!isUser && draftBotAvatar !== "none" && (
                                         <div
-                                          className="w-6 h-6 rounded-full flex items-center justify-center overflow-hidden shrink-0 mt-1"
+                                          className="w-6 h-6 rounded-full flex items-center justify-center overflow-hidden shrink-0 mt-0.5"
                                           style={{ background: draftThemeColor }}
                                         >
                                           {draftBotAvatar.startsWith("http") || draftBotAvatar.startsWith("blob:") || draftBotAvatar.startsWith("data:") ? (
@@ -1975,49 +2020,55 @@ export default function EmbedScriptSection() {
                                           )}
                                         </div>
                                       )}
-                                      <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
-                                        <span className="text-[8px] text-slate-400 mb-0.5">{isUser ? "You" : draftAgentLabel !== undefined && draftAgentLabel !== null ? draftAgentLabel : (agent?.name || "Agent")}</span>
+                                      <div className={`flex flex-col max-w-[85%] ${isUser ? "items-end" : "items-start"}`}>
+                                        <span className="text-[9px] text-slate-400 font-medium mb-1">
+                                          {isUser ? "You" : draftAgentLabel !== undefined && draftAgentLabel !== null ? draftAgentLabel : (agent?.name || "Agent")}
+                                        </span>
                                         <div
                                           style={{
                                             background: isUser
-                                              ? isDarkTheme ? "#1e293b" : "#f1f5f9"
+                                              ? isDarkTheme ? "#1e293b" : "#e0f2fe"
                                               : isDarkTheme ? "#0f172a" : "#ffffff",
                                             borderColor: isUser
-                                              ? isDarkTheme ? "#334155" : "#e2e8f0"
-                                              : isDarkTheme ? "#1e293b" : "#f1f5f9",
-                                            color: isDarkTheme ? "#ffffff" : "#1e293b",
+                                              ? isDarkTheme ? "#334155" : "#bae6fd"
+                                              : isDarkTheme ? "#1e293b" : "#e2e8f0",
+                                            color: isUser
+                                              ? isDarkTheme ? "#ffffff" : "#0369a1"
+                                              : isDarkTheme ? "#ffffff" : "#1e293b",
                                           }}
-                                          className="px-2.5 py-1.5 rounded-2xl text-[11px] max-w-[85%] border shadow-sm leading-normal relative group"
+                                          className="px-3 py-2 rounded-2xl text-[11.5px] border shadow-xs leading-relaxed whitespace-pre-wrap break-words w-fit max-w-full text-left inline-block"
                                         >
                                           {msg.content}
                                         </div>
 
                                         {!isUser && (draftDisplayCopyBtn || draftDisplayFeedback || draftDisplaySources) && (
-                                          <div className="flex items-center gap-2 mt-1 ml-1 text-slate-400 w-full">
-                                            {draftDisplayCopyBtn && (
-                                              <Tooltip title="Copy Answer">
-                                                <CopyOutlined
-                                                  onClick={() => {
-                                                    navigator.clipboard?.writeText(msg.content);
-                                                    notification.success({ message: "Copied answer to clipboard", placement: "topRight" });
-                                                  }}
-                                                  className="text-xs text-slate-400 hover:text-[#0fb5a1] cursor-pointer"
-                                                />
-                                              </Tooltip>
-                                            )}
-                                            {draftDisplayFeedback && (
-                                              <>
-                                                <Tooltip title="Helpful">
-                                                  <LikeOutlined className="text-xs text-slate-400 hover:text-emerald-500 cursor-pointer" />
+                                          <div className="flex items-center justify-between gap-2 mt-1.5 px-0.5 text-slate-400 w-full">
+                                            <div className="flex items-center gap-2">
+                                              {draftDisplayCopyBtn && (
+                                                <Tooltip title="Copy Answer">
+                                                  <CopyOutlined
+                                                    onClick={() => {
+                                                      navigator.clipboard?.writeText(msg.content);
+                                                      notification.success({ message: "Copied answer to clipboard", placement: "topRight" });
+                                                    }}
+                                                    className="text-xs text-slate-400 hover:text-[#0fb5a1] cursor-pointer transition-colors"
+                                                  />
                                                 </Tooltip>
-                                                <Tooltip title="Not helpful">
-                                                  <DislikeOutlined className="text-xs text-slate-400 hover:text-rose-500 cursor-pointer" />
-                                                </Tooltip>
-                                              </>
-                                            )}
+                                              )}
+                                              {draftDisplayFeedback && (
+                                                <>
+                                                  <Tooltip title="Helpful">
+                                                    <LikeOutlined className="text-xs text-slate-400 hover:text-emerald-500 cursor-pointer transition-colors" />
+                                                  </Tooltip>
+                                                  <Tooltip title="Not helpful">
+                                                    <DislikeOutlined className="text-xs text-slate-400 hover:text-rose-500 cursor-pointer transition-colors" />
+                                                  </Tooltip>
+                                                </>
+                                              )}
+                                            </div>
                                             {draftDisplaySources && (
-                                              <div className="text-[11px] text-[#000000] font-bold flex items-center gap-1 cursor-pointer ml-25">
-                                                <SiCrowdsource className="text-slate-800 text-[13px]" />
+                                              <div className="text-[11px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1 cursor-pointer hover:text-[#0fb5a1] transition-colors">
+                                                <SiCrowdsource className="text-slate-700 dark:text-slate-300 text-[12px]" />
                                                 <span>Source</span>
                                               </div>
                                             )}
@@ -2053,51 +2104,87 @@ export default function EmbedScriptSection() {
                           <div ref={messagesEndRef} />
                         </div>
 
-                       
-                        <div
-                          className="p-2.5 border-t rounded-b-2xl"
-                          style={{
-                            backgroundColor: isDarkTheme ? "#0f172a" : "#ffffff",
-                            borderTopColor: isDarkTheme ? "#1e293b" : "#f1f5f9",
-                          }}
-                        >
+                        {/* Chat Window Bottom Input (Only in Icon Mode) */}
+                        {draftChatType !== "search" && (
                           <div
-                            className="flex items-center border rounded-full px-2.5 py-1 gap-1.5"
+                            className="p-2.5 shrink-0"
                             style={{
-                              backgroundColor: isDarkTheme ? "#090d16" : "#f8fafc",
-                              borderColor: isDarkTheme ? "#1e293b" : "#e2e8f0",
+                              backgroundColor: isDarkTheme ? "#0f172a" : "#ffffff",
+                              borderTop: isDarkTheme ? "1px solid #1e293b" : "1px solid #f1f5f9",
                             }}
                           >
-                            <input
-                              type="text"
-                              value={previewInput}
-                              onChange={(e) => setPreviewInput(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") handlePreviewSend(previewInput);
-                              }}
-                              placeholder={draftChatType === "search" ? "Ask a follow up..." : "Type your message..."}
+                            <div
                               style={{
-                                backgroundColor: "transparent",
-                                color: isDarkTheme ? "#ffffff" : "#1e293b",
-                                border: "none",
-                                outline: "none",
-                                flex: 1,
-                                fontSize: "11px",
+                                padding: "2px",
+                                borderRadius: "26px",
+                                background: `linear-gradient(90deg, ${draftThemeColor}, ${draftThemeColor}ee, #ffffff, ${draftThemeColor}ee, ${draftThemeColor})`,
+                                backgroundSize: "300% 100%",
+                                animation: "borderShift 3s ease infinite",
+                                boxShadow: `0 2px 10px ${draftThemeColor}20`,
                               }}
-                            />
-                            <button
-                              onClick={() => handlePreviewSend(previewInput)}
-                              disabled={!previewInput.trim()}
-                              style={{
-                                background: previewInput.trim() ? draftThemeColor : "#e2e8f0",
-                                color: previewInput.trim() ? "#ffffff" : "#94a3b8",
-                              }}
-                              className="w-5 h-5 rounded-full flex items-center justify-center border-none cursor-pointer text-xs transition-colors duration-200"
                             >
-                              ↑
-                            </button>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  background: isDarkTheme ? "#090d16" : "#ffffff",
+                                  borderRadius: "24px",
+                                  padding: "4px 6px 4px 14px",
+                                  gap: "10px",
+                                  minHeight: "38px",
+                                  boxSizing: "border-box",
+                                }}
+                              >
+                                <span style={{ display: "flex", alignItems: "center", color: "#71717a", cursor: "default" }}>
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <circle cx="12" cy="12" r="10" />
+                                    <polyline points="12 6 12 12 16 14" />
+                                  </svg>
+                                </span>
+                                <input
+                                  type="text"
+                                  value={previewInput}
+                                  onChange={(e) => setPreviewInput(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") handlePreviewSend(previewInput);
+                                  }}
+                                  placeholder={draftPlaceholderText || "Ask anything"}
+                                  style={{
+                                    backgroundColor: "transparent",
+                                    color: isDarkTheme ? "#ffffff" : "#18181b",
+                                    border: "none",
+                                    outline: "none",
+                                    flex: 1,
+                                    fontSize: "12px",
+                                  }}
+                                />
+                                <button
+                                  onClick={() => handlePreviewSend(previewInput)}
+                                  disabled={!previewInput.trim()}
+                                  style={{
+                                    width: "26px",
+                                    height: "26px",
+                                    background: previewInput.trim() ? draftThemeColor : "#f4f4f5",
+                                    color: previewInput.trim() ? "#ffffff" : "#a1a1aa",
+                                    border: "none",
+                                    borderRadius: "50%",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    cursor: previewInput.trim() ? "pointer" : "default",
+                                    transition: "all 0.2s",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                    <line x1="12" y1="19" x2="12" y2="5"></line>
+                                    <polyline points="5 12 12 5 19 12"></polyline>
+                                  </svg>
+                                </button>
+                              </div>
+                            </div>
                           </div>
-                        </div>
+                        )}
                       </>
                     )}
                   </div>
@@ -2166,6 +2253,20 @@ export default function EmbedScriptSection() {
           }
         .custom-widget-tabs .ant-tabs-tab-active .ant-tabs-tab-btn {
           color: #ffffff !important;
+        }
+        #embed-sandbox-chat-messages::-webkit-scrollbar,
+        .no-scrollbar::-webkit-scrollbar,
+        .custom-widget-modal *::-webkit-scrollbar {
+          display: none !important;
+          width: 0px !important;
+          height: 0px !important;
+          background: transparent !important;
+        }
+        #embed-sandbox-chat-messages,
+        .no-scrollbar,
+        .custom-widget-modal * {
+          -ms-overflow-style: none !important;
+          scrollbar-width: none !important;
         }
       `}</style>
     </Flex>

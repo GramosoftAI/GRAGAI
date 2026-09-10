@@ -1000,6 +1000,15 @@ export default function ChatPlaygroundPage() {
   const [wsStatus, setWsStatus] = useState<"connecting" | "open" | "closed" | "error">("closed");
   const [getAgents] = useAxios<AgentListResponse>({ endpoint: "GETAGENTLIST", hideErrorMsg: true });
   const bottomRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  const isAtBottomRef = useRef(true);
+
+  const handleScroll = () => {
+    if (!chatContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
+    isAtBottomRef.current = scrollHeight - scrollTop - clientHeight <= 120;
+  };
+
   const ws = useRef<WebSocket | null>(null);
   const streamingTextRef = useRef<string>("");
   const streamingMessageIdRef = useRef<string | null>(null);
@@ -1344,6 +1353,7 @@ export default function ChatPlaygroundPage() {
             } as SourceMetadata));
           }
 
+          const measuredResponseTime = lastResponseTimeSecRef.current || undefined;
           if (accumulated) {
             setMessages((prev: any) => [
               ...prev,
@@ -1356,7 +1366,7 @@ export default function ChatPlaygroundPage() {
                   hour: "2-digit",
                   minute: "2-digit",
                 }),
-                responseTime: lastResponseTimeSecRef.current || undefined
+                responseTime: measuredResponseTime
               },
             ]);
           }
@@ -1409,7 +1419,7 @@ export default function ChatPlaygroundPage() {
                       msg.responseTime ??
                       msg.latency ??
                       existingMsg?.responseTime ??
-                      ((isLastAssistant && lastResponseTimeSecRef.current !== null) ? lastResponseTimeSecRef.current : undefined);
+                      (isLastAssistant ? (measuredResponseTime ?? lastResponseTimeSecRef.current ?? undefined) : undefined);
 
                     return {
                       id: msgId,
@@ -1505,8 +1515,10 @@ export default function ChatPlaygroundPage() {
   }, [connectWs]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingText]);
+    if (isAtBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: isTyping ? "auto" : "smooth" });
+    }
+  }, [messages, streamingText, isTyping]);
 
 
   const startNewChat = (selectedAgent: { id: string; name: string }, currentSessionsList?: ChatSession[]) => {
@@ -1518,6 +1530,7 @@ export default function ChatPlaygroundPage() {
       connectWs();
     }
     resetChatStates();
+    isAtBottomRef.current = true;
 
     const newSessionId = `session_${Date.now()}`;
     const newSession: any = {
@@ -1539,6 +1552,7 @@ export default function ChatPlaygroundPage() {
       connectWs();
     }
     resetChatStates();
+    isAtBottomRef.current = true;
 
     setCurrentSessionId(session.id);
     currentSessionIdRef.current = session.id;
@@ -1656,12 +1670,16 @@ export default function ChatPlaygroundPage() {
     const updatedMessages = messages.slice(0, userMessageIndex + 1);
     setMessages(updatedMessages);
 
+    let targetSessionId = currentSessionId;
+    activeQuerySessionIdRef.current = targetSessionId;
+    currentSessionIdRef.current = targetSessionId;
     queryStartTimeRef.current = Date.now();
     lastResponseTimeSecRef.current = null;
+    isAtBottomRef.current = true;
     ws.current?.send(JSON.stringify({
       query: userMsg.content,
       file: userMsg.file ? { name: userMsg.file.name, type: userMsg.file.type } : null,
-      session_id: currentSessionId && !currentSessionId.startsWith("session_") ? currentSessionId : null,
+      session_id: targetSessionId && !targetSessionId.startsWith("session_") ? targetSessionId : null,
       embed: false
     }));
 
@@ -1765,6 +1783,7 @@ export default function ChatPlaygroundPage() {
     queryStartTimeRef.current = Date.now();
     lastResponseTimeSecRef.current = null;
     lastUserQueryRef.current = trimmed;
+    isAtBottomRef.current = true;
     setMessages((prev: any) => [...prev, {
       role: "user",
       content: trimmed,
@@ -1816,6 +1835,7 @@ export default function ChatPlaygroundPage() {
 
     queryStartTimeRef.current = Date.now();
     lastResponseTimeSecRef.current = null;
+    isAtBottomRef.current = true;
     streamingTextRef.current = "";
     streamingMessageIdRef.current = null;
     wsSourcesRef.current = [];
@@ -2766,7 +2786,11 @@ export default function ChatPlaygroundPage() {
         </div>
 
        
-        <div className="flex-1 overflow-y-auto px-4 md:px-12 py-6 md:py-10 space-y-6 custom-scrollbar bg-dots-pattern">
+        <div 
+          ref={chatContainerRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-y-auto px-4 md:px-12 py-6 md:py-10 space-y-6 custom-scrollbar bg-dots-pattern"
+        >
           {messages.length === 0 && !isTyping && (
             <Flex vertical align="center" justify="center" className="h-full select-none my-auto space-y-4">
               <h1 className="m-0 text-[var(--app-text)] font-extrabold text-xl sm:text-2xl md:text-4xl tracking-tight text-center max-w-xl px-4 animate-in fade-in duration-500">
@@ -2846,20 +2870,18 @@ export default function ChatPlaygroundPage() {
                           </Tooltip>
                         ) : (
                           <>
-                            <Tooltip title={isTyping ? "Generation in progress" : "Helpful"} placement="bottom">
+                            <Tooltip title="Helpful" placement="bottom">
                               <button
-                                onClick={() => !isTyping && handleThumbsUp(msg.id)}
-                                disabled={isTyping}
-                                className={`p-2 transition-colors ${isTyping ? "text-gray-400 cursor-not-allowed opacity-40" : `cursor-pointer hover:opacity-80 ${msg.feedback === "thumbs_up" ? "text-emerald-500 font-bold" : "text-[var(--app-text)] font-bold"}`}`}
+                                onClick={() => handleThumbsUp(msg.id)}
+                                className={`p-2 transition-colors cursor-pointer hover:opacity-80 ${msg.feedback === "thumbs_up" ? "text-emerald-500 font-bold" : "text-[var(--app-text)] font-bold"}`}
                               >
                                 <FiThumbsUp size={16} strokeWidth={msg.feedback === "thumbs_up" ? 2.5 : 2} fill="none" />
                               </button>
                             </Tooltip>
-                            <Tooltip title={isTyping ? "Generation in progress" : "Not helpful"} placement="bottom">
+                            <Tooltip title="Not helpful" placement="bottom">
                               <button
-                                onClick={() => !isTyping && handleThumbsDown(msg.id)}
-                                disabled={isTyping}
-                                className={`p-2 transition-colors ${isTyping ? "text-gray-400 cursor-not-allowed opacity-40" : `cursor-pointer hover:opacity-80 ${msg.feedback === "thumbs_down" ? "text-rose-500 font-bold" : "text-[var(--app-text)] font-bold"}`}`}
+                                onClick={() => handleThumbsDown(msg.id)}
+                                className={`p-2 transition-colors cursor-pointer hover:opacity-80 ${msg.feedback === "thumbs_down" ? "text-rose-500 font-bold" : "text-[var(--app-text)] font-bold"}`}
                               >
                                 <FiThumbsDown size={16} strokeWidth={msg.feedback === "thumbs_down" ? 2.5 : 2} fill="none" />
                               </button>
