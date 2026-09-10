@@ -1301,7 +1301,9 @@ class QueryPlanner:
         group_by: List[str] = []
 
         BRIDGE_TABLES = {
-            "employee_employeeworkinformation", "asset_assetassignment",
+            "employee_employeeworkinformation",
+            # NOTE: asset_assetassignment is intentionally NOT a bridge here so that
+            # assigned_date / return_date / return_status can be projected for asset queries.
             "project_project_members", "project_task_task_members",
             "base_rotatingshiftassign", "payroll_payslip_installment_ids",
             "attendance_attendancerequestcomment_files", "leave_leaverequestcomment",
@@ -1565,22 +1567,90 @@ class QueryPlanner:
 
                         elif t_low == "asset_asset":
                             if c_low in ("asset_name", "name"):
+                                # Always project asset name when asset intent is present;
+                                # also covers "laptop", "device", "computer" queries
                                 should_project = True
-                            elif c_low in ("asset_tracking_id", "asset_id", "tracking_id") and any(k in q_lower for k in ("id", "asset id", "tracking")):
-                                should_project = True
-                            elif c_low in ("asset_status", "status") and any(k in q_lower for k in ("status", "state", "condition")):
-                                should_project = True
-                            elif c_low in ("asset_purchase_cost", "purchase_cost", "cost", "price") and any(k in q_lower for k in ("cost", "price", "how much", "amount", "worth", "value")):
-                                should_project = True
-                            elif c_low in ("asset_purchase_date", "purchase_date", "purchased_date") and any(k in q_lower for k in ("purchased", "bought", "when was", "purchase date", "date of purchase")):
-                                should_project = True
-                            elif c_low in ("expiry_date", "expiration_date", "warranty_date", "warranty_end_date") and any(k in q_lower for k in ("expire", "expired", "expiring", "warranty")):
-                                if any(k in q_lower for k in ("expire", "expired", "expiring")):
-                                    if c_low == "expiry_date":
-                                        should_project = True
-                                elif c_low in ("warranty_date", "expiry_date"):
+                            elif c_low == "asset_tracking_id":
+                                # Project tracking ID when ID is mentioned OR as a key
+                                # identifier for ownership / listing queries
+                                if any(k in q_lower for k in (
+                                    "id", "asset id", "tracking", "number",
+                                    "which asset", "what asset", "asset number"
+                                )):
                                     should_project = True
-                            elif c_low == "notify_before" and any(k in q_lower for k in ("expiring", "notify", "soon")):
+                            elif c_low == "asset_status":
+                                if any(k in q_lower for k in (
+                                    "status", "state", "condition", "active",
+                                    "available", "in use", "assigned"
+                                )):
+                                    should_project = True
+                            elif c_low == "asset_purchase_cost":
+                                if any(k in q_lower for k in (
+                                    "cost", "price", "how much", "amount",
+                                    "worth", "value", "purchase cost", "paid"
+                                )):
+                                    should_project = True
+                            elif c_low == "asset_purchase_date":
+                                if any(k in q_lower for k in (
+                                    "purchased", "bought", "when was", "purchase date",
+                                    "date of purchase", "acquisition"
+                                )):
+                                    should_project = True
+                            elif c_low == "expiry_date":
+                                # Project expiry_date for expire/expiring/expired queries
+                                if any(k in q_lower for k in (
+                                    "expire", "expired", "expiring", "expiry",
+                                    "expiration", "soon", "warranty"
+                                )):
+                                    should_project = True
+                            elif c_low == "warranty_date":
+                                # Project warranty_date for warranty-related queries
+                                if any(k in q_lower for k in (
+                                    "warranty", "warrant", "expiry", "expire",
+                                    "expired", "expiring"
+                                )):
+                                    should_project = True
+                            elif c_low == "notify_before":
+                                if any(k in q_lower for k in (
+                                    "expiring", "notify", "soon", "alert", "reminder"
+                                )):
+                                    should_project = True
+                            elif c_low == "owner_id":
+                                # Project owner FK when ownership is explicitly asked
+                                if any(k in q_lower for k in (
+                                    "owner", "owns", "who has", "who holds",
+                                    "who currently", "assigned to"
+                                )):
+                                    should_project = True
+                            elif c_low == "vendor_name":
+                                if any(k in q_lower for k in (
+                                    "vendor", "supplier", "manufacturer", "brand"
+                                )):
+                                    should_project = True
+
+                        elif t_low == "asset_assetassignment":
+                            # Projection for the assignment bridge between assets and employees.
+                            # Only expose date / status columns – never the raw FK _id fields.
+                            if c_low == "assigned_date":
+                                should_project = True
+                            elif c_low == "return_date" and any(
+                                k in q_lower for k in (
+                                    "return", "returned", "return date",
+                                    "when returned", "handed back"
+                                )
+                            ):
+                                should_project = True
+                            elif c_low == "return_status" and any(
+                                k in q_lower for k in (
+                                    "return", "returned", "status", "condition"
+                                )
+                            ):
+                                should_project = True
+                            elif c_low == "requested_date" and any(
+                                k in q_lower for k in (
+                                    "requested", "request date", "when requested"
+                                )
+                            ):
                                 should_project = True
 
                         elif t_low == "payroll_contract":
@@ -2408,7 +2478,10 @@ class QueryPlanner:
                                     elif fk_col in ("employee_id_id", "employee_id") and "employee" in ref_tbl:
                                         score += 100.0
                                     elif fk_col == "assigned_by_employee_id_id":
-                                        score -= 50.0
+                                        # In asset queries we always want the RECIPIENT of the asset,
+                                        # not who assigned it.  Give a very strong penalty so this
+                                        # FK is never selected when assigned_to_employee_id_id is available.
+                                        score -= 999.0 if has_asset_intent else 50.0
                                     elif fk_col == "owner_id" and has_asset_intent and "owner" not in q_lower:
                                         score -= 100.0
                                     elif fk_col in ("asset_id_id", "asset_id") and "asset" in ref_tbl:
@@ -2491,6 +2564,27 @@ class QueryPlanner:
             jp for jp in all_join_plans
             if jp.source_table_alias in needed_aliases and jp.target_table_alias in needed_aliases
         ]
+
+        # ── Asset join correction pass ────────────────────────────────────────
+        # In any asset-intent query we always want to join employee_employee via
+        # assigned_to_employee_id_id (who HAS the asset), never via
+        # assigned_by_employee_id_id (who ASSIGNED the asset).
+        # This pass runs after all join-building phases so it is the final word.
+        if has_asset_intent:
+            for jp in join_plans:
+                src_tbl = alias_to_table.get(jp.source_table_alias)
+                tgt_tbl = alias_to_table.get(jp.target_table_alias)
+                if src_tbl and tgt_tbl:
+                    # Case A: source=asset_assetassignment, target=employee_employee
+                    if (src_tbl.table_name.lower() == "asset_assetassignment"
+                            and tgt_tbl.table_name.lower() == "employee_employee"):
+                        if jp.source_column == "assigned_by_employee_id_id":
+                            jp.source_column = "assigned_to_employee_id_id"
+                    # Case B: source=employee_employee, target=asset_assetassignment
+                    elif (src_tbl.table_name.lower() == "employee_employee"
+                            and tgt_tbl.table_name.lower() == "asset_assetassignment"):
+                        if jp.target_column == "assigned_by_employee_id_id":
+                            jp.target_column = "assigned_to_employee_id_id"
 
         # Cartesian product defense: prune any table that is not connected to primary_alias via join_plans
         if len(table_plans) > 1:
